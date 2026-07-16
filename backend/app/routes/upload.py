@@ -1,0 +1,439 @@
+import json
+import os
+import re
+import uuid
+from pathlib import Path
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from sqlalchemy.orm import Session
+from app.dependencies import get_db
+from app.models import Article
+from app.schemas import ArticleResponse
+
+router = APIRouter(prefix="/api/upload", tags=["upload"])
+
+# ─── Config ────────────────────────────────────────
+
+UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads"))
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+LLM_API_BASE = os.getenv("LLM_API_BASE", "https://api.openai.com/v1")
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+
+# Ensure upload directory exists
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+# Supported formats
+TEXT_EXTENSIONS = {'.txt', '.md', '.markdown', '.json', '.xml', '.csv', '.yaml', '.yml', '.py', '.js', '.ts', '.html', '.css'}
+WORD_EXTENSIONS = {'.docx'}
+EXCEL_EXTENSIONS = {'.xlsx', '.xls'}
+PPT_EXTENSIONS = {'.pptx', '.ppt'}
+PDF_EXTENSIONS = {'.pdf'}
+AUDIO_EXTENSIONS = {'.mp3', '.wav', '.m4a', '.flac', '.ogg', '.wma'}
+VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.webm', '.wmv'}
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.bmp', '.ico', '.tiff', '.tif'}
+
+
+# ─── File parsers ──────────────────────────────────
+
+async def parse_text(file: UploadFile) -> str:
+    """Parse plain text files."""
+    content = await file.read()
+    return content.decode("utf-8", errors="replace")
+
+
+def parse_docx(file_path: str) -> str:
+    """Parse Word documents."""
+    from docx import Document
+    doc = Document(file_path)
+    paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+    return "\n\n".join(paragraphs)
+
+
+def parse_xlsx(file_path: str) -> str:
+    """Parse Excel files — iterate all sheets, join cell values."""
+    from openpyxl import load_workbook
+    wb = load_workbook(file_path, data_only=True)
+    parts: list[str] = []
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        parts.append(f"## Sheet: {sheet_name}")
+        rows: list[str] = []
+        for row in ws.iter_rows(values_only=True):
+            cells = [str(c) if c is not None else "" for c in row]
+            text = " | ".join(cells).strip()
+            if text:
+                rows.append(text)
+        parts.append("\n".join(rows))
+    return "\n\n".join(parts)
+
+
+def parse_pptx(file_path: str) -> str:
+    """Parse PowerPoint files."""
+    from pptx import Presentation
+    prs = Presentation(file_path)
+    parts: list[str] = []
+    for i, slide in enumerate(prs.slides):
+        slide_texts: list[str] = []
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                for para in shape.text_frame.paragraphs:
+                    text = para.text.strip()
+                    if text:
+                        slide_texts.append(text)
+        if slide_texts:
+            parts.append(f"## Slide {i + 1}\n" + "\n".join(slide_texts))
+    return "\n\n".join(parts)
+
+
+def parse_pdf(file_path: str) -> str:
+    """Parse PDF files."""
+    from PyPDF2 import PdfReader
+    reader = PdfReader(file_path)
+    parts: list[str] = []
+    for i, page in enumerate(reader.pages):
+        text = page.extract_text()
+        if text and text.strip():
+            parts.append(text.strip())
+    return "\n\n".join(parts)
+
+
+async def parse_image(file_path: str, original_name: str) -> str:
+    """Describe image content via vision LLM."""
+    import base64
+    import httpx
+
+    if not LLM_API_KEY:
+        return f"# 图片：{original_name}\n\n> 未配置 LLM API，无法自动描述图片内容。请手动添加。"
+
+    # Read and encode image
+    with open(file_path, "rb") as f:
+        image_data = base64.b64encode(f.read()).decode("utf-8")
+
+    # Determine MIME type
+    ext = Path(original_name).suffix.lower()
+    mime_map = {
+        '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+        '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+        '.bmp': 'image/bmp', '.ico': 'image/x-icon', '.tiff': 'image/tiff', '.tif': 'image/tiff',
+    }
+    mime = mime_map.get(ext, 'image/png')
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"{LLM_API_BASE.rstrip('/')}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {LLM_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": LLM_MODEL,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "请用中文详细描述这张图片的内容（不超过300字）。如果是文档截图、表格、图表，请尽可能提取其中的文字信息。",
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:{mime};base64,{image_data}",
+                                        "detail": "high",
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                    "max_tokens": 800,
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                desc = data["choices"][0]["message"]["content"].strip()
+                return f"# 图片描述：{original_name}\n\n{desc}"
+    except Exception:
+        pass
+
+    return f"# 图片：{original_name}\n\n> 图片描述生成失败。请手动添加文章内容。"
+
+
+async def parse_media(file: UploadFile) -> str:
+    """Handle audio/video — try LLM transcription, fallback to metadata."""
+    # Try using the LLM API for transcription
+    if LLM_API_KEY:
+        try:
+            result = await transcribe_media(file)
+            if result and result.strip():
+                return result
+        except Exception:
+            pass
+
+    # Fallback: return metadata as content
+    return (
+        f"# 音视频文件\n\n"
+        f"- 文件名：{file.filename}\n"
+        f"- 类型：{file.content_type}\n"
+        f"- 大小：{file.size} bytes\n\n"
+        f"> 注意：无法自动转写此文件的内容。请手动添加文章内容或配置支持音视频转写的 API。"
+    )
+
+
+async def transcribe_media(file: UploadFile) -> str:
+    """Attempt to transcribe audio/video via LLM API."""
+    import httpx
+
+    # Re-read file content
+    content = await file.read()
+    await file.seek(0)
+
+    # Try the audio/speech endpoint if available
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            # OpenAI-compatible transcription endpoint
+            resp = await client.post(
+                f"{LLM_API_BASE.rstrip('/').replace('/chat/completions', '')}/audio/transcriptions",
+                headers={"Authorization": f"Bearer {LLM_API_KEY}"},
+                files={"file": (file.filename or "audio", content, file.content_type or "application/octet-stream")},
+                data={"model": "whisper-1"},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("text", "")
+    except Exception:
+        pass
+
+    # Try sending as a chat message with file reference
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            # Some LLM APIs support describing media content
+            resp = await client.post(
+                f"{LLM_API_BASE.rstrip('/')}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {LLM_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": LLM_MODEL,
+                    "messages": [
+                        {"role": "system", "content": "请用中文简要描述这个文件的内容（不超过200字）。如果无法识别，请回复'无法识别'。"},
+                        {"role": "user", "content": f"文件名: {file.filename}, 类型: {file.content_type}, 大小: {file.size} bytes"}
+                    ],
+                    "max_tokens": 500,
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                text = data["choices"][0]["message"]["content"]
+                if text and text.strip() and "无法识别" not in text:
+                    return f"# 文件内容描述\n\n{text}"
+    except Exception:
+        pass
+
+    return ""
+
+
+# ─── LLM helpers ───────────────────────────────────
+
+async def generate_title(text: str) -> str:
+    """Generate a concise title from document text."""
+    if not LLM_API_KEY:
+        return _fallback_title(text)
+
+    import httpx
+    prompt = f"根据以下文档内容，生成一句简洁的摘要作为标题（不超过30个字，直接返回标题文本，不要加引号）：\n\n{text[:2000]}"
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{LLM_API_BASE.rstrip('/')}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {LLM_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": LLM_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 2000,
+                    "temperature": 0.3,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            title = data["choices"][0]["message"]["content"].strip()
+            # Clean up quotes
+            title = re.sub(r'^["\'《]|["\'》]$', '', title)
+            return title[:100] if title else _fallback_title(text)
+    except Exception:
+        return _fallback_title(text)
+
+
+def _fallback_title(text: str) -> str:
+    """Generate a simple title from the first line or first N chars."""
+    first_line = text.strip().split("\n")[0]
+    # Strip markdown headings
+    first_line = re.sub(r'^#{1,6}\s+', '', first_line).strip()
+    if 5 <= len(first_line) <= 50:
+        return first_line
+    clean = re.sub(r'\s+', ' ', text.strip())[:40]
+    return clean + ("…" if len(text) > 40 else "")
+
+
+# Types that go to tags (知识概念类 → 标签)
+TAG_TYPES = {'concept', 'technology', 'tech', 'tool', 'method', 'standard', 'language',
+             '概念', '技术', '工具', '方法', '标准', '语言'}
+
+# Types that go to entities (人物/组织/地点/事件/产品/其他 → 知识图谱实体)
+ENTITY_TYPES = {'person', 'people', 'organization', 'org', 'company', 'location', 'place',
+                'event', 'product', 'other',
+                '人物', '组织', '公司', '地点', '事件', '产品', '其他'}
+
+
+async def extract_entities_and_relations(text: str) -> tuple[list[str], dict | None]:
+    """Extract tags and structured entities+relations from document text via LLM.
+    Returns (tags, entities_dict)."""
+    if not LLM_API_KEY:
+        return [], None
+
+    import httpx
+    prompt = (
+        "从以下文档内容中提取关键概念和实体。\n"
+        "- 概念类（概念、技术、工具、方法、标准、语言）→ 作为标签\n"
+        "- 实体类（人物、组织、地点、事件、产品）→ 作为实体，含关系\n"
+        "以 JSON 格式返回（只返回 JSON，不要其他内容）：\n"
+        '{"tags":["标签1","标签2"],"entities":[{"name":"实体名","type":"类型"}],"relations":[{"source":"源实体","target":"目标实体","label":"关系描述"}]}\n'
+        "提取 3-8 个标签和 2-5 个实体及关系。\n\n"
+        f"{text[:2000]}"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{LLM_API_BASE.rstrip('/')}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {LLM_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": LLM_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 4000,
+                    "temperature": 0.2,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            result_str = data["choices"][0]["message"]["content"].strip()
+            # Strip markdown code fences if present
+            result_str = re.sub(r'^```(?:json)?\s*', '', result_str)
+            result_str = re.sub(r'\s*```$', '', result_str)
+            result = json.loads(result_str)
+            if isinstance(result, dict):
+                tags = result.get("tags", [])
+                if isinstance(tags, list):
+                    tags = [t.strip() for t in tags if isinstance(t, str) and t.strip()]
+                else:
+                    tags = []
+                entities_part = result.get("entities", [])
+                relations_part = result.get("relations", [])
+                if isinstance(entities_part, list) and entities_part:
+                    return tags, {"entities": entities_part, "relations": relations_part}
+                return tags, None
+    except Exception:
+        pass
+    return [], None
+
+
+# ─── Route ─────────────────────────────────────────
+
+@router.post("", response_model=ArticleResponse, status_code=201)
+async def upload_file(
+    file: UploadFile = File(...),
+    category_id: str | None = Form(default=None),
+    db: Session = Depends(get_db),
+):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    # Determine file extension
+    ext = Path(file.filename).suffix.lower()
+
+    # 1. Save file to disk
+    file_id = str(uuid.uuid4())
+    safe_name = f"{file_id}_{file.filename}"
+    file_path = UPLOAD_DIR / safe_name
+
+    content_bytes = await file.read()
+    await file.seek(0)  # Reset for potential re-read
+
+    with open(file_path, "wb") as f:
+        f.write(content_bytes)
+
+    # 2. Extract text based on file type
+    try:
+        if ext in TEXT_EXTENSIONS:
+            text = await parse_text(file)
+        elif ext in WORD_EXTENSIONS:
+            text = parse_docx(str(file_path))
+        elif ext in EXCEL_EXTENSIONS and ext != '.csv':
+            text = parse_xlsx(str(file_path))
+        elif ext in PPT_EXTENSIONS:
+            text = parse_pptx(str(file_path))
+        elif ext in PDF_EXTENSIONS:
+            text = parse_pdf(str(file_path))
+        elif ext in IMAGE_EXTENSIONS:
+            text = await parse_image(str(file_path), file.filename)
+        elif ext in AUDIO_EXTENSIONS or ext in VIDEO_EXTENSIONS:
+            text = await parse_media(file)
+        else:
+            # Unsupported format — store as attachment only
+            text = f"# {file.filename}\n\n不支持的文件格式。文件已作为附件保存。"
+    except Exception as e:
+        text = f"# {file.filename}\n\n文件解析失败：{str(e)}\n\n文件已作为附件保存。"
+
+    # Handle CSV separately (it's in TEXT_EXTENSIONS)
+    if ext == '.csv' and ext in TEXT_EXTENSIONS:
+        text = await parse_text(file)
+
+    # 3. Generate title via LLM
+    title = await generate_title(text)
+
+    # 4. Extract tags + entities + relations via LLM
+    tags, entities = await extract_entities_and_relations(text)
+
+    # 5. Create article
+    article = Article(
+        title=title or file.filename,
+        content=text,
+        category_id=category_id or None,
+        tags=json.dumps(tags, ensure_ascii=False),
+        entities=json.dumps(entities, ensure_ascii=False) if entities else None,
+        attachment_path=str(safe_name),
+        attachment_name=file.filename,
+        attachment_type=file.content_type or "",
+    )
+    db.add(article)
+    db.commit()
+    db.refresh(article)
+
+    # 6. Compute embeddings for semantic search (non-blocking)
+    try:
+        from app.routes.qa import chunk_article, get_embedding
+        from app.models import ArticleChunk
+        chunks = chunk_article(article.content)
+        for i, chunk_text in enumerate(chunks):
+            try:
+                vec = await get_embedding(chunk_text)
+                db.add(ArticleChunk(
+                    article_id=article.id,
+                    chunk_index=str(i),
+                    chunk_text=chunk_text,
+                    embedding=json.dumps(vec),
+                ))
+            except Exception:
+                pass  # Skip failed chunks — will be computed lazily on Q&A
+        db.commit()
+    except Exception:
+        pass  # Embedding computation is best-effort
+
+    return article
