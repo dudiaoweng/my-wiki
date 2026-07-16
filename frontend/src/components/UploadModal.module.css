@@ -1,0 +1,239 @@
+.overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(26, 28, 30, 0.4);
+  backdrop-filter: blur(4px);
+  z-index: 300;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.overlay.open {
+  display: flex;
+}
+
+.modal {
+  background: var(--c-card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-modal);
+  width: 100%;
+  max-width: 520px;
+  animation: modalIn 250ms ease;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--c-border);
+}
+
+.header h3 {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.closeBtn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: var(--c-surface);
+  cursor: pointer;
+  font-size: 18px;
+  color: var(--c-text-soft);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--transition-fast);
+}
+
+.closeBtn:hover {
+  background: #e8e5e0;
+  color: var(--c-text);
+}
+
+.body {
+  padding: 24px;
+}
+
+/* Drop zone */
+.dropZone {
+  border: 2px dashed var(--c-border);
+  border-radius: var(--radius-md);
+  padding: 40px 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  background: var(--c-page);
+}
+
+.dropZone:hover,
+.dropZoneActive {
+  border-color: var(--c-accent);
+  background: var(--c-accent-wash);
+}
+
+.dropIcon {
+  font-size: 48px;
+  margin-bottom: 12px;
+}
+
+.dropText {
+  font-size: 15px;
+  color: var(--c-text);
+  font-weight: 500;
+  margin-bottom: 6px;
+}
+
+.dropHint {
+  font-size: 12px;
+  color: var(--c-text-muted);
+  margin-top: 8px;
+}
+
+.dropHint code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: var(--c-surface);
+  padding: 1px 5px;
+  border-radius: 2px;
+}
+
+/* File selected */
+.fileInfo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  background: var(--c-accent-wash);
+  border: 1px solid var(--c-accent);
+  border-radius: var(--radius-md);
+  margin-bottom: 16px;
+}
+
+.fileIcon {
+  font-size: 32px;
+}
+
+.fileName {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--c-text);
+  word-break: break-all;
+}
+
+.fileSize {
+  font-size: 12px;
+  color: var(--c-text-muted);
+}
+
+/* Category selector */
+.categoryRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.categoryLabel {
+  font-size: 13px;
+  color: var(--c-text-soft);
+  white-space: nowrap;
+}
+
+.categorySelect {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-family: var(--font-body);
+  color: var(--c-text);
+  background: var(--c-card);
+}
+
+/* Progress */
+.progressSection {
+  text-align: center;
+  padding: 20px 0;
+}
+
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--c-border);
+  border-top-color: var(--c-accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin: 0 auto 16px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.progressStep {
+  font-size: 14px;
+  color: var(--c-text-soft);
+  margin-bottom: 4px;
+}
+
+.progressStepDone {
+  color: var(--c-success);
+}
+
+/* Footer */
+.footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 16px 24px;
+  border-top: 1px solid var(--c-border);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 18px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid var(--c-border);
+  background: var(--c-card);
+  color: var(--c-text);
+  font-family: var(--font-body);
+  transition: all var(--transition-fast);
+}
+
+.btn:hover {
+  background: var(--c-surface);
+}
+
+.btnPrimary {
+  background: var(--c-accent);
+  color: white;
+  border-color: var(--c-accent);
+}
+
+.btnPrimary:hover:not(:disabled) {
+  background: var(--c-accent-hover);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.error {
+  color: var(--c-danger);
+  font-size: 13px;
+  margin-top: 12px;
+  text-align: center;
+}

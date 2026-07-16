@@ -1,0 +1,74 @@
+.overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(26, 28, 30, 0.45);
+  backdrop-filter: blur(4px);
+  z-index: 400;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.overlay.open {
+  display: flex;
+}
+
+.dialog {
+  background: var(--c-card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-modal);
+  padding: 28px;
+  max-width: 400px;
+  width: 100%;
+  text-align: center;
+  animation: modalIn 200ms ease;
+}
+
+.dialog h4 {
+  font-family: var(--font-display);
+  font-size: 17px;
+  margin-bottom: 8px;
+}
+
+.dialog p {
+  font-size: 14px;
+  color: var(--c-text-soft);
+  margin-bottom: 24px;
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 18px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid var(--c-border);
+  background: var(--c-card);
+  color: var(--c-text);
+  font-family: var(--font-body);
+  transition: all var(--transition-fast);
+}
+
+.btn:hover {
+  background: var(--c-surface);
+}
+
+.btnDanger {
+  background: var(--c-danger);
+  color: white;
+  border-color: var(--c-danger);
+}
+
+.btnDanger:hover {
+  filter: brightness(1.1);
+}
