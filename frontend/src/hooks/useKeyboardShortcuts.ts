@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useApp } from '../context/AppProvider';
 
@@ -6,6 +6,7 @@ export function useKeyboardShortcuts() {
   const navigate = useNavigate();
   const location = useLocation();
   const { searchInputRef, openEditor, closeEditor, editorState, confirmState, closeConfirm } = useApp();
+  const focusTimerRef = useRef<ReturnType<typeof setTimeout>>();
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -14,7 +15,7 @@ export function useKeyboardShortcuts() {
       if (isCmdOrCtrl && e.key === 'k') {
         e.preventDefault();
         if (location.pathname === '/') navigate('/articles');
-        setTimeout(() => searchInputRef.current?.focus(), 50);
+        focusTimerRef.current = setTimeout(() => searchInputRef.current?.focus(), 50);
         return;
       }
 
@@ -37,6 +38,9 @@ export function useKeyboardShortcuts() {
     };
 
     document.addEventListener('keydown', handler);
-    return () => document.removeEventListener('keydown', handler);
+    return () => {
+      document.removeEventListener('keydown', handler);
+      if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
+    };
   }, [navigate, location, searchInputRef, openEditor, closeEditor, editorState, confirmState, closeConfirm]);
 }

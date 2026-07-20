@@ -1,13 +1,29 @@
 import json
+import logging
+import uuid
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Body
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.dependencies import get_db
 from app.models import Article, ArticleChunk, EntityInfo
 import asyncio
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/entities", tags=["entities"])
+
+MAX_ARTICLE_IDS = 500  # Keep well under SQLite's ~999 bind variable limit
+
+
+def _validate_aid(aid: str) -> None:
+    """Validate article ID — accepts UUIDs and legacy short IDs (e.g. 'a1')."""
+    if not aid or len(aid) > 36:
+        raise HTTPException(status_code=400, detail=f"Invalid article ID: {aid}")
+    if len(aid) == 36 and '-' in aid:
+        try:
+            uuid.UUID(aid)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid article ID: {aid}")
 
 
 class EntityUpdateRequest(BaseModel):
@@ -76,17 +92,25 @@ def _schedule_embedding_recompute(chunks: list):
                     vec = await get_embedding(ch.chunk_text)
                     ch.embedding = json.dumps(vec)
                 except Exception:
-                    pass
+                    logger.warning("Failed to compute embedding for chunk %s", ch.id, exc_info=True)
             db2.commit()
         except Exception:
+            logger.warning("Background embedding recompute failed", exc_info=True)
             db2.rollback()
         finally:
             db2.close()
 
     try:
-        asyncio.create_task(recompute())
-    except Exception:
-        pass
+        loop = asyncio.get_running_loop()
+        loop.create_task(recompute())
+    except RuntimeError:
+        # No running event loop (called from sync route) — run in new loop
+        try:
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(recompute())
+            loop.close()
+        except Exception:
+            logger.warning("Background embedding recompute failed", exc_info=True)
 
 
 @router.get("", response_model=list[str])
@@ -117,6 +141,10 @@ async def add_entity(body: EntityAddRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Entity name cannot be empty")
     if not body.article_ids:
         raise HTTPException(status_code=400, detail="No articles selected")
+    if len(body.article_ids) > MAX_ARTICLE_IDS:
+        raise HTTPException(status_code=400, detail=f"Too many article IDs (max {MAX_ARTICLE_IDS})")
+    for aid in body.article_ids:
+        _validate_aid(aid)
 
     articles = db.query(Article).filter(Article.id.in_(body.article_ids)).all()
     if not articles:
@@ -246,6 +274,10 @@ def remove_entity(body: EntityRemoveRequest, db: Session = Depends(get_db)):
 
     query = db.query(Article)
     if body.article_ids:
+        if len(body.article_ids) > MAX_ARTICLE_IDS:
+            raise HTTPException(status_code=400, detail=f"Too many article IDs (max {MAX_ARTICLE_IDS})")
+        for aid in body.article_ids:
+            _validate_aid(aid)
         query = query.filter(Article.id.in_(body.article_ids))
 
     articles = query.all()
@@ -265,6 +297,15 @@ def remove_entity(body: EntityRemoveRequest, db: Session = Depends(get_db)):
         ent_data["relations"] = rels
         article.entities = json.dumps(ent_data, ensure_ascii=False)
         count += 1
+
+    # Clean up entity tag lines from article chunks
+    import re
+    chunk_tag_pattern = re.compile(rf'^\[实体:\s*{re.escape(name)}\b.*\]\s*\n?', re.MULTILINE)
+    for article in articles:
+        chunks = db.query(ArticleChunk).filter(ArticleChunk.article_id == article.id).all()
+        for chunk in chunks:
+            if chunk.chunk_text and f"[实体: {name}" in chunk.chunk_text:
+                chunk.chunk_text = chunk_tag_pattern.sub("", chunk.chunk_text).rstrip()
 
     db.commit()
     return {"entity": name, "count": count}

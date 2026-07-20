@@ -116,7 +116,7 @@ export function useQA() {
         setActiveId(sid);
       }
 
-      const userMsg: QAMessage = { role: 'user', content: question };
+      const userMsg: QAMessage & { id: string } = { id: makeId(), role: 'user', content: question };
 
       // Update title if first message
       setSessions((prev) => {
@@ -141,7 +141,7 @@ export function useQA() {
         const history = sessions[sid]?.messages ?? [];
         const result = await api.askQuestion({ question, history });
 
-        const assistantMsg: QAMessage = { role: 'assistant', content: result.answer };
+        const assistantMsg: QAMessage & { id: string } = { id: makeId(), role: 'assistant', content: result.answer };
         setSessions((prev) => {
           const s = prev[sid];
           if (!s) return prev;

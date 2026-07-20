@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useApp } from '../context/AppProvider';
 import { useCategories } from '../hooks/useCategories';
 import { useToast } from '../hooks/useToast';
@@ -8,7 +8,7 @@ import styles from './UploadModal.module.css';
 
 const SUPPORTED_FORMATS = '.txt,.md,.docx,.xlsx,.pptx,.pdf,.mp3,.wav,.mp4,.avi,.mov,.csv,.json,.html,.jpg,.jpeg,.png,.gif,.webp,.svg,.bmp';
 
-type Step = 'idle' | 'uploading' | 'parsing' | 'generating' | 'done';
+type Step = 'idle' | 'uploading' | 'done';
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -17,10 +17,11 @@ function formatFileSize(bytes: number): string {
 }
 
 export function UploadModal() {
-  const { uploaderOpen, closeUploader } = useApp();
+  const { uploaderOpen, closeUploader, notifyArticleSaved } = useApp();
   const { categories } = useCategories();
   const { showToast } = useToast();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
   const [file, setFile] = useState<File | null>(null);
   const [categoryId, setCategoryId] = useState('');
@@ -33,7 +34,7 @@ export function UploadModal() {
   useEffect(() => {
     if (uploaderOpen) {
       setFile(null);
-      setCategoryId('');
+      setCategoryId(searchParams.get('category') ?? '');
       setStep('idle');
       setError(null);
     }
@@ -58,18 +59,18 @@ export function UploadModal() {
     setStep('uploading');
 
     try {
-      // Simulate progressive steps
-      setTimeout(() => setStep('parsing'), 500);
-      setTimeout(() => setStep('generating'), 1500);
-
+      setStep('uploading');
       const article = await api.uploadFile(file, categoryId || undefined);
 
       setStep('done');
       showToast('文件上传成功，文章已创建', 'success');
       closeUploader();
 
-      // Navigate to the new article
-      navigate(`/articles/${article.id}`);
+      // Notify article list and sidebar to refresh
+      notifyArticleSaved();
+
+      // Navigate to the article list with inline detail view (shows EntityPanel on right)
+      navigate(`/articles?view=${article.id}`);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : '上传失败';
       setError(msg);
@@ -82,9 +83,7 @@ export function UploadModal() {
 
   const stepLabels: Record<Step, string> = {
     idle: '',
-    uploading: '正在上传文件…',
-    parsing: '正在解析文件内容…',
-    generating: '正在生成标题和标签…',
+    uploading: '正在上传并解析文件…',
     done: '完成',
   };
 
@@ -102,7 +101,11 @@ export function UploadModal() {
               {/* Drop zone */}
               <div
                 className={`${styles.dropZone} ${dragOver ? styles.dropZoneActive : ''}`}
+                role="button"
+                tabIndex={0}
+                aria-label="选择文件上传"
                 onClick={() => fileInputRef.current?.click()}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInputRef.current?.click(); } }}
                 onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
                 onDragLeave={() => setDragOver(false)}
                 onDrop={handleDrop}

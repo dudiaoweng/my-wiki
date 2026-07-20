@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api } from '../api/client';
@@ -16,8 +16,7 @@ function formatDate(iso: string): string {
 export function ArticleDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [, setSearchParams] = useSearchParams();
-  const { openEditor, requestConfirm } = useApp();
+  const { openEditor, requestConfirm, notifyArticleSaved } = useApp();
   const { showToast } = useToast();
 
   const [article, setArticle] = useState<Article | null>(null);
@@ -64,6 +63,7 @@ export function ArticleDetail() {
       try {
         await api.deleteArticle(id);
         showToast('文章已删除', 'success');
+        notifyArticleSaved();
         navigate('/articles');
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : 'Delete failed';
@@ -73,7 +73,6 @@ export function ArticleDetail() {
   };
 
   const handleTagClick = (tag: string) => {
-    setSearchParams({ tag });
     navigate(`/articles?tag=${encodeURIComponent(tag)}`);
   };
 
@@ -120,7 +119,7 @@ export function ArticleDetail() {
           <span>📎</span>
           <span style={{ flex: 1 }}>{article.attachment_name}</span>
           <a
-            href={`/uploads/${article.attachment_path}`}
+            href={`/api/articles/${article.id}/download`}
             download={article.attachment_name}
             style={{
               color: 'var(--c-accent)', textDecoration: 'none',

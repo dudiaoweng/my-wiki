@@ -1,4 +1,5 @@
 export interface QAMessage {
+  id?: string;
   role: 'user' | 'assistant';
   content: string;
 }

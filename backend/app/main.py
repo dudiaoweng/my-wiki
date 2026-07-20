@@ -66,17 +66,17 @@ DEFAULT_ARTICLES = [
 
 
 def seed_database():
-    """Insert default data if the database is empty."""
+    """Insert default data if the database is empty. Uses merge to avoid PK conflicts."""
     db = SessionLocal()
     try:
         if db.query(Category).count() == 0:
             for cat in DEFAULT_CATEGORIES:
-                db.add(Category(**cat))
+                db.merge(Category(**cat))
             db.commit()
 
         if db.query(Article).count() == 0:
             for art in DEFAULT_ARTICLES:
-                db.add(Article(
+                db.merge(Article(
                     id=art["id"],
                     title=art["title"],
                     content=art["content"],
@@ -105,9 +105,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -122,10 +123,17 @@ app.include_router(graph.router)
 app.include_router(qa.router)
 app.include_router(upload.router)
 
-# Mount uploads directory for static file serving
+# Mount uploads directory — force download to prevent XSS via uploaded HTML/SVG
+class _DownloadStaticFiles(StaticFiles):
+    def file_response(self, *args, **kwargs):
+        resp = super().file_response(*args, **kwargs)
+        resp.headers["Content-Disposition"] = "attachment"
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        return resp
+
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
+app.mount("/uploads", _DownloadStaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 
 @app.get("/api/health")

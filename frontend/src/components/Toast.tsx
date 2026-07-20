@@ -14,7 +14,7 @@ export function ToastContainer() {
   if (toasts.length === 0) return null;
 
   return (
-    <div className={styles.container}>
+    <div className={styles.container} role="alert" aria-live="polite">
       {toasts.map((t) => (
         <div
           key={t.id}

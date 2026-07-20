@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useRef, type ReactNode } from 'react';
+import { createContext, useContext, useState, useRef, useCallback, useMemo, type ReactNode } from 'react';
 
 interface EditorState {
   isOpen: boolean;
@@ -9,6 +9,7 @@ interface ConfirmState {
   title: string;
   message: string;
   onConfirm: () => void;
+  confirmLabel?: string;
 }
 
 interface AppContextValue {
@@ -22,7 +23,7 @@ interface AppContextValue {
   closeEditor: () => void;
 
   confirmState: ConfirmState | null;
-  requestConfirm: (title: string, message: string, onConfirm: () => void) => void;
+  requestConfirm: (title: string, message: string, onConfirm: () => void, confirmLabel?: string) => void;
   closeConfirm: () => void;
   executeConfirm: () => void;
 
@@ -32,6 +33,9 @@ interface AppContextValue {
 
   articleVersion: number;
   notifyArticleSaved: () => void;
+
+  categoriesVersion: number;
+  notifyCategoriesChanged: () => void;
 
   searchInputRef: React.RefObject<HTMLInputElement>;
 }
@@ -48,50 +52,65 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [uploaderOpen, setUploaderOpen] = useState(false);
   const [articleVersion, setArticleVersion] = useState(0);
-  const searchInputRef = useRef<HTMLInputElement>(null!);
+  const searchInputRef = useRef<HTMLInputElement>(null!); // ref is always attached before use
 
-  const toggleSidebar = () => setSidebarOpen((p) => !p);
-  const closeSidebar = () => setSidebarOpen(false);
+  const toggleSidebar = useCallback(() => setSidebarOpen((p) => !p), []);
+  const closeSidebar = useCallback(() => setSidebarOpen(false), []);
 
-  const openEditor = (articleId: string | null = null) => {
+  const openEditor = useCallback((articleId: string | null = null) => {
     setEditorState({ isOpen: true, articleId });
-  };
-  const closeEditor = () => setEditorState(null);
+  }, []);
+  const closeEditor = useCallback(() => setEditorState(null), []);
 
-  const openUploader = () => setUploaderOpen(true);
-  const closeUploader = () => setUploaderOpen(false);
+  const openUploader = useCallback(() => setUploaderOpen(true), []);
+  const closeUploader = useCallback(() => setUploaderOpen(false), []);
 
-  const requestConfirm = (title: string, message: string, onConfirm: () => void) => {
-    setConfirmState({ title, message, onConfirm });
-  };
-  const closeConfirm = () => setConfirmState(null);
-  const executeConfirm = () => {
-    confirmState?.onConfirm();
+  const requestConfirm = useCallback((title: string, message: string, onConfirm: () => void, confirmLabel?: string) => {
+    setConfirmState({ title, message, onConfirm, confirmLabel });
+  }, []);
+  const closeConfirm = useCallback(() => setConfirmState(null), []);
+  const confirmRef = useRef<ConfirmState | null>(null);
+  // Keep ref in sync so executeConfirm never reads stale closure
+  confirmRef.current = confirmState;
+  const executeConfirm = useCallback(() => {
+    confirmRef.current?.onConfirm();
     setConfirmState(null);
-  };
+  }, []);
+
+  const notifyArticleSaved = useCallback(() => setArticleVersion((v) => v + 1), []);
+  const [categoriesVersion, setCategoriesVersion] = useState(0);
+  const notifyCategoriesChanged = useCallback(() => setCategoriesVersion((v) => v + 1), []);
+
+  const value = useMemo(() => ({
+    sidebarOpen,
+    setSidebarOpen,
+    toggleSidebar,
+    closeSidebar,
+    editorState,
+    openEditor,
+    closeEditor,
+    uploaderOpen,
+    openUploader,
+    closeUploader,
+    articleVersion,
+    notifyArticleSaved,
+    categoriesVersion,
+    notifyCategoriesChanged,
+    confirmState,
+    requestConfirm,
+    closeConfirm,
+    executeConfirm,
+    searchInputRef,
+  }), [
+    sidebarOpen, editorState, uploaderOpen, articleVersion,
+    categoriesVersion,
+    confirmState, toggleSidebar, closeSidebar, openEditor,
+    closeEditor, openUploader, closeUploader, notifyArticleSaved,
+    notifyCategoriesChanged, requestConfirm, closeConfirm, executeConfirm, searchInputRef,
+  ]);
 
   return (
-    <AppContext.Provider
-      value={{
-        sidebarOpen,
-        setSidebarOpen,
-        toggleSidebar,
-        closeSidebar,
-        editorState,
-        openEditor,
-        closeEditor,
-        uploaderOpen,
-        openUploader,
-        closeUploader,
-        articleVersion,
-        notifyArticleSaved: () => setArticleVersion((v) => v + 1),
-        confirmState,
-        requestConfirm,
-        closeConfirm,
-        executeConfirm,
-        searchInputRef,
-      }}
-    >
+    <AppContext.Provider value={value}>
       {children}
     </AppContext.Provider>
   );

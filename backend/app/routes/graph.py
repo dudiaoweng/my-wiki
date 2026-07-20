@@ -1,4 +1,5 @@
 import json
+import time
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -6,6 +7,11 @@ from app.dependencies import get_db
 from app.models import Article, Category
 
 router = APIRouter(prefix="/api/graph", tags=["graph"])
+
+# Simple TTL cache to avoid full table scans on every graph request
+_graph_cache: dict | None = None
+_graph_cache_ts: float = 0.0
+_GRAPH_CACHE_TTL: float = 30.0  # seconds
 
 
 class GraphNode(BaseModel):
@@ -29,8 +35,15 @@ class GraphResponse(BaseModel):
 
 @router.get("", response_model=GraphResponse)
 def get_graph(db: Session = Depends(get_db)):
+    global _graph_cache, _graph_cache_ts
+    now = time.monotonic()
+    if _graph_cache is not None and (now - _graph_cache_ts) < _GRAPH_CACHE_TTL:
+        return GraphResponse(**_graph_cache)
+
     articles = db.query(Article).all()
     categories = db.query(Category).all()
+
+    MAX_NODES = 2000  # Safety limit to prevent unbounded memory use
 
     nodes: list[GraphNode] = []
     edges: list[GraphEdge] = []
@@ -126,4 +139,13 @@ def get_graph(db: Session = Depends(get_db)):
                     label=lbl,
                 ))
 
-    return GraphResponse(nodes=nodes, edges=edges)
+    # Safety cap: if graph exceeds limit, return truncated data
+    if len(nodes) > MAX_NODES:
+        nodes = nodes[:MAX_NODES]
+        edge_node_ids = {n.id for n in nodes}
+        edges = [e for e in edges if e.source in edge_node_ids and e.target in edge_node_ids]
+
+    result = GraphResponse(nodes=nodes, edges=edges)
+    _graph_cache = result.model_dump()
+    _graph_cache_ts = now
+    return result

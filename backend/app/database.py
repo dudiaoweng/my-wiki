@@ -1,12 +1,22 @@
-from sqlalchemy import create_engine
+import os
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-SQLALCHEMY_DATABASE_URL = "sqlite:///./knowledge_base.db"
+SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./knowledge_base.db")
 
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
     connect_args={"check_same_thread": False},
 )
+
+
+@event.listens_for(engine, "connect")
+def _set_sqlite_pragma(dbapi_connection, connection_record):
+    """Enable foreign key enforcement for every new SQLite connection."""
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys = ON")
+    cursor.close()
+
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -21,5 +31,5 @@ def init_db():
         try:
             conn.exec_driver_sql("ALTER TABLE articles ADD COLUMN entities TEXT")
         except Exception:
-            pass  # Column already exists
+            pass  # Column already exists (only expected error)
         conn.commit()

@@ -18,20 +18,27 @@ function formatDate(iso: string): string {
 }
 
 export function ArticleDetailInline({ articleId, onBack }: Props) {
-  const { openEditor, requestConfirm } = useApp();
+  const { openEditor, requestConfirm, notifyArticleSaved } = useApp();
   const { showToast } = useToast();
   const [article, setArticle] = useState<Article | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setLoading(true);
+    setError(null);
     api.getArticle(articleId)
       .then(setArticle)
-      .catch(() => showToast('文章加载失败', 'error'))
+      .catch((e) => {
+        const msg = e instanceof Error ? e.message : '加载失败';
+        setError(msg);
+        showToast(msg, 'error');
+      })
       .finally(() => setLoading(false));
   }, [articleId, showToast]);
 
   if (loading) return <div className={styles.loading}>加载中…</div>;
+  if (error) return <div className={styles.loading}>加载失败：{error}</div>;
   if (!article) return <div className={styles.loading}>文章不存在</div>;
 
   const catColor = article.category?.color ?? 'var(--c-text-muted)';
@@ -42,6 +49,7 @@ export function ArticleDetailInline({ articleId, onBack }: Props) {
       try {
         await api.deleteArticle(articleId);
         showToast('文章已删除', 'success');
+        notifyArticleSaved();
         onBack();
       } catch {
         showToast('删除失败', 'error');
@@ -77,10 +85,11 @@ export function ArticleDetailInline({ articleId, onBack }: Props) {
         </div>
       )}
 
+
       {article.attachment_name && (
         <div className={styles.attachment}>
           📎 {article.attachment_name}
-          <a href={`/uploads/${article.attachment_path}`} download={article.attachment_name} className={styles.dlLink}>下载</a>
+          <a href={`/api/articles/${article.id}/download`} download={article.attachment_name} className={styles.dlLink}>下载</a>
         </div>
       )}
 

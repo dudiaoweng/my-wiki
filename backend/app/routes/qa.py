@@ -1,4 +1,5 @@
 import json
+import logging
 import math
 import os
 import re
@@ -6,11 +7,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from app.dependencies import get_db
-from app.models import Article, ArticleChunk
+from app.models import Article, ArticleChunk, EntityInfo
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/qa", tags=["qa"])
 
 # ─── Config ────────────────────────────────────────
@@ -28,7 +30,7 @@ class QAMessage(BaseModel):
 
 class QARequest(BaseModel):
     question: str
-    history: list[QAMessage] = []
+    history: list[QAMessage] = Field(default_factory=list, max_length=20)
 
 class QASource(BaseModel):
     article_id: str
@@ -140,20 +142,27 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+# Track last-known article count to skip repeated ensure_embeddings scans
+_embedded_article_count: int | None = None
+
+
 async def ensure_embeddings(db: Session, force: bool = False):
-    """Compute embeddings for any articles missing them."""
-    articles = db.query(Article).all()
+    """Compute embeddings for articles missing them (incremental, not full table scan)."""
+    global _embedded_article_count
+    if not force and _embedded_article_count is not None:
+        total = db.query(Article).count()
+        if total == _embedded_article_count:
+            return  # All articles already embedded
+
+    if not force:
+        from sqlalchemy import exists, select
+        has_chunks = exists().where(ArticleChunk.article_id == Article.id)
+        articles = db.query(Article).filter(~has_chunks).all()
+    else:
+        articles = db.query(Article).all()
+
     for article in articles:
-        # Check if this article already has chunks with embeddings
-        existing = db.query(ArticleChunk).filter(
-            ArticleChunk.article_id == article.id,
-            ArticleChunk.embedding.isnot(None)
-        ).count()
-
-        if existing > 0 and not force:
-            continue
-
-        # Delete old chunks if re-computing
+        # For force mode: delete old chunks first
         if force:
             db.query(ArticleChunk).filter(ArticleChunk.article_id == article.id).delete()
 
@@ -168,8 +177,8 @@ async def ensure_embeddings(db: Session, force: bool = False):
                     chunk_text=chunk_text,
                     embedding=json.dumps(vec),
                 ))
-            except Exception as e:
-                print(f"Warning: failed to embed chunk {i} of article {article.id}: {e}")
+            except Exception:
+                logger.warning("Failed to embed chunk %s of article %s", i, article.id, exc_info=True)
                 # Store chunk without embedding (will be skipped in search)
                 db.add(ArticleChunk(
                     article_id=article.id,
@@ -179,6 +188,9 @@ async def ensure_embeddings(db: Session, force: bool = False):
                 ))
 
         db.commit()
+
+    # Update cache (declared global at top of function)
+    _embedded_article_count = db.query(Article).count()
 
 
 async def semantic_search(db: Session, question: str, top_k: int = 5) -> list[tuple[float, Article, str]]:
@@ -280,22 +292,27 @@ async def ask_question(body: QARequest, db: Session = Depends(get_db)):
         for score, a, chunk_text in top_chunks
     ]
 
-    if not sources:
+    # 2. Collect entity additional info for relevant entities
+    entity_info_text = _collect_entity_info(question, top_chunks, db)
+
+    # If we have entity info but no search results, still provide the info
+    if not sources and not entity_info_text:
         return QAResponse(
             answer="知识库中暂无相关信息。",
             sources=[],
         )
 
-    # 2. Try LLM if configured
+    # 3. Try LLM if configured
+    llm_failed = False
     if LLM_API_KEY:
         try:
-            answer = await call_llm(question, body.history, top_chunks)
+            answer = await call_llm(question, body.history, top_chunks, entity_info_text)
             return QAResponse(answer=answer, sources=sources)
         except Exception:
-            pass
+            llm_failed = True
 
-    # 3. Fallback
-    fallback = build_fallback_answer(question, sources)
+    # 4. Fallback
+    fallback = build_fallback_answer(question, sources, entity_info_text, llm_failed=llm_failed)
     return QAResponse(answer=fallback, sources=sources)
 
 
@@ -303,6 +320,7 @@ async def call_llm(
     question: str,
     history: list[QAMessage],
     top_chunks: list[tuple[float, Article, str]],
+    entity_info: str = "",
 ) -> str:
     import httpx
 
@@ -311,10 +329,13 @@ async def call_llm(
         context_parts.append(f"### [{article.title}]\n{chunk_text[:1500]}\n")
 
     context = "\n---\n".join(context_parts)
+    if entity_info:
+        context += entity_info
 
     system_prompt = (
         "你是一个知识库问答助手。请根据以下知识库文章的内容回答用户的问题。\n"
-        "如果知识库中有相关信息，请引用具体的文章内容来回答。\n"
+        "如果知识库中有'实体附加信息'部分，这些是知识图谱中实体的结构化补充信息，"
+        "请优先参考这些信息来回答关于实体属性的问题。\n"
         "如果知识库中没有相关信息，请如实说明'知识库中暂无相关信息'。\n"
         "回答要简洁、准确，使用中文。\n\n"
         f"知识库相关内容：\n\n{context}"
@@ -344,13 +365,85 @@ async def call_llm(
         return data["choices"][0]["message"]["content"]
 
 
-def build_fallback_answer(question: str, sources: list[QASource]) -> str:
-    lines = ["以下是与您问题最相关的知识库内容摘要：\n"]
-    for i, src in enumerate(sources, 1):
-        lines.append(f"**{i}. {src.title}**（相关度：{src.relevance:.1%}）")
-        lines.append(f"> {src.excerpt}\n")
-    lines.append("---")
-    lines.append(
-        "💡 *提示：配置 LLM API Key 后可获得智能回答。*"
-    )
+def _collect_entity_info(
+    question: str,
+    top_chunks: list[tuple[float, Article, str]],
+    db: Session,
+) -> str:
+    """Extract entity names from question and retrieved articles, then look up
+    additional info (附加信息) for those entities. Returns a formatted string
+    suitable for injection into the LLM context, or empty string if no info found."""
+    # Collect entity names from retrieved articles
+    entity_names: set[str] = set()
+    # Also try to find entity names from the question by scanning for known entities
+    # (simple heuristic: check if any entity name from the DB appears in the question)
+    all_entity_infos = db.query(EntityInfo.entity_name).distinct().all()
+    known_entities = {row[0] for row in all_entity_infos}
+    for name in known_entities:
+        if name.lower() in question.lower():
+            entity_names.add(name)
+
+    # Also collect entity names from the retrieved articles
+    for _, article, _ in top_chunks:
+        if not article.entities:
+            continue
+        try:
+            ent_data = json.loads(article.entities)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for e in ent_data.get("entities", []):
+            name = e.get("name", "")
+            if name:
+                entity_names.add(name)
+
+    if not entity_names:
+        return ""
+
+    # Look up additional info for all relevant entities
+    infos = db.query(EntityInfo).filter(
+        EntityInfo.entity_name.in_(list(entity_names))
+    ).order_by(EntityInfo.entity_name, EntityInfo.created_at.asc()).all()
+
+    if not infos:
+        return ""
+
+    # Format entity info lines
+    by_entity: dict[str, list[str]] = {}
+    for info in infos:
+        by_entity.setdefault(info.entity_name, []).append(
+            f"  - {info.category}: {info.content}"
+        )
+
+    lines = ["\n## 实体附加信息（知识图谱）\n"]
+    for name, items in by_entity.items():
+        lines.append(f"**{name}**:")
+        lines.extend(items)
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def build_fallback_answer(question: str, sources: list[QASource], entity_info: str = "", llm_failed: bool = False) -> str:
+    lines: list[str] = []
+
+    if sources:
+        lines.append("以下是与您问题最相关的知识库内容摘要：\n")
+        for i, src in enumerate(sources, 1):
+            lines.append(f"**{i}. {src.title}**（相关度：{src.relevance:.1%}）")
+            lines.append(f"> {src.excerpt}\n")
+
+    if entity_info:
+        if lines:
+            lines.append("---")
+        lines.append(entity_info.strip())
+
+    if not sources and not entity_info:
+        lines.append("知识库中暂无相关信息。")
+
+    if llm_failed:
+        lines.append("\n---")
+        lines.append("*提示：LLM 调用失败，以上是基于关键词匹配的备选结果。*")
+    elif not LLM_API_KEY:
+        lines.append("\n---")
+        lines.append("💡 *提示：配置 LLM API Key 后可获得智能回答。*")
     return "\n".join(lines)

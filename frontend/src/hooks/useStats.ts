@@ -3,16 +3,18 @@ import { api } from '../api/client';
 import type { Stats } from '../types/stats';
 
 export function useStats() {
-  const [stats, setStats] = useState<Stats>({ article_count: 0, category_count: 0, tag_count: 0 });
+  const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const fetchStats = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const data = await api.getStats();
       setStats(data);
     } catch {
-      // silent
+      setError('Failed to load stats');
     } finally {
       setLoading(false);
     }
@@ -22,5 +24,5 @@ export function useStats() {
     fetchStats();
   }, [fetchStats]);
 
-  return { stats, loading, refetch: fetchStats };
+  return { stats, loading, error, refetch: fetchStats };
 }

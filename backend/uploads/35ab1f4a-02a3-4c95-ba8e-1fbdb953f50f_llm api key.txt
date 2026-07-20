@@ -1,0 +1,35 @@
+
+deepseek api key：sk-c76f81e9538f42b08b88cd303720d6e3
+
+
+				sk-6b1947d278f049bd9aad9c0177886c69
+
+ModelScope api key：ms-9f4f9c59-5691-4bc8-b908-29857d7156ec
+
+
+智谱api key:7acc725f916f41ea802953339c60aaaf.4253Rw7eP8cbFT0W
+
+
+qwen 
+	LLM_API_KEY="sk-421d168e30e0443abcb5f30d83782f44"
+	LLM_MODEL_ID="qwen-plus" 
+	LLM_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+Qdrant
+	api key:eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIiwic3ViamVjdCI6ImFwaS1rZXk6NzVjOGEwZDgtNTg0My00YjU3LTkzNWYtM2NlZjM1ZGIyZTNiIn0.4pw5nHCbzXLUVWehE2oaOxLsmnOjeR53tW4NKwi66WA
+	Cluster Endpoint:https://3f56bad3-37a0-4816-bb84-533aabbf96c8.us-east-1-1.aws.cloud.qdrant.io
+
+
+Neo4j Aura云服务
+	URI:neo4j+s://2545f0ff.databases.neo4j.io
+	USERNAME:2545f0ff
+	PASSWORD:_YUkaWz8kT3pXRo2khO_H0_EoAdSj8cZy_vqu6dxEZ8
+
+
+Unsplash(图片平台) API Credentials
+	access key:pI8Z841WUoZX49xO5lnwDaETxU6NlfyKRx0LeplIiGs
+	secret key:0OsgW5RhEi9QYl64881l-42D3jFK8GmvF32KRi6CwPU
+
+高德API
+	web key:c7ac8dd61894a8bde7602090da687f4d
+	js key:3c68f95ad78cb4dfdff0c68b0d017eac
