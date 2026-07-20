@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Index
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -32,11 +32,11 @@ class Article(Base):
     id = Column(String, primary_key=True, default=generate_uuid)
     title = Column(String(200), nullable=False)
     content = Column(Text, nullable=False, default="")
-    category_id = Column(String, ForeignKey("categories.id"), nullable=True)
+    category_id = Column(String, ForeignKey("categories.id", ondelete="SET NULL"), nullable=True, index=True)
     tags = Column(Text, nullable=False, default="[]")
     entities = Column(Text, nullable=True, default=None)  # LLM 提取的实体+关系 JSON
     created_at = Column(DateTime, default=utcnow, nullable=False)
-    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False, index=True)
     attachment_path = Column(String, nullable=True)
     attachment_name = Column(String, nullable=True)
     attachment_type = Column(String, nullable=True)
@@ -52,7 +52,7 @@ class ArticleChunk(Base):
     __tablename__ = "article_chunks"
 
     id = Column(String, primary_key=True, default=generate_uuid)
-    article_id = Column(String, ForeignKey("articles.id"), nullable=False)
+    article_id = Column(String, ForeignKey("articles.id", ondelete="CASCADE"), nullable=False, index=True)
     chunk_index = Column(String, nullable=False)  # e.g. "0", "1", "1.2"
     chunk_text = Column(Text, nullable=False)
     embedding = Column(Text, nullable=True)  # JSON array of floats

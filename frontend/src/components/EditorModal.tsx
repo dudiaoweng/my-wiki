@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useApp } from '../context/AppProvider';
 import { useToast } from '../hooks/useToast';
 import { useCategories } from '../hooks/useCategories';
@@ -6,15 +7,12 @@ import { api } from '../api/client';
 import type { Article } from '../types/article';
 import styles from './EditorModal.module.css';
 
-const CATEGORY_COLORS = [
-  '#1E5C8A', '#7D5E3C', '#3D7B4F', '#A0524B',
-  '#5B5A8C', '#C07B3A', '#4A7A8C', '#8C5260',
-];
-
 export function EditorModal() {
   const { editorState, closeEditor, notifyArticleSaved } = useApp();
-  const { categories, createCategory } = useCategories();
+  const { categories } = useCategories();
   const { showToast } = useToast();
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
   const isEdit = !!editorState?.articleId;
 
@@ -22,11 +20,10 @@ export function EditorModal() {
   const [categoryId, setCategoryId] = useState('');
   const [tagsStr, setTagsStr] = useState('');
   const [content, setContent] = useState('');
-  const [newCatName, setNewCatName] = useState('');
-  const [newCatColor, setNewCatColor] = useState(CATEGORY_COLORS[0]);
   const [saving, setSaving] = useState(false);
 
   const titleRef = useRef<HTMLInputElement>(null);
+  const originalContentRef = useRef('');
 
   // Load article data when editing
   useEffect(() => {
@@ -37,38 +34,19 @@ export function EditorModal() {
         setCategoryId(a.category_id ?? '');
         setTagsStr(a.tags.join(', '));
         setContent(a.content);
+        originalContentRef.current = a.content;
       }).catch(() => showToast('Failed to load article', 'error'));
     } else {
       setTitle('');
-      setCategoryId('');
+      setCategoryId(searchParams.get('category') ?? '');
       setTagsStr('');
       setContent('');
+      originalContentRef.current = '';
     }
-    setNewCatName('');
-    setNewCatColor(CATEGORY_COLORS[0]);
     setTimeout(() => titleRef.current?.focus(), 100);
   }, [editorState, showToast]);
 
   if (!editorState) return null;
-
-  const handleCreateCategory = async () => {
-    const name = newCatName.trim();
-    if (!name) return;
-    const exists = categories.find((c) => c.name.toLowerCase() === name.toLowerCase());
-    if (exists) {
-      showToast('该分类已存在', 'warning');
-      return;
-    }
-    const usedColors = new Set(categories.map((c) => c.color));
-    const color = CATEGORY_COLORS.find((c) => !usedColors.has(c))
-      ?? CATEGORY_COLORS[categories.length % CATEGORY_COLORS.length];
-    const cat = await createCategory({ name, color: newCatColor });
-    if (cat) {
-      setCategoryId(cat.id);
-      setNewCatName('');
-      showToast(`分类「${name}」已创建`, 'success');
-    }
-  };
 
   const handleSave = async () => {
     if (!title.trim()) {
@@ -83,20 +61,32 @@ export function EditorModal() {
       .map((t) => t.trim())
       .filter(Boolean);
 
-    const data = {
-      title: title.trim(),
-      content,
-      category_id: categoryId || null,
-      tags,
-    };
-
     try {
       if (isEdit && editorState.articleId) {
-        await api.updateArticle(editorState.articleId, data);
+        // Only include content if it actually changed (to avoid unnecessary LLM extraction)
+        const updateData: { title: string; content?: string; category_id: string | null; tags: string[] } = {
+          title: title.trim(),
+          category_id: categoryId || null,
+          tags,
+        };
+        if (content !== originalContentRef.current) {
+          updateData.content = content;
+        }
+        await api.updateArticle(editorState.articleId, updateData);
         showToast('文章已更新', 'success');
       } else {
-        await api.createArticle(data);
+        const article = await api.createArticle({
+          title: title.trim(),
+          content,
+          category_id: categoryId || null,
+          tags,
+        });
         showToast('文章已创建', 'success');
+        // Same behavior as file upload: show inline detail with EntityPanel
+        closeEditor();
+        notifyArticleSaved();
+        navigate(`/articles?view=${article.id}`);
+        return;
       }
       closeEditor();
       notifyArticleSaved();
@@ -135,49 +125,16 @@ export function EditorModal() {
 
           <div className={styles.group}>
             <label className={styles.label}>分类</label>
-            <div className={styles.row}>
-              <select
-                className={styles.select}
-                value={categoryId}
-                onChange={(e) => setCategoryId(e.target.value)}
-                style={{ flex: 1 }}
-              >
-                <option value="">无分类</option>
-                {categories.map((c) => (
-                  <option key={c.id} value={c.id}>{c.name}</option>
-                ))}
-              </select>
-            </div>
-            <div className={styles.row} style={{ marginTop: 4 }}>
-              <input
-                type="text"
-                className={styles.input}
-                value={newCatName}
-                onChange={(e) => setNewCatName(e.target.value)}
-                placeholder="新建分类名称…"
-                style={{ flex: 1 }}
-              />
-              <button className={styles.btn} onClick={handleCreateCategory}>
-                + 分类
-              </button>
-            </div>
-            {newCatName && (
-              <div className={styles.dotPicker}>
-                {CATEGORY_COLORS.map((color) => (
-                  <span key={color}>
-                    <input
-                      type="radio"
-                      id={`color-${color}`}
-                      name="newCatColor"
-                      value={color}
-                      checked={newCatColor === color}
-                      onChange={() => setNewCatColor(color)}
-                    />
-                    <label htmlFor={`color-${color}`} style={{ background: color }} />
-                  </span>
-                ))}
-              </div>
-            )}
+            <select
+              className={styles.select}
+              value={categoryId}
+              onChange={(e) => setCategoryId(e.target.value)}
+            >
+              <option value="">无分类</option>
+              {categories.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
           </div>
 
           <div className={styles.group}>

@@ -26,14 +26,20 @@ class ApiError extends Error {
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const { headers: customHeaders, ...restOpts } = options ?? {};
   const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
-    ...options,
+    ...restOpts,
+    headers: { 'Content-Type': 'application/json', ...customHeaders },
   });
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new ApiError(res.status, body.detail ?? res.statusText);
+    let detail = body.detail ?? res.statusText;
+    // FastAPI validation errors return detail as an array of { loc, msg }
+    if (Array.isArray(detail)) {
+      detail = detail.map((d: { msg?: string }) => d.msg ?? JSON.stringify(d)).join('; ');
+    }
+    throw new ApiError(res.status, detail);
   }
 
   if (res.status === 204) return undefined as T;
@@ -43,7 +49,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 function qs(params: Record<string, string>): string {
   const usp = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
-    if (v) usp.set(k, v);
+    if (v !== undefined && v !== null && v !== '') usp.set(k, v);
   }
   const s = usp.toString();
   return s ? `?${s}` : '';
@@ -83,6 +89,15 @@ export const api = {
       body: JSON.stringify(data),
     });
   },
+  updateCategory(id: string, data: CategoryCreate) {
+    return request<Category>(`/categories/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  },
+  deleteCategory(id: string) {
+    return request<void>(`/categories/${id}`, { method: 'DELETE' });
+  },
 
   // ── Tags ──
   getTags() {
@@ -109,7 +124,7 @@ export const api = {
   },
   removeTag(tag: string, articleIds?: string[]) {
     return request<{ tag: string; count: number }>('/tags/remove', {
-      method: 'DELETE',
+      method: 'POST',
       body: JSON.stringify({ tag, article_ids: articleIds ?? null }),
     });
   },

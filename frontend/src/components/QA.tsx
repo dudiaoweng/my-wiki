@@ -146,7 +146,7 @@ export function QA() {
           <div className={styles.chat}>
             {messages.map((msg, i) => (
               <div
-                key={i}
+                key={msg.id ?? `msg-${i}`}
                 className={`${styles.message} ${msg.role === 'user' ? styles.user : styles.assistant}`}
               >
                 {isAssistant(msg) && (

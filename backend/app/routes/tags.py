@@ -86,7 +86,7 @@ def rename_tag(body: TagRenameRequest, db: Session = Depends(get_db)):
     return {"old": old, "new": new, "count": count}
 
 
-@router.delete("/remove", status_code=200)
+@router.post("/remove", status_code=200)
 def remove_tag(body: TagRemoveRequest, db: Session = Depends(get_db)):
     """Remove a tag from specified articles (or all if not specified)."""
     tag = body.tag.strip()

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useArticles } from '../hooks/useArticles';
 import { useCategories } from '../hooks/useCategories';
@@ -13,8 +13,10 @@ export function ArticleList() {
   const categoryId = searchParams.get('category') ?? undefined;
   const search = searchParams.get('search') ?? undefined;
   const tag = searchParams.get('tag') ?? undefined;
+  const viewId = searchParams.get('view') ?? undefined;
 
-  const { articles, loading, refetch } = useArticles({ category_id: categoryId, search, tag });
+  const params = useMemo(() => ({ category_id: categoryId, search, tag }), [categoryId, search, tag]);
+  const { articles, loading, error, refetch } = useArticles(params);
   const { categories } = useCategories();
   const { openEditor, articleVersion, searchInputRef } = useApp();
 
@@ -150,19 +152,6 @@ export function ArticleList() {
     return articles;
   }, [articles, selectedArticleIds, viewedArticleId]);
 
-  // Tags (manual) — computed from article.tags
-  const tagList = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const a of entityPool) {
-      for (const t of a.tags) {
-        counts.set(t, (counts.get(t) ?? 0) + 1);
-      }
-    }
-    return Array.from(counts.entries())
-      .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
-  }, [entityPool]);
-
   // Entities (LLM-extracted) — computed from article.entities, with most common type
   const llmEntityList = useMemo(() => {
     const counts = new Map<string, number>();
@@ -199,8 +188,24 @@ export function ArticleList() {
     setViewedArticleId(null);
   }, [categoryId, search, tag]);
 
-  // Refetch when article is saved (editor close after save)
+  // Sync viewedArticleId from URL view param (e.g. after file upload)
   useEffect(() => {
+    if (viewId) {
+      setViewedArticleId(viewId);
+      setSelectedArticleIds(new Set([viewId]));
+    } else {
+      setViewedArticleId(null);
+    }
+  }, [viewId]);
+
+  // Refetch when article is saved (editor close after save).
+  // Skip the initial mount — useArticles already fetches on mount.
+  const initialRender = useRef(true);
+  useEffect(() => {
+    if (initialRender.current) {
+      initialRender.current = false;
+      return;
+    }
     if (articleVersion > 0) {
       refetch();
     }
@@ -214,6 +219,11 @@ export function ArticleList() {
   };
 
   const handleBack = () => {
+    if (searchParams.has('view')) {
+      const params = new URLSearchParams(searchParams);
+      params.delete('view');
+      setSearchParams(params, { replace: true });
+    }
     setViewedArticleId(null);
     setSelectedArticleIds(new Set());
   };
@@ -245,16 +255,23 @@ export function ArticleList() {
                   ref={searchInputRef}
                   type="text"
                   className={styles.searchInput}
-                  placeholder={tag ? `标签: ${tag}` : '搜索知识库...'}
+                  placeholder={tag ? `标签: ${tag}` : '搜索文章...'}
                   value={searchVal}
                   onChange={handleSearchChange}
                   autoComplete="off"
+                  aria-label="搜索知识库"
                 />
               </div>
             </div>
 
             {/* Content below — conditional */}
-            {loading ? (
+            {error ? (
+              <div className={styles.empty}>
+                <div className={styles.emptyIcon}>⚠️</div>
+                <p>加载失败：{error}</p>
+                <button className={styles.newBtn} onClick={refetch}>重试</button>
+              </div>
+            ) : loading ? (
               <div className={styles.empty}><p>加载中…</p></div>
             ) : articles.length === 0 ? (
               <div className={styles.empty}>
@@ -288,8 +305,7 @@ export function ArticleList() {
       </div>
 
       <EntityPanel
-        entities={tagList}
-        llmEntities={llmEntityList}
+        entities={llmEntityList}
         selectedArticleIds={selectedArticleIdsArray}
         articles={articles}
         mode={entityPanelMode}

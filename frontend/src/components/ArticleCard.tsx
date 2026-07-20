@@ -11,10 +11,13 @@ interface Props {
 function stripMarkdown(md: string): string {
   return md
     .replace(/#{1,6}\s/g, '')
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')   // images → alt text
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')    // links → text
     .replace(/\*\*(.+?)\*\*/g, '$1')
     .replace(/\*(.+?)\*/g, '$1')
+    .replace(/~~(.+?)~~/g, '$1')                 // strikethrough
     .replace(/`{1,3}[^`]*`{1,3}/g, '')
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/^>\s/gm, '')                       // blockquotes
     .replace(/[>\-*+|]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -46,11 +49,17 @@ export function ArticleCard({ article, selected, onSelect, onOpen }: Props) {
     <div
       className={`${styles.card} ${selected ? styles.cardSelected : ''}`}
       style={{ '--card-accent': catColor } as React.CSSProperties}
+      role="button"
+      tabIndex={0}
+      aria-label={`${article.title}${selected ? '（已选中）' : ''}`}
       onClick={(e) => {
-        // Don't select when clicking the open button
         const target = e.target as HTMLElement;
         if (target.closest('button')) return;
         onSelect(article.id, e.ctrlKey || e.metaKey);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') { e.preventDefault(); onOpen(article.id); }
+        if (e.key === ' ') { e.preventDefault(); onSelect(article.id, e.ctrlKey || e.metaKey); }
       }}
     >
       <div className={styles.body}>
@@ -75,7 +84,7 @@ export function ArticleCard({ article, selected, onSelect, onOpen }: Props) {
           >
             {catName}
           </span>
-          <span>{formatDate(article.updated_at)}</span>
+          <span>{formatDate(article.created_at)}</span>
           {article.attachment_name && (
             <span style={{ fontSize: 11, color: 'var(--c-text-muted)' }}>📎</span>
           )}

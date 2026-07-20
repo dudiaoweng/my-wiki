@@ -31,7 +31,15 @@ export function useArticles(params?: { category_id?: string; search?: string; ta
   const createArticle = async (data: ArticleCreate): Promise<Article | null> => {
     try {
       const article = await api.createArticle(data);
-      setArticles((prev) => [article, ...prev]);
+      // Only prepend to list if no active filter (or if article matches filter)
+      setArticles((prev) => {
+        const matchesCategory = !params?.category_id || article.category_id === params.category_id;
+        const matchesTag = !params?.tag || article.tags.includes(params.tag);
+        if (matchesCategory && matchesTag) {
+          return [article, ...prev];
+        }
+        return prev;
+      });
       showToast('文章已创建', 'success');
       return article;
     } catch (e: unknown) {

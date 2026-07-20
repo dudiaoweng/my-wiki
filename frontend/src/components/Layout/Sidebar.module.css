@@ -37,6 +37,17 @@
   margin-bottom: 6px;
 }
 
+.sectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.sectionHeader .sectionLabel {
+  margin-bottom: 0;
+}
+
 .item {
   display: flex;
   align-items: center;
@@ -48,6 +59,7 @@
   color: var(--c-text-soft);
   transition: all var(--transition-fast);
   border: none;
+  border-left: 3px solid transparent;
   background: none;
   width: 100%;
   text-align: left;
@@ -63,7 +75,8 @@
 .itemActive {
   background: var(--c-accent-wash);
   color: var(--c-accent);
-  font-weight: 500;
+  font-weight: 600;
+  border-left-color: var(--c-accent);
 }
 
 .count {
@@ -75,11 +88,14 @@
   border-radius: 10px;
   min-width: 22px;
   text-align: center;
+  font-weight: 500;
+  transition: all var(--transition-fast);
 }
 
 .itemActive .count {
   background: var(--c-accent);
   color: white;
+  font-weight: 600;
 }
 
 .dot {
@@ -125,6 +141,154 @@
 .newBtnIcon {
   font-size: 18px;
   line-height: 1;
+}
+
+/* ── Category rows ── */
+
+.catRow {
+  position: relative;
+}
+
+.catName {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* ── Header action buttons (edit / delete active category) ── */
+
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 4px;
+}
+
+.headerActionBtn {
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  font-size: 12px;
+  color: var(--c-text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 1;
+  transition: all var(--transition-fast);
+}
+
+.headerActionBtn:hover:not(:disabled) {
+  background: var(--c-surface);
+  color: var(--c-text);
+}
+
+.headerActionBtn:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+}
+
+.headerActionDanger:hover:not(:disabled) {
+  background: var(--c-danger-wash, #fce4e4);
+  color: var(--c-danger, #c62828);
+}
+
+.headerActionAdd {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+/* ── Inline create / edit form ── */
+
+.catForm {
+  margin: 4px 0 8px 0;
+  padding: 8px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+}
+
+.catInput {
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--c-accent);
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: var(--font-body);
+  color: var(--c-text);
+  background: var(--c-card);
+  outline: none;
+  box-sizing: border-box;
+}
+
+.colorRow {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
+.colorDot {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  outline: none;
+  transition: all var(--transition-fast);
+}
+
+.colorDot:hover {
+  transform: scale(1.15);
+}
+
+.colorDotActive {
+  border-color: var(--c-text);
+  box-shadow: 0 0 0 2px var(--c-card);
+}
+
+.formActions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  justify-content: flex-end;
+}
+
+.formBtn {
+  padding: 4px 12px;
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  background: var(--c-card);
+  font-size: 12px;
+  color: var(--c-text-soft);
+  cursor: pointer;
+  font-family: var(--font-body);
+  transition: all var(--transition-fast);
+}
+
+.formBtn:hover {
+  background: var(--c-surface);
+}
+
+.formBtnPrimary {
+  background: var(--c-accent);
+  color: white;
+  border-color: var(--c-accent);
+}
+
+.formBtnPrimary:hover {
+  background: var(--c-accent-hover);
+}
+
+.formBtnPrimary:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
 /* Mobile */

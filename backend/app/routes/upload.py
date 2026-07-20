@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import re
@@ -38,6 +39,11 @@ async def parse_text(file: UploadFile) -> str:
     """Parse plain text files."""
     content = await file.read()
     return content.decode("utf-8", errors="replace")
+
+
+def parse_text_from_bytes(content_bytes: bytes) -> str:
+    """Parse plain text from already-read bytes."""
+    return content_bytes.decode("utf-8", errors="replace")
 
 
 def parse_docx(file_path: str) -> str:
@@ -158,12 +164,12 @@ async def parse_image(file_path: str, original_name: str) -> str:
     return f"# 图片：{original_name}\n\n> 图片描述生成失败。请手动添加文章内容。"
 
 
-async def parse_media(file: UploadFile) -> str:
+async def parse_media(content_bytes: bytes, filename: str, content_type: str) -> str:
     """Handle audio/video — try LLM transcription, fallback to metadata."""
     # Try using the LLM API for transcription
     if LLM_API_KEY:
         try:
-            result = await transcribe_media(file)
+            result = await transcribe_media_from_bytes(content_bytes, filename, content_type)
             if result and result.strip():
                 return result
         except Exception:
@@ -172,20 +178,16 @@ async def parse_media(file: UploadFile) -> str:
     # Fallback: return metadata as content
     return (
         f"# 音视频文件\n\n"
-        f"- 文件名：{file.filename}\n"
-        f"- 类型：{file.content_type}\n"
-        f"- 大小：{file.size} bytes\n\n"
+        f"- 文件名：{filename}\n"
+        f"- 类型：{content_type}\n"
+        f"- 大小：{len(content_bytes)} bytes\n\n"
         f"> 注意：无法自动转写此文件的内容。请手动添加文章内容或配置支持音视频转写的 API。"
     )
 
 
-async def transcribe_media(file: UploadFile) -> str:
-    """Attempt to transcribe audio/video via LLM API."""
+async def transcribe_media_from_bytes(content: bytes, filename: str, content_type: str) -> str:
+    """Attempt to transcribe audio/video via LLM API using file bytes."""
     import httpx
-
-    # Re-read file content
-    content = await file.read()
-    await file.seek(0)
 
     # Try the audio/speech endpoint if available
     try:
@@ -194,7 +196,7 @@ async def transcribe_media(file: UploadFile) -> str:
             resp = await client.post(
                 f"{LLM_API_BASE.rstrip('/').replace('/chat/completions', '')}/audio/transcriptions",
                 headers={"Authorization": f"Bearer {LLM_API_KEY}"},
-                files={"file": (file.filename or "audio", content, file.content_type or "application/octet-stream")},
+                files={"file": (filename or "audio", content, content_type or "application/octet-stream")},
                 data={"model": "whisper-1"},
             )
             if resp.status_code == 200:
@@ -206,7 +208,6 @@ async def transcribe_media(file: UploadFile) -> str:
     # Try sending as a chat message with file reference
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
-            # Some LLM APIs support describing media content
             resp = await client.post(
                 f"{LLM_API_BASE.rstrip('/')}/chat/completions",
                 headers={
@@ -217,7 +218,7 @@ async def transcribe_media(file: UploadFile) -> str:
                     "model": LLM_MODEL,
                     "messages": [
                         {"role": "system", "content": "请用中文简要描述这个文件的内容（不超过200字）。如果无法识别，请回复'无法识别'。"},
-                        {"role": "user", "content": f"文件名: {file.filename}, 类型: {file.content_type}, 大小: {file.size} bytes"}
+                        {"role": "user", "content": f"文件名: {filename}, 类型: {content_type}, 大小: {len(content)} bytes"}
                     ],
                     "max_tokens": 500,
                 },
@@ -254,7 +255,7 @@ async def generate_title(text: str) -> str:
                 json={
                     "model": LLM_MODEL,
                     "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 2000,
+                    "max_tokens": 100,
                     "temperature": 0.3,
                 },
             )
@@ -279,69 +280,13 @@ def _fallback_title(text: str) -> str:
     return clean + ("…" if len(text) > 40 else "")
 
 
-# Types that go to tags (知识概念类 → 标签)
-TAG_TYPES = {'concept', 'technology', 'tech', 'tool', 'method', 'standard', 'language',
-             '概念', '技术', '工具', '方法', '标准', '语言'}
-
-# Types that go to entities (人物/组织/地点/事件/产品/其他 → 知识图谱实体)
-ENTITY_TYPES = {'person', 'people', 'organization', 'org', 'company', 'location', 'place',
-                'event', 'product', 'other',
-                '人物', '组织', '公司', '地点', '事件', '产品', '其他'}
-
-
 async def extract_entities_and_relations(text: str) -> tuple[list[str], dict | None]:
     """Extract tags and structured entities+relations from document text via LLM.
-    Returns (tags, entities_dict)."""
-    if not LLM_API_KEY:
-        return [], None
-
-    import httpx
-    prompt = (
-        "从以下文档内容中提取关键概念和实体。\n"
-        "- 概念类（概念、技术、工具、方法、标准、语言）→ 作为标签\n"
-        "- 实体类（人物、组织、地点、事件、产品）→ 作为实体，含关系\n"
-        "以 JSON 格式返回（只返回 JSON，不要其他内容）：\n"
-        '{"tags":["标签1","标签2"],"entities":[{"name":"实体名","type":"类型"}],"relations":[{"source":"源实体","target":"目标实体","label":"关系描述"}]}\n'
-        "提取 3-8 个标签和 2-5 个实体及关系。\n\n"
-        f"{text[:2000]}"
-    )
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{LLM_API_BASE.rstrip('/')}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {LLM_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": LLM_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 4000,
-                    "temperature": 0.2,
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            result_str = data["choices"][0]["message"]["content"].strip()
-            # Strip markdown code fences if present
-            result_str = re.sub(r'^```(?:json)?\s*', '', result_str)
-            result_str = re.sub(r'\s*```$', '', result_str)
-            result = json.loads(result_str)
-            if isinstance(result, dict):
-                tags = result.get("tags", [])
-                if isinstance(tags, list):
-                    tags = [t.strip() for t in tags if isinstance(t, str) and t.strip()]
-                else:
-                    tags = []
-                entities_part = result.get("entities", [])
-                relations_part = result.get("relations", [])
-                if isinstance(entities_part, list) and entities_part:
-                    return tags, {"entities": entities_part, "relations": relations_part}
-                return tags, None
-    except Exception:
-        pass
-    return [], None
+    Returns (tags, entities_dict).
+    Uses the shared extraction function via asyncio.to_thread to avoid blocking."""
+    import asyncio
+    from app.llm_extract import extract_tags_and_entities
+    return await asyncio.to_thread(extract_tags_and_entities, text)
 
 
 # ─── Route ─────────────────────────────────────────
@@ -358,13 +303,17 @@ async def upload_file(
     # Determine file extension
     ext = Path(file.filename).suffix.lower()
 
-    # 1. Save file to disk
+    # 1. Save file to disk (sanitize filename to prevent path traversal)
     file_id = str(uuid.uuid4())
-    safe_name = f"{file_id}_{file.filename}"
+    safe_filename = re.sub(r'[^\w.\-]', '_', Path(file.filename).name)
+    safe_name = f"{file_id}_{safe_filename}"
     file_path = UPLOAD_DIR / safe_name
 
     content_bytes = await file.read()
-    await file.seek(0)  # Reset for potential re-read
+
+    # Prevent resource exhaustion: limit to 500MB
+    if len(content_bytes) > 500 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File too large (max 500MB)")
 
     with open(file_path, "wb") as f:
         f.write(content_bytes)
@@ -372,28 +321,26 @@ async def upload_file(
     # 2. Extract text based on file type
     try:
         if ext in TEXT_EXTENSIONS:
-            text = await parse_text(file)
+            # Use content_bytes directly — file.read() has already been consumed
+            text = parse_text_from_bytes(content_bytes)
         elif ext in WORD_EXTENSIONS:
-            text = parse_docx(str(file_path))
+            text = await asyncio.to_thread(parse_docx, str(file_path))
         elif ext in EXCEL_EXTENSIONS and ext != '.csv':
-            text = parse_xlsx(str(file_path))
+            text = await asyncio.to_thread(parse_xlsx, str(file_path))
         elif ext in PPT_EXTENSIONS:
-            text = parse_pptx(str(file_path))
+            text = await asyncio.to_thread(parse_pptx, str(file_path))
         elif ext in PDF_EXTENSIONS:
-            text = parse_pdf(str(file_path))
+            text = await asyncio.to_thread(parse_pdf, str(file_path))
         elif ext in IMAGE_EXTENSIONS:
             text = await parse_image(str(file_path), file.filename)
         elif ext in AUDIO_EXTENSIONS or ext in VIDEO_EXTENSIONS:
-            text = await parse_media(file)
+            # Use content_bytes — file.read() has already been consumed
+            text = await parse_media(content_bytes, file.filename, file.content_type or "")
         else:
             # Unsupported format — store as attachment only
             text = f"# {file.filename}\n\n不支持的文件格式。文件已作为附件保存。"
     except Exception as e:
-        text = f"# {file.filename}\n\n文件解析失败：{str(e)}\n\n文件已作为附件保存。"
-
-    # Handle CSV separately (it's in TEXT_EXTENSIONS)
-    if ext == '.csv' and ext in TEXT_EXTENSIONS:
-        text = await parse_text(file)
+        text = f"# {file.filename}\n\n文件解析失败，文件已作为附件保存。"
 
     # 3. Generate title via LLM
     title = await generate_title(text)

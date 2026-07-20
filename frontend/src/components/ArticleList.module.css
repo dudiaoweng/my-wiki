@@ -121,5 +121,13 @@
 @media (max-width: 1100px) {
   .layout {
     flex-direction: column;
+    height: 100%;
+    gap: 0;
+  }
+
+  .mainCol {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
   }
 }

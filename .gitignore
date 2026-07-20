@@ -1,0 +1,8 @@
+# 忽略 Python 虚拟环境目录
+backend/.venv/
+
+# 忽略上传目录
+backend/upload/
+
+# 忽略 IDE 特定配置（如 VS Code 的 .vscode 文件夹）
+.vscode/

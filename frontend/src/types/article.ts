@@ -28,7 +28,6 @@ export interface Article {
   category: Category | null;
   attachment_name: string | null;
   attachment_type: string | null;
-  attachment_path: string | null;
 }
 
 export interface ArticleCreate {
