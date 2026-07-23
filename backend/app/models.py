@@ -35,6 +35,7 @@ class Article(Base):
     category_id = Column(String, ForeignKey("categories.id", ondelete="SET NULL"), nullable=True, index=True)
     tags = Column(Text, nullable=False, default="[]")
     entities = Column(Text, nullable=True, default=None)  # LLM 提取的实体+关系 JSON
+    processing = Column(Text, nullable=True, default=None)  # "processing" | None(completed)
     created_at = Column(DateTime, default=utcnow, nullable=False)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False, index=True)
     attachment_path = Column(String, nullable=True)

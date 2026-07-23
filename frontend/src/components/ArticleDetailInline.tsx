@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import rehypeRaw from 'rehype-raw';
 import { api } from '../api/client';
 import { useApp } from '../context/AppProvider';
 import { useToast } from '../hooks/useToast';
@@ -36,6 +37,23 @@ export function ArticleDetailInline({ articleId, onBack }: Props) {
       })
       .finally(() => setLoading(false));
   }, [articleId, showToast]);
+
+  // Poll while background recognition is running
+  useEffect(() => {
+    if (!article || article.processing !== 'processing') return;
+    const timer = setInterval(async () => {
+      try {
+        const updated = await api.getArticle(articleId);
+        setArticle(updated);
+        if (updated.processing !== 'processing') {
+          clearInterval(timer);
+          // Notify list to refresh (for sidebar count, card title, etc.)
+          notifyArticleSaved();
+        }
+      } catch { /* keep polling */ }
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [article, articleId, notifyArticleSaved]);
 
   if (loading) return <div className={styles.loading}>加载中…</div>;
   if (error) return <div className={styles.loading}>加载失败：{error}</div>;
@@ -93,8 +111,8 @@ export function ArticleDetailInline({ articleId, onBack }: Props) {
         </div>
       )}
 
-      <div className={styles.content}>
-        <Markdown remarkPlugins={[remarkGfm]}>{article.content}</Markdown>
+      <div className={`${styles.content} markdown-content`}>
+        <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{article.content}</Markdown>
       </div>
     </div>
   );

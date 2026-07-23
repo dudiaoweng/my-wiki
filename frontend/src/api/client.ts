@@ -192,6 +192,20 @@ export const api = {
     });
   },
 
+  async parseFileForQA(file: File): Promise<{ filename: string; content: string; content_type: string; is_image: boolean }> {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch(`${BASE}/qa/parse-file`, {
+      method: 'POST',
+      body: formData,
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new ApiError(res.status, body.detail ?? res.statusText);
+    }
+    return res.json();
+  },
+
   // ── Upload ──
   async uploadFile(file: File, categoryId?: string): Promise<Article> {
     const formData = new FormData();

@@ -19,8 +19,8 @@ _EXTRACT_PROMPT = (
     "- 概念类（概念、技术、工具、方法、标准、语言）→ 作为标签\n"
     "- 实体类（人物、组织、地点、事件、产品）→ 作为实体，含关系\n"
     "以 JSON 格式返回（只返回 JSON，不要其他内容）：\n"
-    '{"tags":["标签1","标签2"],"entities":[{"name":"实体名","type":"类型"}],"relations":[{"source":"源实体","target":"目标实体","label":"关系描述"}]}\n'
-    "提取 3-8 个标签和 2-5 个实体及关系。\n\n"
+    '{{"tags":["标签1","标签2"],"entities":[{{"name":"实体名","type":"类型"}}],"relations":[{{"source":"源实体","target":"目标实体","label":"关系描述"}}]}}\n'
+    "根据内容量自动决定提取数量，尽可能全面覆盖所有关键概念和实体。\n\n"
     "{text}"
 )
 
@@ -43,7 +43,7 @@ def extract_tags_and_entities(text: str, max_chars: int = 2000) -> tuple[list[st
     last_error = None
     for attempt in (1, 2):
         try:
-            with httpx.Client(timeout=60.0) as client:
+            with httpx.Client(timeout=120.0) as client:
                 resp = client.post(
                     f"{LLM_API_BASE.rstrip('/')}/chat/completions",
                     headers={

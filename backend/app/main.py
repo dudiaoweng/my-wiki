@@ -5,9 +5,10 @@ load_dotenv()
 
 import os
 from pathlib import Path
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import FileResponse
 from app.database import init_db, SessionLocal
 from app.models import Category, Article
 from app.routes import articles, categories, tags, entities, stats, graph, qa, upload
@@ -123,17 +124,38 @@ app.include_router(graph.router)
 app.include_router(qa.router)
 app.include_router(upload.router)
 
-# Mount uploads directory — force download to prevent XSS via uploaded HTML/SVG
+# Mount uploads directory — inline for media, force download for HTML/SVG (XSS prevention)
+_INLINE_EXTS = frozenset({
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp", ".ico", ".tiff", ".tif",
+    ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".wma",
+    ".mp4", ".avi", ".mov", ".mkv", ".webm", ".wmv",
+})
+
 class _DownloadStaticFiles(StaticFiles):
     def file_response(self, *args, **kwargs):
+        full_path = args[0]
+        ext = Path(full_path).suffix.lower()
         resp = super().file_response(*args, **kwargs)
-        resp.headers["Content-Disposition"] = "attachment"
+        if ext in _INLINE_EXTS:
+            resp.headers["Content-Disposition"] = "inline"
+        else:
+            resp.headers["Content-Disposition"] = "attachment"
         resp.headers["X-Content-Type-Options"] = "nosniff"
         return resp
 
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", _DownloadStaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
+
+
+# Dedicated endpoint for inline media display (images/audio/video)
+@app.get("/api/media/{filename:path}")
+def serve_media(filename: str):
+    """Serve uploaded media files inline (no forced download)."""
+    file_path = UPLOAD_DIR / filename
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(str(file_path))
 
 
 @app.get("/api/health")

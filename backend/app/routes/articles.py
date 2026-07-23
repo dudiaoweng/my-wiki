@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import desc
 from app.dependencies import get_db
-from app.models import Article, Category
+from app.models import Article, Category, EntityInfo
 from app.schemas import ArticleCreate, ArticleUpdate, ArticleResponse
 from app.llm_extract import extract_tags_and_entities
 import uuid
@@ -188,6 +188,43 @@ def delete_article(
     article = db.query(Article).filter(Article.id == article_id).first()
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
+
+    # Collect entity names from this article before deleting
+    entity_names: set[str] = set()
+    if article.entities:
+        try:
+            ent_data = json.loads(article.entities)
+            for e in ent_data.get("entities", []):
+                name = e.get("name", "")
+                if name:
+                    entity_names.add(name)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
     db.delete(article)
     db.commit()
+
+    # Clean up entity_infos that no longer appear in any article
+    if entity_names:
+        still_used: set[str] = set()
+        all_articles = db.query(Article.entities).filter(Article.entities.isnot(None)).all()
+        for (ent_str,) in all_articles:
+            try:
+                ent_data = json.loads(ent_str) if isinstance(ent_str, str) else ent_str
+                for e in ent_data.get("entities", []):
+                    name = e.get("name", "")
+                    if name:
+                        still_used.add(name)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        orphaned = entity_names - still_used
+        if orphaned:
+            db.query(EntityInfo).filter(EntityInfo.entity_name.in_(orphaned)).delete(synchronize_session=False)
+            db.commit()
+            logger.info(f"Cleaned up entity_infos for orphaned entities: {orphaned}")
+
+    # Invalidate knowledge graph cache
+    from app.routes.graph import invalidate_graph_cache
+    invalidate_graph_cache()
+
     return None

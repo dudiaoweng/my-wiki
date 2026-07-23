@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { api } from '../api/client';
 import { useArticles } from '../hooks/useArticles';
 import { useCategories } from '../hooks/useCategories';
 import { useApp } from '../context/AppProvider';
@@ -197,6 +198,20 @@ export function ArticleList() {
       setViewedArticleId(null);
     }
   }, [viewId]);
+
+  // Poll only processing articles — update their cards individually
+  useEffect(() => {
+    const processing = articles.filter((a) => a.processing === 'processing');
+    if (processing.length === 0) return;
+    const timer = setInterval(async () => {
+      const updated = await Promise.allSettled(
+        processing.map((a) => api.getArticle(a.id).catch(() => null)),
+      );
+      const done = updated.some((r) => r.status === 'fulfilled' && r.value && r.value.processing !== 'processing');
+      if (done) refetch(); // only full refetch when something changed
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [articles, refetch]);
 
   // Refetch when article is saved (editor close after save).
   // Skip the initial mount — useArticles already fetches on mount.
