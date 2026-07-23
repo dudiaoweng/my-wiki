@@ -1,4 +1,0 @@
-docker run -d --name neo4j-enterprise -p 7474:7474 -p 7687:7687 -e NEO4J_ACCEPT_LICENSE_AGREEMENT=yes -e NEO4J_AUTH=neo4j/zhouheng -e NEO4J_EDITION=enterprise -e NEO4J_server_memory_heap_initial__size=1G  -e NEO4J_server_memory_heap_max__size=2G  -e NEO4JLABS_PLUGINS='["apoc","genai"]'  -e NEO4J_apoc_export_file_enabled=true  -e NEO4J_apoc_import_file_enabled=true  -e NEO4J_apoc_import_file_use__neo4j__config=true -v $HOME/.neo4j/data:/data -v $HOME/.neo4j/plugins:/plugins  -v $HOME/.neo4j/config:/config -v $HOME/.neo4j/logs:/logs neo4j:enterprise
-
-
-docker run -d --name neo4j-enterprise -p 7474:7474 -p 7687:7687 -e NEO4J_ACCEPT_LICENSE_AGREEMENT=yes -e NEO4J_AUTH=neo4j/zhouheng -e NEO4J_EDITION=enterprise  -e NEO4JLABS_PLUGINS='["apoc","genai"]'  -e NEO4J_apoc_export_file_enabled=true  -e NEO4J_apoc_import_file_enabled=true  -e NEO4J_apoc_import_file_use__neo4j__config=true neo4j:enterprise

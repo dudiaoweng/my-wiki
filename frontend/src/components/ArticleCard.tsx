@@ -10,15 +10,18 @@ interface Props {
 
 function stripMarkdown(md: string): string {
   return md
+    .replace(/<[^>]*>/g, '')                     // HTML tags (img, audio, video)
     .replace(/#{1,6}\s/g, '')
-    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')   // images → alt text
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')    // links → text
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')    // images → alt text
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')     // links → text
     .replace(/\*\*(.+?)\*\*/g, '$1')
     .replace(/\*(.+?)\*/g, '$1')
-    .replace(/~~(.+?)~~/g, '$1')                 // strikethrough
+    .replace(/~~(.+?)~~/g, '$1')                  // strikethrough
     .replace(/`{1,3}[^`]*`{1,3}/g, '')
-    .replace(/^>\s/gm, '')                       // blockquotes
-    .replace(/[>\-*+|]/g, ' ')
+    .replace(/^>\s/gm, '')                        // blockquotes
+    .replace(/^[>\-*+|\d]+\.?\s/gm, '')           // list markers
+    .replace(/[\n\r]+/g, ' ')                     // newlines → spaces
+    .replace(/[>\-*+|#]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -43,7 +46,7 @@ export function ArticleCard({ article, selected, onSelect, onOpen }: Props) {
   const catColor = article.category?.color ?? 'var(--c-border)';
   const catName = article.category?.name ?? '未分类';
   const stripped = stripMarkdown(article.content);
-  const excerpt = stripped.slice(0, 120) + (stripped.length > 120 ? '…' : '');
+  const excerpt = stripped.slice(0, 200) + (stripped.length > 200 ? '…' : '');
 
   return (
     <div

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import rehypeRaw from 'rehype-raw';
 import { api } from '../api/client';
 import { useApp } from '../context/AppProvider';
 import { useToast } from '../hooks/useToast';
@@ -36,6 +37,22 @@ export function ArticleDetail() {
       })
       .finally(() => setLoading(false));
   }, [id, showToast]);
+
+  // Poll while background recognition is running
+  useEffect(() => {
+    if (!id || !article || article.processing !== 'processing') return;
+    const timer = setInterval(async () => {
+      try {
+        const updated = await api.getArticle(id);
+        setArticle(updated);
+        if (updated.processing !== 'processing') {
+          clearInterval(timer);
+          notifyArticleSaved();
+        }
+      } catch { /* keep polling */ }
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [article, id, notifyArticleSaved]);
 
   if (loading) {
     return <div className={styles.loading}>加载中…</div>;
@@ -131,8 +148,8 @@ export function ArticleDetail() {
         </div>
       )}
 
-      <div className={styles.content}>
-        <Markdown remarkPlugins={[remarkGfm]}>{article.content}</Markdown>
+      <div className={`${styles.content} markdown-content`}>
+        <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{article.content}</Markdown>
       </div>
 
       <div className={styles.actions}>

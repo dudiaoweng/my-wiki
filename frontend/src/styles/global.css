@@ -41,6 +41,20 @@ body {
   to   { opacity: 0; transform: translateX(40px); }
 }
 
+/* ─── Responsive media (images, audio, video in markdown content) ─── */
+.markdown-content img,
+.markdown-content video {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  border-radius: var(--radius-sm);
+}
+
+.markdown-content audio {
+  max-width: 100%;
+  display: block;
+}
+
 /* ─── Reduced motion ─── */
 @media (prefers-reduced-motion: reduce) {
   *,

@@ -1,12 +1,15 @@
+import asyncio
 import json
 import logging
 import math
 import os
 import re
+import uuid
+from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from app.dependencies import get_db
@@ -17,10 +20,24 @@ router = APIRouter(prefix="/api/qa", tags=["qa"])
 
 # ─── Config ────────────────────────────────────────
 
+# ── LLM (text) ──
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_API_BASE = os.getenv("LLM_API_BASE", "https://api.openai.com/v1")
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "embedding-3")  # Zhipu default
+# ── Vision ──
+VISION_API_KEY = os.getenv("VISION_API_KEY", LLM_API_KEY)
+VISION_API_BASE = os.getenv("VISION_API_BASE", LLM_API_BASE)
+VISION_MODEL = os.getenv("VISION_MODEL", "glm-4v-flash")
+# ── ASR ──
+ASR_API_KEY = os.getenv("ASR_API_KEY", LLM_API_KEY)
+ASR_API_BASE = os.getenv("ASR_API_BASE", LLM_API_BASE)
+ASR_MODEL = os.getenv("ASR_MODEL", "GLM-ASR-2512")
+# ── Embedding ──
+EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", LLM_API_KEY)
+EMBEDDING_API_BASE = os.getenv("EMBEDDING_API_BASE", LLM_API_BASE)
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "embedding-3")
+# ── Q&A ──
+QA_TEMPERATURE = float(os.getenv("QA_TEMPERATURE", "0.4"))
 
 # ─── Schemas ───────────────────────────────────────
 
@@ -28,9 +45,17 @@ class QAMessage(BaseModel):
     role: str
     content: str
 
+class FileContext(BaseModel):
+    filename: str
+    content: str           # text content, or base64 data for images
+    content_type: str = "text/plain"  # MIME type
+    is_image: bool = False # True → pass as vision content to LLM
+
 class QARequest(BaseModel):
     question: str
-    history: list[QAMessage] = Field(default_factory=list, max_length=20)
+    history: list[QAMessage] = Field(default_factory=list, max_length=50)
+    file_contexts: list[FileContext] = Field(default_factory=list, max_length=5)
+    kb_enabled: bool = True  # False → skip knowledge base, use LLM directly
 
 class QASource(BaseModel):
     article_id: str
@@ -117,9 +142,9 @@ async def get_embedding(text: str) -> list[float]:
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(
-            f"{LLM_API_BASE.rstrip('/')}/embeddings",
+            f"{EMBEDDING_API_BASE.rstrip('/')}/embeddings",
             headers={
-                "Authorization": f"Bearer {LLM_API_KEY}",
+                "Authorization": f"Bearer {EMBEDDING_API_KEY}",
                 "Content-Type": "application/json",
             },
             json={
@@ -271,7 +296,281 @@ def get_excerpt(content: str, max_len: int = 200) -> str:
     return clean[:max_len] + ('…' if len(clean) > max_len else '')
 
 
-# ─── Route ─────────────────────────────────────────
+# ─── File parsing for Q&A context ──────────────────
+
+# Reuse upload.py parsing functions
+from app.routes.upload import (
+    parse_text_from_bytes, parse_docx, parse_xlsx, parse_pptx, parse_pdf,
+    TEXT_EXTENSIONS, WORD_EXTENSIONS, EXCEL_EXTENSIONS, PPT_EXTENSIONS,
+    PDF_EXTENSIONS, IMAGE_EXTENSIONS, AUDIO_EXTENSIONS, VIDEO_EXTENSIONS,
+)
+
+UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads"))
+
+# MIME map for image types
+IMAGE_MIME_MAP = {
+    '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+    '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+    '.bmp': 'image/bmp', '.ico': 'image/x-icon', '.tiff': 'image/tiff', '.tif': 'image/tiff',
+}
+
+# Re-parse helper for QA: extracts text or encodes images for LLM context
+# ─── Audio / Video Q&A helpers ──────────────────────
+
+def _find_ffmpeg_qa() -> str | None:
+    """Find ffmpeg executable."""
+    import platform
+    import shutil
+    ffmpeg = shutil.which('ffmpeg')
+    if ffmpeg:
+        return ffmpeg
+    if platform.system() == 'Windows':
+        try:
+            from pathlib import Path
+            ffmpeg_base = Path(os.environ.get('LOCALAPPDATA', '')) / 'Microsoft' / 'WinGet' / 'Packages'
+            for p in ffmpeg_base.glob('Gyan.FFmpeg_*'):
+                candidates = sorted(p.glob('ffmpeg-*-full_build/bin/ffmpeg.exe'), reverse=True)
+                if candidates:
+                    return str(candidates[0])
+        except Exception:
+            pass
+    return None
+
+
+async def parse_audio_for_qa(content_bytes: bytes, filename: str) -> str:
+    """Transcribe audio for Q&A context. Returns transcribed text or error message."""
+    import io
+    import subprocess
+    import wave
+    import audioop
+    import httpx
+
+    ext = Path(filename).suffix.lower()
+
+    # ── Convert to mono 16kHz WAV ──
+    if ext == '.wav':
+        try:
+            with wave.open(io.BytesIO(content_bytes), 'rb') as wf:
+                nchannels = wf.getnchannels()
+                sampwidth = wf.getsampwidth()
+                framerate = wf.getframerate()
+                frames = wf.readframes(wf.getnframes())
+            if nchannels > 1:
+                frames = audioop.tomono(frames, sampwidth, 1.0, 1.0)
+            if framerate != 16000:
+                frames = audioop.ratecv(frames, sampwidth, 1, framerate, 16000, None)[0]
+            buf = io.BytesIO()
+            with wave.open(buf, 'wb') as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(sampwidth)
+                wf.setframerate(16000)
+                wf.writeframes(frames)
+            mono_bytes = buf.getvalue()
+        except Exception as e:
+            return f"[音频转换失败：{e}]"
+    else:
+        ffmpeg_path = _find_ffmpeg_qa()
+        if not ffmpeg_path:
+            return "[音频识别失败：需要安装 ffmpeg 来转换非 WAV 格式的音频。]"
+        try:
+            result = subprocess.run(
+                [ffmpeg_path, '-i', 'pipe:0', '-ac', '1', '-ar', '16000', '-f', 'wav', 'pipe:1'],
+                input=content_bytes, capture_output=True, timeout=60,
+            )
+            if result.returncode != 0:
+                return f"[音频转换失败：ffmpeg 无法解码此文件]"
+            mono_bytes = result.stdout
+        except Exception as e:
+            return f"[音频转换失败：{e}]"
+
+    # ── Call ASR ──
+    if not ASR_API_KEY:
+        return "[音频识别失败：未配置语音识别模型 API。]"
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                f"{ASR_API_BASE.rstrip('/').replace('/chat/completions', '')}/audio/transcriptions",
+                headers={"Authorization": f"Bearer {ASR_API_KEY}"},
+                files={"file": ("audio.wav", mono_bytes, "audio/wav")},
+                data={"model": ASR_MODEL},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                text = data.get("text", "").strip()
+                if text:
+                    return f"[音频转录：{filename}]\n{text}"
+                return "[音频识别结果为空。]"
+            err_detail = resp.text[:300]
+            return f"[音频识别失败（HTTP {resp.status_code}）：{err_detail}]"
+    except Exception as e:
+        return f"[音频识别异常：{e}]"
+
+
+async def parse_video_for_qa(content_bytes: bytes, filename: str) -> str:
+    """Extract frames from video and describe for Q&A context."""
+    import base64
+    import cv2
+    import tempfile
+    import httpx
+
+    if not VISION_API_KEY:
+        return "[视频识别失败：未配置视觉模型 API。]"
+
+    # Write video bytes to temp file (OpenCV needs a file path)
+    tmp = tempfile.NamedTemporaryFile(suffix=Path(filename).suffix, delete=False)
+    try:
+        tmp.write(content_bytes)
+        tmp.close()
+
+        cap = cv2.VideoCapture(tmp.name)
+        if not cap.isOpened():
+            return "[视频识别失败：无法打开视频文件。]"
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        duration = total_frames / fps if fps > 0 else 0
+
+        # Extract up to 4 frames
+        positions = [0, 0.3, 0.6, 0.85]
+        frames_b64: list[str] = []
+        for pos in positions:
+            frame_idx = int(total_frames * pos)
+            if frame_idx >= total_frames:
+                frame_idx = total_frames - 1
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                h, w = frame.shape[:2]
+                max_side = max(h, w)
+                if max_side > 1024:
+                    scale = 1024 / max_side
+                    frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
+                _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                frames_b64.append(base64.b64encode(buf).decode('utf-8'))
+        cap.release()
+
+        if not frames_b64:
+            return "[视频识别失败：无法从视频中提取画面。]"
+
+        # ── Call vision model ──
+        name_no_ext = Path(filename).stem
+        user_content: list[dict] = [
+            {
+                "type": "text",
+                "text": (
+                    f"视频「{name_no_ext}」，{len(frames_b64)} 个关键帧，时长约 {duration:.0f} 秒。"
+                    "请用中文简要描述视频内容（100-200 字）。"
+                ),
+            }
+        ]
+        for b64 in frames_b64:
+            user_content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+            })
+
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                f"{VISION_API_BASE.rstrip('/')}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {VISION_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": VISION_MODEL,
+                    "messages": [{"role": "user", "content": user_content}],
+                    "max_tokens": 500,
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                desc = data["choices"][0]["message"]["content"].strip()
+                return f"[视频描述：{filename}]\n{desc}"
+            return f"[视频识别失败（HTTP {resp.status_code}）：{resp.text[:200]}]"
+    except Exception as e:
+        return f"[视频识别异常：{e}]"
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except Exception:
+            pass
+
+
+async def parse_file_for_qa(content_bytes: bytes, file_path: str, content_type: str) -> dict:
+    """Parse a file for Q&A context.
+    Returns {"content": str, "content_type": str, "is_image": bool}.
+    Images are encoded as base64 for direct vision-model use; text files are extracted locally.
+    No LLM calls are made in this function."""
+    import base64
+    ext = Path(file_path).suffix.lower()
+    filename = Path(file_path).name
+
+    if ext in IMAGE_EXTENSIONS:
+        mime = IMAGE_MIME_MAP.get(ext, 'image/png')
+        b64 = base64.b64encode(content_bytes).decode('utf-8')
+        return {"content": b64, "content_type": mime, "is_image": True, "filename": filename}
+    elif ext in TEXT_EXTENSIONS:
+        text = parse_text_from_bytes(content_bytes)
+        return {"content": text, "content_type": "text/plain", "is_image": False, "filename": filename}
+    elif ext in WORD_EXTENSIONS:
+        text = await asyncio.to_thread(parse_docx, file_path)
+        return {"content": text, "content_type": "text/plain", "is_image": False, "filename": filename}
+    elif ext in EXCEL_EXTENSIONS and ext != '.csv':
+        text = await asyncio.to_thread(parse_xlsx, file_path)
+        return {"content": text, "content_type": "text/plain", "is_image": False, "filename": filename}
+    elif ext in PPT_EXTENSIONS:
+        text = await asyncio.to_thread(parse_pptx, file_path)
+        return {"content": text, "content_type": "text/plain", "is_image": False, "filename": filename}
+    elif ext in PDF_EXTENSIONS:
+        text = await asyncio.to_thread(parse_pdf, file_path)
+        return {"content": text, "content_type": "text/plain", "is_image": False, "filename": filename}
+    elif ext in AUDIO_EXTENSIONS:
+        text = await parse_audio_for_qa(content_bytes, filename)
+        return {"content": text, "content_type": "text/plain", "is_image": False, "filename": filename}
+    elif ext in VIDEO_EXTENSIONS:
+        text = await parse_video_for_qa(content_bytes, filename)
+        return {"content": text, "content_type": "text/plain", "is_image": False, "filename": filename}
+    else:
+        text = parse_text_from_bytes(content_bytes)
+        return {"content": text, "content_type": "text/plain", "is_image": False, "filename": filename}
+
+
+@router.post("/parse-file")
+async def parse_file_for_question(file: UploadFile = File(...)):
+    """Parse an uploaded file and return its text for use as Q&A context.
+    Does NOT create an article — purely for on-the-fly Q&A."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    ext = Path(file.filename).suffix.lower()
+    content_bytes = await file.read()
+
+    if len(content_bytes) > 50 * 1024 * 1024:  # 50MB for Q&A
+        raise HTTPException(status_code=413, detail="File too large (max 50MB)")
+
+    # Save temporarily for docx/xlsx/pptx/pdf parsers that need a file path
+    safe_fname = re.sub(r'[^\w.\-]', '_', file.filename)
+    tmp_name = f"_qa_{uuid.uuid4().hex}_{safe_fname}"
+    tmp_path = UPLOAD_DIR / tmp_name
+    # Only write to disk if we need a file path (non-text parsers)
+    needs_disk = ext not in TEXT_EXTENSIONS
+    if needs_disk:
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        with open(tmp_path, "wb") as f:
+            f.write(content_bytes)
+
+    try:
+        result = await parse_file_for_qa(content_bytes, str(tmp_path) if needs_disk else file.filename, file.content_type or "")
+    except Exception:
+        result = {"content": f"[文件解析失败: {file.filename}]", "content_type": "text/plain", "is_image": False, "filename": file.filename}
+    finally:
+        if needs_disk and tmp_path.exists():
+            tmp_path.unlink()
+
+    return result
+
+
+# ─── Routes ────────────────────────────────────────
 
 @router.post("/ask", response_model=QAResponse)
 async def ask_question(body: QARequest, db: Session = Depends(get_db)):
@@ -279,41 +578,53 @@ async def ask_question(body: QARequest, db: Session = Depends(get_db)):
     if not question:
         raise HTTPException(status_code=400, detail="Question cannot be empty")
 
-    # 1. Semantic search
-    top_chunks = await semantic_search(db, question)
+    # 1. Semantic search (skip if knowledge base disabled)
+    MIN_RELEVANCE = 0.4
 
-    sources = [
-        QASource(
-            article_id=a.id,
-            title=a.title,
-            excerpt=get_excerpt(chunk_text),
-            relevance=round(score, 3),
-        )
-        for score, a, chunk_text in top_chunks
-    ]
+    if body.kb_enabled:
+        top_chunks = await semantic_search(db, question)
+        sources = [
+            QASource(
+                article_id=a.id,
+                title=a.title,
+                excerpt=get_excerpt(chunk_text),
+                relevance=round(score, 3),
+            )
+            for score, a, chunk_text in top_chunks
+            if score >= MIN_RELEVANCE
+        ]
+        entity_info_text = _collect_entity_info(question, top_chunks, db)
+        relevant_chunks = [(s, a, t) for s, a, t in top_chunks if s >= MIN_RELEVANCE]
+    else:
+        top_chunks = []
+        sources = []
+        entity_info_text = ""
+        relevant_chunks = []
 
-    # 2. Collect entity additional info for relevant entities
-    entity_info_text = _collect_entity_info(question, top_chunks, db)
+    # Convert file_contexts to dicts for internal use
+    file_ctxs = [fc.model_dump() for fc in body.file_contexts] if body.file_contexts else []
 
-    # If we have entity info but no search results, still provide the info
-    if not sources and not entity_info_text:
-        return QAResponse(
-            answer="知识库中暂无相关信息。",
-            sources=[],
-        )
+    # Determine if we have any KB context to provide
+    has_kb = bool(relevant_chunks or entity_info_text or file_ctxs)
 
-    # 3. Try LLM if configured
+    # 3. Try LLM if configured (even without KB context — use general knowledge)
     llm_failed = False
     if LLM_API_KEY:
         try:
-            answer = await call_llm(question, body.history, top_chunks, entity_info_text)
+            answer = await call_llm(question, body.history, relevant_chunks, entity_info_text, file_ctxs)
             return QAResponse(answer=answer, sources=sources)
         except Exception:
             llm_failed = True
 
-    # 4. Fallback
-    fallback = build_fallback_answer(question, sources, entity_info_text, llm_failed=llm_failed)
-    return QAResponse(answer=fallback, sources=sources)
+    # 4. Fallback: LLM not configured or failed
+    if has_kb:
+        fallback = build_fallback_answer(question, sources, entity_info_text, llm_failed=llm_failed, file_contexts=file_ctxs)
+        return QAResponse(answer=fallback, sources=sources)
+
+    # No LLM and no KB — truly nothing to work with
+    if llm_failed:
+        return QAResponse(answer="抱歉，LLM 调用失败且知识库中暂无相关信息。请稍后重试。", sources=[])
+    return QAResponse(answer="知识库中暂无相关信息。配置 LLM API Key 后可直接利用大模型知识回答。", sources=[])
 
 
 async def call_llm(
@@ -321,10 +632,24 @@ async def call_llm(
     history: list[QAMessage],
     top_chunks: list[tuple[float, Article, str]],
     entity_info: str = "",
+    file_contexts: list[dict] | None = None,
 ) -> str:
     import httpx
+    import base64
 
     context_parts: list[str] = []
+    image_contexts: list[dict] = []  # for multimodal messages
+
+    # Separate text files from image files
+    if file_contexts:
+        for fc in file_contexts:
+            fname = fc.get("filename", "文件")
+            if fc.get("is_image"):
+                image_contexts.append(fc)
+            else:
+                fcontent = fc.get("content", "")
+                context_parts.append(f"### [上传文件: {fname}]\n{fcontent[:3000]}\n")
+
     for score, article, chunk_text in top_chunks:
         context_parts.append(f"### [{article.title}]\n{chunk_text[:1500]}\n")
 
@@ -332,37 +657,77 @@ async def call_llm(
     if entity_info:
         context += entity_info
 
-    system_prompt = (
-        "你是一个知识库问答助手。请根据以下知识库文章的内容回答用户的问题。\n"
-        "如果知识库中有'实体附加信息'部分，这些是知识图谱中实体的结构化补充信息，"
-        "请优先参考这些信息来回答关于实体属性的问题。\n"
-        "如果知识库中没有相关信息，请如实说明'知识库中暂无相关信息'。\n"
-        "回答要简洁、准确，使用中文。\n\n"
-        f"知识库相关内容：\n\n{context}"
-    )
+    has_kb = bool(context_parts or entity_info)
+    has_images = bool(image_contexts)
 
-    messages = [{"role": "system", "content": system_prompt}]
+    if has_kb or has_images:
+        prompt_parts = ["你是一个知识库问答助手。"]
+        if has_kb:
+            prompt_parts.append("请根据以下知识库文章的内容回答用户的问题。")
+            prompt_parts.append("如果知识库中有'实体附加信息'部分，请优先参考。")
+        if has_images:
+            prompt_parts.append("用户上传了图片，请基于图片内容回答问题。")
+        prompt_parts.append("如果信息不足以完整回答，可以结合你的通用知识补充。")
+        prompt_parts.append("回答要简洁、准确，使用中文。")
+        if has_kb:
+            prompt_parts.append(f"\n知识库相关内容：\n\n{context}")
+        system_prompt = "\n".join(prompt_parts)
+    else:
+        system_prompt = (
+            "你是一个知识库问答助手。当前知识库中没有与问题直接相关的内容。"
+            "请利用你的通用知识回答用户的问题。\n"
+            "回答要简洁、准确，使用中文。"
+        )
+
+    messages: list[dict] = [{"role": "system", "content": system_prompt}]
     for h in history:
         messages.append({"role": h.role, "content": h.content})
-    messages.append({"role": "user", "content": question})
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    # Build user message — multimodal if images present
+    if image_contexts:
+        user_content: list[dict] = [{"type": "text", "text": question}]
+        for img in image_contexts:
+            user_content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{img.get('content_type', 'image/png')};base64,{img.get('content', '')}",
+                },
+            })
+        messages.append({"role": "user", "content": user_content})
+    else:
+        messages.append({"role": "user", "content": question})
+
+    request_body: dict = {
+        "model": VISION_MODEL if image_contexts else LLM_MODEL,
+        "messages": messages,
+        "temperature": QA_TEMPERATURE,
+        "max_tokens": 1500,
+    }
+
+    # Use vision credentials for image Q&A, LLM credentials for text Q&A
+    api_base = VISION_API_BASE if image_contexts else LLM_API_BASE
+    api_key = VISION_API_KEY if image_contexts else LLM_API_KEY
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(
-            f"{LLM_API_BASE.rstrip('/')}/chat/completions",
+            f"{api_base.rstrip('/')}/chat/completions",
             headers={
-                "Authorization": f"Bearer {LLM_API_KEY}",
+                "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
-            json={
-                "model": LLM_MODEL,
-                "messages": messages,
-                "temperature": 0.4,
-                "max_tokens": 1500,
-            },
+            json=request_body,
         )
         resp.raise_for_status()
         data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        content = data["choices"][0]["message"].get("content", "") or ""
+        # GLM-5.2 (reasoning model) may return empty content if reasoning consumed all tokens;
+        # fall back to the reasoning_content as a best-effort answer
+        if not content.strip():
+            reasoning = data["choices"][0]["message"].get("reasoning_content", "") or ""
+            if reasoning.strip():
+                # Take the last part of reasoning as it's closest to the conclusion
+                content = reasoning
+        return content
 
 
 def _collect_entity_info(
@@ -423,8 +788,19 @@ def _collect_entity_info(
     return "\n".join(lines)
 
 
-def build_fallback_answer(question: str, sources: list[QASource], entity_info: str = "", llm_failed: bool = False) -> str:
+def build_fallback_answer(question: str, sources: list[QASource], entity_info: str = "", llm_failed: bool = False, file_contexts: list[dict] | None = None) -> str:
     lines: list[str] = []
+
+    if file_contexts:
+        lines.append("以下是与上传文件相关的内容：\n")
+        for fc in file_contexts:
+            fname = fc.get("filename", "文件")
+            if fc.get("is_image"):
+                lines.append(f"**📎 {fname}** (图片，已传递给视觉模型)\n")
+            else:
+                fcontent = fc.get("content", "")
+                lines.append(f"**📎 {fname}**")
+                lines.append(f"> {fcontent[:500]}…\n" if len(fcontent) > 500 else f"> {fcontent}\n")
 
     if sources:
         lines.append("以下是与您问题最相关的知识库内容摘要：\n")

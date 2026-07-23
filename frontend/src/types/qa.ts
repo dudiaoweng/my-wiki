@@ -2,6 +2,7 @@ export interface QAMessage {
   id?: string;
   role: 'user' | 'assistant';
   content: string;
+  sources?: QASource[];
 }
 
 export interface QASource {
@@ -11,9 +12,18 @@ export interface QASource {
   relevance: number;
 }
 
+export interface FileContext {
+  filename: string;
+  content: string;
+  content_type?: string;
+  is_image?: boolean;
+}
+
 export interface QARequest {
   question: string;
   history: QAMessage[];
+  file_contexts?: FileContext[];
+  kb_enabled?: boolean;
 }
 
 export interface QAResponse {

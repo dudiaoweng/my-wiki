@@ -82,6 +82,7 @@ class ArticleResponse(BaseModel):
     category: Optional[CategoryResponse] = None
     attachment_name: Optional[str] = None
     attachment_type: Optional[str] = None
+    processing: Optional[str] = None  # "processing" when background LLM is running
 
     model_config = {"from_attributes": True}
 

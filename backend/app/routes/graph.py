@@ -14,6 +14,13 @@ _graph_cache_ts: float = 0.0
 _GRAPH_CACHE_TTL: float = 30.0  # seconds
 
 
+def invalidate_graph_cache() -> None:
+    """Invalidate the graph cache (call after article mutations)."""
+    global _graph_cache, _graph_cache_ts
+    _graph_cache = None
+    _graph_cache_ts = 0.0
+
+
 class GraphNode(BaseModel):
     id: str
     label: str

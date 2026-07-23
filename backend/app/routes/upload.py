@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import re
 import uuid
@@ -12,12 +13,23 @@ from app.schemas import ArticleResponse
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
 
+logger = logging.getLogger(__name__)
+
 # ─── Config ────────────────────────────────────────
 
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads"))
+# ── LLM (text) ──
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_API_BASE = os.getenv("LLM_API_BASE", "https://api.openai.com/v1")
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+# ── Vision ──
+VISION_API_KEY = os.getenv("VISION_API_KEY", LLM_API_KEY)
+VISION_API_BASE = os.getenv("VISION_API_BASE", LLM_API_BASE)
+VISION_MODEL = os.getenv("VISION_MODEL", "glm-4v-flash")
+# ── ASR ──
+ASR_API_KEY = os.getenv("ASR_API_KEY", LLM_API_KEY)
+ASR_API_BASE = os.getenv("ASR_API_BASE", LLM_API_BASE)
+ASR_MODEL = os.getenv("ASR_MODEL", "GLM-ASR-2512")
 
 # Ensure upload directory exists
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -103,12 +115,16 @@ def parse_pdf(file_path: str) -> str:
 
 
 async def parse_image(file_path: str, original_name: str) -> str:
-    """Describe image content via vision LLM."""
+    """Describe image content via vision LLM.
+    Returns markdown with an embedded image + description."""
     import base64
     import httpx
 
-    if not LLM_API_KEY:
-        return f"# 图片：{original_name}\n\n> 未配置 LLM API，无法自动描述图片内容。请手动添加。"
+    storage_name = Path(file_path).name
+    img_tag = f'<img src="/api/media/{storage_name}" alt="{original_name}" style="max-width:100%;height:auto;display:block;border-radius:4px">'
+
+    if not VISION_API_KEY:
+        return f"{img_tag}\n\n# 图片：{original_name}\n\n> 未配置视觉模型 API，无法自动描述图片内容。请手动添加。"
 
     # Read and encode image
     with open(file_path, "rb") as f:
@@ -124,15 +140,15 @@ async def parse_image(file_path: str, original_name: str) -> str:
     mime = mime_map.get(ext, 'image/png')
 
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(
-                f"{LLM_API_BASE.rstrip('/')}/chat/completions",
+                f"{VISION_API_BASE.rstrip('/')}/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {LLM_API_KEY}",
+                    "Authorization": f"Bearer {VISION_API_KEY}",
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": LLM_MODEL,
+                    "model": VISION_MODEL,   # vision model for image understanding
                     "messages": [
                         {
                             "role": "user",
@@ -145,7 +161,6 @@ async def parse_image(file_path: str, original_name: str) -> str:
                                     "type": "image_url",
                                     "image_url": {
                                         "url": f"data:{mime};base64,{image_data}",
-                                        "detail": "high",
                                     },
                                 },
                             ],
@@ -157,57 +172,376 @@ async def parse_image(file_path: str, original_name: str) -> str:
             if resp.status_code == 200:
                 data = resp.json()
                 desc = data["choices"][0]["message"]["content"].strip()
-                return f"# 图片描述：{original_name}\n\n{desc}"
-    except Exception:
-        pass
+                return f"{img_tag}\n\n# 图片描述：{original_name}\n\n{desc}"
+            else:
+                logger.warning("Image description API returned %d: %s", resp.status_code, resp.text[:200])
+    except Exception as e:
+        logger.warning("Image description failed: %s", e)
 
-    return f"# 图片：{original_name}\n\n> 图片描述生成失败。请手动添加文章内容。"
+    return f"{img_tag}\n\n# 图片：{original_name}\n\n> 图片描述生成失败。请手动添加文章内容。"
 
 
 async def parse_media(content_bytes: bytes, filename: str, content_type: str) -> str:
-    """Handle audio/video — try LLM transcription, fallback to metadata."""
-    # Try using the LLM API for transcription
-    if LLM_API_KEY:
+    """Handle audio — try ASR transcription, surface errors in content."""
+    name_no_ext = Path(filename).stem.replace('_', ' ').replace('-', ' ')
+
+    logger.info(f"[AUDIO] parse_media called: filename={filename}, size={len(content_bytes)}, ASR_API_KEY={'set' if ASR_API_KEY else 'NOT SET'}")
+    if ASR_API_KEY:
         try:
+            logger.info("[AUDIO] Calling transcribe_media_from_bytes...")
             result = await transcribe_media_from_bytes(content_bytes, filename, content_type)
             if result and result.strip():
+                # Check if it's an error message
+                if result.startswith("ERROR:"):
+                    err_msg = result[len("ERROR:"):].strip()
+                    return (
+                        f"# 音频：{name_no_ext}\n\n"
+                        f"> ⚠️ 语音识别失败：{err_msg}\n\n"
+                        f"> 文件名：{filename}\n"
+                        f"> 类型：{content_type}"
+                    )
                 return result
         except Exception:
             pass
 
-    # Fallback: return metadata as content
+    # Fallback
     return (
-        f"# 音视频文件\n\n"
-        f"- 文件名：{filename}\n"
-        f"- 类型：{content_type}\n"
-        f"- 大小：{len(content_bytes)} bytes\n\n"
-        f"> 注意：无法自动转写此文件的内容。请手动添加文章内容或配置支持音视频转写的 API。"
+        f"# 音频：{name_no_ext}\n\n"
+        f"该音频文件记录了{name_no_ext}相关的内容。\n\n"
+        f"> 文件名：{filename}\n"
+        f"> 类型：{content_type}\n"
+        f"> 注意：无法自动转写此音频的内容。请手动添加描述。"
     )
 
 
-async def transcribe_media_from_bytes(content: bytes, filename: str, content_type: str) -> str:
-    """Attempt to transcribe audio/video via LLM API using file bytes."""
+async def parse_video(file_path: str, original_name: str) -> str:
+    """Extract key frames from video and describe via vision LLM.
+    Returns markdown with an embedded video player + description."""
+    import base64
+    import cv2
     import httpx
 
-    # Try the audio/speech endpoint if available
+    storage_name = Path(file_path).name
+    video_tag = f'<video controls src="/api/media/{storage_name}" style="width:100%;max-width:100%"></video>'
+    name_no_ext = Path(original_name).stem.replace('_', ' ').replace('-', ' ')
+
+    if not VISION_API_KEY:
+        return f"{video_tag}\n\n# 视频：{name_no_ext}\n\n> 未配置视觉模型 API，无法自动描述视频内容。"
+
+    # ── Extract key frames ──
+    cap = cv2.VideoCapture(file_path)
+    if not cap.isOpened():
+        return f"{video_tag}\n\n# 视频：{name_no_ext}\n\n> 无法打开视频文件。"
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    duration = total_frames / fps if fps > 0 else 0
+
+    # Extract up to 5 frames at 0%, 25%, 50%, 75%, 90% of the video
+    positions = [0, 0.25, 0.5, 0.75, 0.9]
+    frames_b64: list[str] = []
+
+    for pos in positions:
+        frame_idx = int(total_frames * pos)
+        if frame_idx >= total_frames:
+            frame_idx = total_frames - 1
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = cap.read()
+        if ret and frame is not None:
+            # Resize large frames to max 1024px on longest side (API size limits)
+            h, w = frame.shape[:2]
+            max_side = max(h, w)
+            if max_side > 1024:
+                scale = 1024 / max_side
+                frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
+            # Encode as JPEG
+            _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            frames_b64.append(base64.b64encode(buf).decode("utf-8"))
+
+    cap.release()
+
+    if not frames_b64:
+        return f"{video_tag}\n\n# 视频：{name_no_ext}\n\n> 无法从视频中提取画面。"
+
+    # ── Send frames to vision model ──
+    n_frames = len(frames_b64)
+    user_content: list[dict] = [
+        {
+            "type": "text",
+            "text": (
+                f"这是一个视频文件「{name_no_ext}」，时长约 {duration:.0f} 秒。"
+                f"以下是从视频中提取的 {n_frames} 个关键帧画面（按时间顺序）。"
+                "请用中文详细描述这个视频的内容（不超过 300 字），包括：\n"
+                "1. 视频的主题和场景\n"
+                "2. 出现的人物、物体或活动\n"
+                "3. 画面随时间的变化\n"
+                "4. 视频想要传达的信息"
+            ),
+        }
+    ]
+    for i, b64 in enumerate(frames_b64):
+        user_content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+        })
+
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            # OpenAI-compatible transcription endpoint
+        async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(
-                f"{LLM_API_BASE.rstrip('/').replace('/chat/completions', '')}/audio/transcriptions",
-                headers={"Authorization": f"Bearer {LLM_API_KEY}"},
-                files={"file": (filename or "audio", content, content_type or "application/octet-stream")},
-                data={"model": "whisper-1"},
+                f"{VISION_API_BASE.rstrip('/')}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {VISION_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": VISION_MODEL,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": user_content,
+                        }
+                    ],
+                    "max_tokens": 800,
+                },
             )
             if resp.status_code == 200:
                 data = resp.json()
-                return data.get("text", "")
-    except Exception:
-        pass
+                desc = data["choices"][0]["message"]["content"].strip()
+                logger.info(f"[VIDEO] Vision model response ({len(desc)} chars): {desc[:150]}")
+                return f"{video_tag}\n\n# 视频内容描述：{name_no_ext}\n\n{desc}"
+            else:
+                logger.info(f"[VIDEO] Vision API returned {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        logger.info(f"[VIDEO] Vision API error: {e}")
 
-    # Try sending as a chat message with file reference
+    # Fallback: if vision model fails
+    return (
+        f"{video_tag}\n\n"
+        f"# 视频：{name_no_ext}\n\n"
+        f"该视频文件记录了{name_no_ext}相关的内容（时长约 {duration:.0f} 秒）。\n\n"
+        f"> 视频内容自动识别失败。请手动添加描述。"
+    )
+
+
+def _find_ffmpeg() -> str | None:
+    """Find ffmpeg executable. Returns path or None."""
+    import platform
+    import shutil
+
+    # Check PATH first
+    ffmpeg = shutil.which('ffmpeg')
+    if ffmpeg:
+        return ffmpeg
+
+    # Search Winget install location on Windows
+    if platform.system() == 'Windows':
+        try:
+            ffmpeg_base = Path(os.environ.get('LOCALAPPDATA', '')) / 'Microsoft' / 'WinGet' / 'Packages'
+            for p in ffmpeg_base.glob('Gyan.FFmpeg_*'):
+                candidates = sorted(p.glob('ffmpeg-*-full_build/bin/ffmpeg.exe'), reverse=True)
+                if candidates:
+                    return str(candidates[0])
+        except Exception:
+            pass
+    return None
+
+
+def _convert_to_mono_wav(audio_bytes: bytes, orig_ext: str) -> bytes | None:
+    """Convert audio to 16kHz mono WAV bytes. Returns None if conversion fails."""
+    import io
+    import subprocess
+    import wave
+    import audioop
+
+    ext = orig_ext.lower()
+
+    # ── WAV: use built-in wave module (no ffmpeg needed) ──
+    if ext == '.wav':
+        try:
+            with wave.open(io.BytesIO(audio_bytes), 'rb') as wf:
+                nchannels = wf.getnchannels()
+                sampwidth = wf.getsampwidth()
+                framerate = wf.getframerate()
+                frames = wf.readframes(wf.getnframes())
+
+            # Convert to mono if needed
+            if nchannels > 1:
+                frames = audioop.tomono(frames, sampwidth, 1.0, 1.0)
+                logger.info(f"[AUDIO] Converted {nchannels}ch → mono, {sampwidth*8}bit")
+
+            # Resample to 16kHz if needed
+            if framerate != 16000:
+                frames = audioop.ratecv(frames, sampwidth, 1, framerate, 16000, None)[0]
+                logger.info(f"[AUDIO] Resampled {framerate}Hz → 16000Hz")
+
+            # Write back as mono WAV
+            buf = io.BytesIO()
+            with wave.open(buf, 'wb') as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(sampwidth)
+                wf.setframerate(16000)
+                wf.writeframes(frames)
+            return buf.getvalue()
+        except Exception as e:
+            logger.info(f"[AUDIO] WAV conversion failed: {e}")
+            return None
+
+    # ── Other formats: use ffmpeg subprocess ──
+    ffmpeg_path = _find_ffmpeg()
+    if not ffmpeg_path:
+        logger.info("[AUDIO] ffmpeg not found — cannot convert non-WAV audio")
+        return None
+
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        logger.info(f"[AUDIO] Converting {ext} to mono 16kHz WAV via ffmpeg: {ffmpeg_path}")
+        result = subprocess.run(
+            [
+                ffmpeg_path,
+                '-i', 'pipe:0',       # read from stdin
+                '-ac', '1',            # mono
+                '-ar', '16000',        # 16kHz
+                '-f', 'wav',           # WAV output
+                'pipe:1',              # write to stdout
+            ],
+            input=audio_bytes,
+            capture_output=True,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode('utf-8', errors='replace')[:300]
+            logger.info(f"[AUDIO] ffmpeg error: {stderr}")
+            return None
+
+        logger.info(f"[AUDIO] ffmpeg conversion OK, output size={len(result.stdout)}")
+        return result.stdout
+    except FileNotFoundError:
+        logger.info("[AUDIO] ffmpeg executable not found at path")
+        return None
+    except Exception as e:
+        logger.info(f"[AUDIO] ffmpeg conversion failed: {e}")
+        return None
+
+
+async def transcribe_media_from_bytes(content: bytes, filename: str, content_type: str) -> str:
+    """Transcribe audio via Zhipu ASR model (GLM-ASR-2512).
+
+    Returns the transcribed text on success, or an error message string
+    prefixed with "ERROR:" on failure (so the caller can surface it).
+    """
+    import httpx
+
+    ext = Path(filename).suffix.lower()
+    logger.info(f"[AUDIO] transcribe_media_from_bytes: filename={filename}, ext={ext}, size={len(content)}")
+
+    # ── Convert to mono 16kHz WAV (required by GLM-ASR-2512) ──
+    logger.info("[AUDIO] Calling _convert_to_mono_wav...")
+    mono_bytes = _convert_to_mono_wav(content, ext)
+    if mono_bytes is None:
+        return "ERROR: 音频格式转换失败（需要单声道音频）。请尝试转换音频文件后重新上传。"
+
+    # ── Zhipu ASR endpoint ──
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                f"{ASR_API_BASE.rstrip('/').replace('/chat/completions', '')}/audio/transcriptions",
+                headers={"Authorization": f"Bearer {ASR_API_KEY}"},
+                files={"file": ("audio.wav", mono_bytes, "audio/wav")},
+                data={"model": ASR_MODEL},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                text = data.get("text", "")
+                if text and text.strip():
+                    logger.info(f"[ASR] GLM-ASR-2512 success: {text[:150]}")
+                    return f"# 音频转录\n\n{text}"
+                return "ERROR: GLM-ASR-2512 返回了空文本。"
+            else:
+                err_detail = resp.text[:300]
+                logger.info(f"[ASR] GLM-ASR-2512 returned {resp.status_code}: {err_detail}")
+                return f"ERROR: GLM-ASR-2512 识别失败（HTTP {resp.status_code}）：{err_detail}"
+    except Exception as e:
+        logger.info(f"[ASR] GLM-ASR-2512 error: {e}")
+        return f"ERROR: GLM-ASR-2512 调用异常：{e}"
+
+    return ""
+
+
+# ─── LLM helpers ───────────────────────────────────
+
+def _clean_text_for_title(text: str) -> str:
+    """Strip HTML tags, markdown images, and metadata headers — keep the real content."""
+    import re as _re
+    cleaned = _re.sub(r'<[^>]+>', '', text)                # HTML tags
+    cleaned = _re.sub(r'!\[[^\]]*\]\([^)]+\)', '', cleaned) # markdown images
+    # Remove metadata headers produced by our parsers
+    cleaned = _re.sub(r'^#+\s*图片描述[：:].*\n?', '', cleaned, flags=_re.MULTILINE)
+    cleaned = _re.sub(r'^#+\s*图片[：:].*\n?', '', cleaned, flags=_re.MULTILINE)
+    cleaned = _re.sub(r'^#+\s*文件内容描述\s*\n?', '', cleaned, flags=_re.MULTILINE)
+    cleaned = _re.sub(r'^#+\s*音视频文件\s*\n?', '', cleaned, flags=_re.MULTILINE)
+    # Remove metadata lines
+    cleaned = _re.sub(r'^-\s*(?:文件名|类型|大小)[：:].*\n?', '', cleaned, flags=_re.MULTILINE)
+    cleaned = _re.sub(r'^>.*\n?', '', cleaned, flags=_re.MULTILINE)
+    cleaned = _re.sub(r'\n{3,}', '\n\n', cleaned)
+    return cleaned.strip()
+
+
+async def generate_title(text: str) -> str:
+    """Generate a concise summary title from document content via LLM.
+
+    Returns a title that *synthesizes* the document's core topic (not a sentence
+    copied from the text).  Returns empty string on failure so the caller can
+    decide the fallback strategy.
+    """
+    if not LLM_API_KEY:
+        logger.info("[TITLE] LLM not configured — skipping title generation")
+        return ""
+
+    import httpx
+
+    # Use cleaned text — strip media tags and metadata headers
+    cleaned = _clean_text_for_title(text)
+    logger.info(f"[TITLE] Cleaned text: {len(cleaned)} chars, first 100: {cleaned[:100]}")
+
+    if len(cleaned) < 10:
+        logger.info(f"[TITLE] Text too short ({len(cleaned)} chars) — skipping")
+        return ""
+
+    # Send more context for better understanding (up to 8000 chars)
+    context = cleaned[:8000]
+
+    prompt = (
+        "你是一个专业的文档摘要专家。请仔细阅读以下文档内容，在**理解全文主旨**的基础上，"
+        "用一句完整、精炼的话概括文档的核心内容，作为标题。\n\n"
+        "核心原则：\n"
+        "1. 先通读全文，理解文档在讲什么，然后用自己的话提炼标题\n"
+        "2. 标题应该概括文档的整体主题，而不是照抄文中的某一句\n"
+        "3. 让读者一眼就能知道这份文档是关于什么的\n\n"
+        "具体要求：\n"
+        "- 15-40 个字，简洁完整\n"
+        "- 技术文档 → 概括技术主题和要点\n"
+        "- 聊天记录/对话 → 概括讨论的主要话题和结论\n"
+        "- 图片描述 → 概括图片的主要内容和场景\n"
+        "- 音视频内容 → 概括主题和关键信息\n"
+        "- 不要包含\"标题：\"\"本文\"\"该文档\"等冗余词语\n"
+        "- 不要使用引号、书名号或 Markdown 格式\n"
+        "- 只输出标题文本本身，不要任何解释\n\n"
+        "好的标题示例：\n"
+        "- Python 异步编程的核心概念与最佳实践\n"
+        "- 2025 年产品路线图与关键里程碑规划\n"
+        "- 基于深度学习的图像分类模型优化方法\n"
+        "- 团队关于微服务架构迁移的技术方案讨论\n"
+        "- 城市夜景航拍照片，展示 CBD 核心区的灯光与建筑群\n\n"
+        "差的标题（避免）：\n"
+        "- 在本文中我们将讨论异步编程  ← 冗余前缀\n"
+        "- 第一章 概述  ← 没有实际信息\n"
+        "- 接下来我们来看一下  ← 口语化，无概括\n\n"
+        f"---\n文档内容：\n\n{context}\n\n---\n"
+        "请为以上文档生成标题（只输出标题本身）："
+    )
+
+    try:
+        logger.info(f"[TITLE] Calling LLM model={LLM_MODEL} with {len(context)} chars of context...")
+        async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(
                 f"{LLM_API_BASE.rstrip('/')}/chat/completions",
                 headers={
@@ -217,67 +551,58 @@ async def transcribe_media_from_bytes(content: bytes, filename: str, content_typ
                 json={
                     "model": LLM_MODEL,
                     "messages": [
-                        {"role": "system", "content": "请用中文简要描述这个文件的内容（不超过200字）。如果无法识别，请回复'无法识别'。"},
-                        {"role": "user", "content": f"文件名: {filename}, 类型: {content_type}, 大小: {len(content)} bytes"}
+                        {"role": "user", "content": prompt},
                     ],
-                    "max_tokens": 500,
-                },
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                text = data["choices"][0]["message"]["content"]
-                if text and text.strip() and "无法识别" not in text:
-                    return f"# 文件内容描述\n\n{text}"
-    except Exception:
-        pass
-
-    return ""
-
-
-# ─── LLM helpers ───────────────────────────────────
-
-async def generate_title(text: str) -> str:
-    """Generate a concise title from document text."""
-    if not LLM_API_KEY:
-        return _fallback_title(text)
-
-    import httpx
-    prompt = f"根据以下文档内容，生成一句简洁的摘要作为标题（不超过30个字，直接返回标题文本，不要加引号）：\n\n{text[:2000]}"
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{LLM_API_BASE.rstrip('/')}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {LLM_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": LLM_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 100,
-                    "temperature": 0.3,
+                    "max_tokens": 4000,  # GLM-5.2 reasoning model needs headroom for thinking
+                    "temperature": 0.7,
                 },
             )
             resp.raise_for_status()
             data = resp.json()
-            title = data["choices"][0]["message"]["content"].strip()
-            # Clean up quotes
-            title = re.sub(r'^["\'《]|["\'》]$', '', title)
-            return title[:100] if title else _fallback_title(text)
-    except Exception:
-        return _fallback_title(text)
+            logger.info("[TITLE] API response keys: {list(data.keys())}, choices={len(data.get('choices', []))}")
+            if data.get("choices"):
+                c0 = data["choices"][0]
+                logger.info("[TITLE] Choice[0]: finish_reason={c0.get('finish_reason')}, message={c0.get('message')}")
+            raw = (data.get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
+            logger.info(f"[TITLE] LLM raw response ({len(raw)} chars): {raw[:200]}")
 
+            # Clean up formatting
+            title = raw
+            title = re.sub(r'^["\'"\'「『【《〈』」』】》〉]', '', title)
+            title = re.sub(r'["\'"\'「『【《〈』」』】》〉]$', '', title)
+            title = re.sub(r'^(?:标题|题目)[：:]\s*', '', title)
+            title = re.sub(r'^#+\s*', '', title)
+            title = re.sub(r'\n.*', '', title)             # first line only
+            title = title.strip()
 
-def _fallback_title(text: str) -> str:
-    """Generate a simple title from the first line or first N chars."""
-    first_line = text.strip().split("\n")[0]
-    # Strip markdown headings
-    first_line = re.sub(r'^#{1,6}\s+', '', first_line).strip()
-    if 5 <= len(first_line) <= 50:
-        return first_line
-    clean = re.sub(r'\s+', ' ', text.strip())[:40]
-    return clean + ("…" if len(text) > 40 else "")
+            # Validate: must be a meaningful phrase (not just a heading number or filler)
+            if not title or len(title) < 4:
+                logger.info(f"[TITLE] Title too short ({len(title) if title else 0} chars), discarding")
+                return ""
+
+            # Reject responses that are obviously not titles
+            no_title_patterns = [
+                r'^[第序]\s*\d+\s*[章节篇]',       # "第一章", "第3节"
+                r'^[\(（]\s*[\)）]\s*$',            # just "()"
+                r'^[一二三四五六七八九十]、',         # "一、概述"
+                r'^\(?\d+\)[\.、]',                  # "1.", "1、"
+                r'^(?:好的|以下|这里|下面是|例如)',    # meta-language
+            ]
+            for pat in no_title_patterns:
+                if re.match(pat, title):
+                    logger.info(f"[TITLE] Rejected meta/noise title: {title}")
+                    return ""
+
+            if len(title) > 100:
+                title = title[:100]
+
+            logger.info(f"[TITLE] ✅ Final title: {title}")
+            return title
+
+    except Exception as e:
+        logger.info(f"[TITLE] ❌ Exception: {e}")
+        return ""
+
 
 
 async def extract_entities_and_relations(text: str) -> tuple[list[str], dict | None]:
@@ -318,43 +643,44 @@ async def upload_file(
     with open(file_path, "wb") as f:
         f.write(content_bytes)
 
-    # 2. Extract text based on file type
+    # 2. Build initial content (no LLM — immediate display of media)
+    is_media = ext in IMAGE_EXTENSIONS or ext in AUDIO_EXTENSIONS or ext in VIDEO_EXTENSIONS
+    media_src = f"/api/media/{safe_name}"
+    raw_text = ""  # text extracted without LLM help
+
     try:
         if ext in TEXT_EXTENSIONS:
-            # Use content_bytes directly — file.read() has already been consumed
-            text = parse_text_from_bytes(content_bytes)
+            raw_text = parse_text_from_bytes(content_bytes)
         elif ext in WORD_EXTENSIONS:
-            text = await asyncio.to_thread(parse_docx, str(file_path))
+            raw_text = await asyncio.to_thread(parse_docx, str(file_path))
         elif ext in EXCEL_EXTENSIONS and ext != '.csv':
-            text = await asyncio.to_thread(parse_xlsx, str(file_path))
+            raw_text = await asyncio.to_thread(parse_xlsx, str(file_path))
         elif ext in PPT_EXTENSIONS:
-            text = await asyncio.to_thread(parse_pptx, str(file_path))
+            raw_text = await asyncio.to_thread(parse_pptx, str(file_path))
         elif ext in PDF_EXTENSIONS:
-            text = await asyncio.to_thread(parse_pdf, str(file_path))
+            raw_text = await asyncio.to_thread(parse_pdf, str(file_path))
         elif ext in IMAGE_EXTENSIONS:
-            text = await parse_image(str(file_path), file.filename)
-        elif ext in AUDIO_EXTENSIONS or ext in VIDEO_EXTENSIONS:
-            # Use content_bytes — file.read() has already been consumed
-            text = await parse_media(content_bytes, file.filename, file.content_type or "")
+            raw_text = f'<img src="{media_src}" alt="{file.filename}" style="max-width:100%;height:auto;display:block;border-radius:4px">'
+        elif ext in AUDIO_EXTENSIONS:
+            raw_text = f'<audio controls src="{media_src}" style="width:100%"></audio>'
+        elif ext in VIDEO_EXTENSIONS:
+            raw_text = f'<video controls src="{media_src}" style="width:100%"></video>'
         else:
-            # Unsupported format — store as attachment only
-            text = f"# {file.filename}\n\n不支持的文件格式。文件已作为附件保存。"
+            raw_text = f"# {file.filename}\n\n不支持的文件格式。文件已作为附件保存。"
     except Exception as e:
-        text = f"# {file.filename}\n\n文件解析失败，文件已作为附件保存。"
+        raw_text = f"# {file.filename}\n\n文件解析失败，文件已作为附件保存。"
 
-    # 3. Generate title via LLM
-    title = await generate_title(text)
+    # 3. All uploads show "正在识别…" until background processing completes
+    title = "正在识别…"
 
-    # 4. Extract tags + entities + relations via LLM
-    tags, entities = await extract_entities_and_relations(text)
-
-    # 5. Create article
+    # 4. Create article immediately — media visible, marked as processing
     article = Article(
-        title=title or file.filename,
-        content=text,
+        title=title,
+        content=raw_text,
         category_id=category_id or None,
-        tags=json.dumps(tags, ensure_ascii=False),
-        entities=json.dumps(entities, ensure_ascii=False) if entities else None,
+        tags=json.dumps([], ensure_ascii=False),
+        entities=None,
+        processing="processing",
         attachment_path=str(safe_name),
         attachment_name=file.filename,
         attachment_type=file.content_type or "",
@@ -363,24 +689,106 @@ async def upload_file(
     db.commit()
     db.refresh(article)
 
-    # 6. Compute embeddings for semantic search (non-blocking)
-    try:
-        from app.routes.qa import chunk_article, get_embedding
-        from app.models import ArticleChunk
-        chunks = chunk_article(article.content)
-        for i, chunk_text in enumerate(chunks):
+    # 5. Background: LLM enhance title + content + tags + entities
+    article_id = article.id
+
+    async def _bg_enhance():
+        from app.database import SessionLocal
+        db2 = SessionLocal()
+        try:
+            # Step A: Generate full content with LLM description (for media)
+            if is_media:
+                if ext in IMAGE_EXTENSIONS:
+                    full_text = await parse_image(str(file_path), file.filename)
+                elif ext in VIDEO_EXTENSIONS:
+                    full_text = await parse_video(str(file_path), file.filename)
+                else:
+                    desc = await parse_media(content_bytes, file.filename, file.content_type or "")
+                    full_text = raw_text + "\n\n" + desc
+            else:
+                full_text = raw_text
+
+            # Step B: Generate title + extract tags/entities in parallel
+            bg_title, (bg_tags, bg_entities) = await asyncio.gather(
+                generate_title(full_text),
+                extract_entities_and_relations(full_text),
+            )
+
+            art = db2.query(Article).filter(Article.id == article_id).first()
+            if not art:
+                return
+
+            # Collect errors for transparency
+            errs: list[str] = []
+
+            # Update title — prefer LLM-generated; fall back to filename only
+            if bg_title and len(bg_title) >= 4:
+                art.title = bg_title
+            else:
+                art.title = file.filename
+                errs.append(f"标题生成失败（使用文件名作为标题）")
+
+            # Update content with full description
+            if is_media:
+                art.content = full_text
+
+            # Update tags + entities; report if LLM extraction returned nothing
+            if bg_tags:
+                art.tags = json.dumps(bg_tags, ensure_ascii=False)
+            else:
+                errs.append("标签提取未返回结果")
+
+            if bg_entities:
+                art.entities = json.dumps(bg_entities, ensure_ascii=False)
+            else:
+                errs.append("实体和关系提取未返回结果")
+
+            # Append error notes to content so the user can see what happened
+            if errs:
+                err_lines = "\n".join(f"- {e}" for e in errs)
+                art.content = (art.content or raw_text) + f"\n\n> ⚠️ 以下步骤未成功完成：\n> \n> {err_lines}\n>\n> 模型: {LLM_MODEL} / {VISION_MODEL}"
+
+            art.processing = None  # mark as done
+
+            # Compute embeddings now that content has been enriched by LLM recognition
             try:
-                vec = await get_embedding(chunk_text)
-                db.add(ArticleChunk(
-                    article_id=article.id,
-                    chunk_index=str(i),
-                    chunk_text=chunk_text,
-                    embedding=json.dumps(vec),
-                ))
+                from app.routes.qa import chunk_article, get_embedding
+                from app.models import ArticleChunk
+
+                chunks = chunk_article(art.content or "")
+                for i, chunk_text in enumerate(chunks):
+                    try:
+                        vec = await get_embedding(chunk_text)
+                        db2.add(ArticleChunk(
+                            article_id=art.id,
+                            chunk_index=str(i),
+                            chunk_text=chunk_text,
+                            embedding=json.dumps(vec),
+                        ))
+                    except Exception as embed_err:
+                        logger.warning(f"[UPLOAD] Embedding chunk {i} failed: {embed_err}")
+                logger.info(f"[UPLOAD] Indexed {len(chunks)} chunks for article {art.id}")
+            except Exception as re_idx_err:
+                logger.warning(f"[UPLOAD] Indexing failed (best-effort): {re_idx_err}")
+
+            db2.commit()
+            logger.info(f"[UPLOAD] Enhanced: title={art.title!r} tags={bg_tags} errors={errs}")
+        except Exception as e:
+            logger.info(f"[UPLOAD] BG enhance failed: {e}")
+            try:
+                art = db2.query(Article).filter(Article.id == article_id).first()
+                if art:
+                    art.title = file.filename
+                    art.content = raw_text + f"\n\n> ⚠️ 内容识别失败：{e}"
+                    art.processing = None  # mark as done (failed, but no longer processing)
+                    db2.commit()
             except Exception:
-                pass  # Skip failed chunks — will be computed lazily on Q&A
-        db.commit()
-    except Exception:
-        pass  # Embedding computation is best-effort
+                pass
+        finally:
+            db2.close()
+
+    asyncio.create_task(_bg_enhance())
+
+    # Embeddings are computed after background recognition completes (see _bg_enhance)
 
     return article

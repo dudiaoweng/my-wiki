@@ -1,6 +1,6 @@
 import { useState, useCallback, useMemo, useEffect } from 'react';
 import { api } from '../api/client';
-import type { QAMessage, QAResponse } from '../types/qa';
+import type { QAMessage, QAResponse, FileContext } from '../types/qa';
 
 export interface QASession {
   id: string;
@@ -11,6 +11,7 @@ export interface QASession {
 
 const STORAGE_KEY = 'qa_sessions';
 const ACTIVE_KEY = 'qa_active_id';
+const FILE_CTX_KEY = 'qa_file_contexts';
 
 function loadSessions(): Record<string, QASession> {
   try {
@@ -39,6 +40,7 @@ export function useQA() {
   const [activeId, setActiveId] = useState<string | null>(loadActiveId);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [kbEnabled, setKbEnabled] = useState(true);
 
   // Persist to localStorage on every change
   useEffect(() => {
@@ -59,6 +61,51 @@ export function useQA() {
 
   const activeSession = activeId && sessions[activeId] ? sessions[activeId] : undefined;
   const messages = activeSession?.messages ?? [];
+
+  // ── File contexts (per session, persist to localStorage) ──
+  const [fileContexts, setFileContexts] = useState<Record<string, FileContext[]>>(() => {
+    try {
+      const raw = localStorage.getItem(FILE_CTX_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch { return {}; }
+  });
+
+  const currentFileContexts = activeId ? (fileContexts[activeId] ?? []) : [];
+
+  const addFileContext = useCallback(async (file: File) => {
+    try {
+      const result = await api.parseFileForQA(file);
+      if (!activeId) return;
+      setFileContexts((prev) => {
+        const updated = { ...prev, [activeId]: [...(prev[activeId] ?? []), result] };
+        localStorage.setItem(FILE_CTX_KEY, JSON.stringify(updated));
+        return updated;
+      });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : '文件解析失败';
+      throw new Error(msg);
+    }
+  }, [activeId]);
+
+  const removeFileContext = useCallback((index: number) => {
+    if (!activeId) return;
+    setFileContexts((prev) => {
+      const list = [...(prev[activeId] ?? [])];
+      list.splice(index, 1);
+      const updated = { ...prev, [activeId]: list };
+      localStorage.setItem(FILE_CTX_KEY, JSON.stringify(updated));
+      return updated;
+    });
+  }, [activeId]);
+
+  const clearFileContexts = useCallback(() => {
+    if (!activeId) return;
+    setFileContexts((prev) => {
+      const updated = { ...prev, [activeId]: [] };
+      localStorage.setItem(FILE_CTX_KEY, JSON.stringify(updated));
+      return updated;
+    });
+  }, [activeId]);
 
   const sessionList = useMemo(
     () =>
@@ -138,10 +185,23 @@ export function useQA() {
 
       try {
         // Use the session's existing messages (before the user msg was added) for history
-        const history = sessions[sid]?.messages ?? [];
-        const result = await api.askQuestion({ question, history });
+        const history = (sessions[sid]?.messages ?? []).slice(-20);
+        const fcs = fileContexts[sid] ?? [];
+        const result = await api.askQuestion({
+          question,
+          history,
+          file_contexts: fcs.length > 0 ? fcs : undefined,
+          kb_enabled: kbEnabled,
+        });
 
-        const assistantMsg: QAMessage & { id: string } = { id: makeId(), role: 'assistant', content: result.answer };
+        const assistantMsg: QAMessage & { id: string } = {
+          id: makeId(),
+          role: 'assistant',
+          content: result.answer,
+          sources: result.sources.filter(s => s.relevance >= 0.4).length > 0
+            ? result.sources.filter(s => s.relevance >= 0.4)
+            : undefined,
+        };
         setSessions((prev) => {
           const s = prev[sid];
           if (!s) return prev;
@@ -160,7 +220,7 @@ export function useQA() {
         setLoading(false);
       }
     },
-    [activeId, sessions]
+    [activeId, sessions, fileContexts, kbEnabled]
   );
 
   const clearHistory = useCallback(() => {
@@ -180,6 +240,12 @@ export function useQA() {
     messages,
     loading,
     error,
+    fileContexts: currentFileContexts,
+    kbEnabled,
+    setKbEnabled,
+    addFileContext,
+    removeFileContext,
+    clearFileContexts,
     newSession,
     switchSession,
     deleteSession,

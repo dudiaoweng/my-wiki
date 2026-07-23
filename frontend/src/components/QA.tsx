@@ -1,9 +1,11 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
 import Markdown from 'react-markdown';
+import rehypeRaw from 'rehype-raw';
 import { useQA } from '../hooks/useQA';
 import { useApp } from '../context/AppProvider';
-import type { QASource } from '../types/qa';
+import { useToast } from '../hooks/useToast';
+import { ArticleDetailInline } from './ArticleDetailInline';
+import type { FileContext } from '../types/qa';
 import styles from './QA.module.css';
 
 const EXAMPLE_QUESTIONS = [
@@ -20,6 +22,12 @@ export function QA() {
     messages,
     loading,
     error,
+    kbEnabled,
+    setKbEnabled,
+    fileContexts,
+    addFileContext,
+    removeFileContext,
+    clearFileContexts,
     newSession,
     switchSession,
     deleteSession,
@@ -28,12 +36,13 @@ export function QA() {
   } = useQA();
 
   const { sidebarOpen, closeSidebar } = useApp();
+  const { showToast } = useToast();
 
   const [input, setInput] = useState('');
-  const [currentSources, setCurrentSources] = useState<QASource[]>([]);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const navigate = useNavigate();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [viewedArticleId, setViewedArticleId] = useState<string | null>(null);
 
   const handleSwitchSession = useCallback(
     (id: string) => {
@@ -62,11 +71,7 @@ export function QA() {
     const q = input.trim();
     if (!q || loading) return;
     setInput('');
-    setCurrentSources([]);
-    const result = await askQuestion(q);
-    if (result) {
-      setCurrentSources(result.sources);
-    }
+    await askQuestion(q);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -78,9 +83,20 @@ export function QA() {
 
   const handleExample = (q: string) => {
     setInput(q);
-    askQuestion(q).then((result) => {
-      if (result) setCurrentSources(result.sources);
-    });
+    askQuestion(q);
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      await addFileContext(file);
+      showToast(`已上传「${file.name}」`, 'success');
+    } catch {
+      showToast('文件解析失败', 'error');
+    }
+    // Reset input so the same file can be re-selected
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const isAssistant = (msg: { role: string }) => msg.role === 'assistant';
@@ -145,44 +161,45 @@ export function QA() {
         ) : (
           <div className={styles.chat}>
             {messages.map((msg, i) => (
-              <div
-                key={msg.id ?? `msg-${i}`}
-                className={`${styles.message} ${msg.role === 'user' ? styles.user : styles.assistant}`}
-              >
-                {isAssistant(msg) && (
-                  <span className={styles.avatar}>🤖</span>
-                )}
-                <div className={styles.bubble}>
-                  {isAssistant(msg) ? (
-                    <Markdown>{msg.content}</Markdown>
-                  ) : (
-                    msg.content
+              <div key={msg.id ?? `msg-${i}`} className={msg.role === 'user' ? styles.userMsgGroup : styles.assistantMsgGroup}>
+                <div
+                  className={`${styles.message} ${msg.role === 'user' ? styles.user : styles.assistant}`}
+                >
+                  {isAssistant(msg) && (
+                    <span className={styles.avatar}>🤖</span>
                   )}
+                  <div className={`${styles.bubble} markdown-content`}>
+                    {isAssistant(msg) ? (
+                      <Markdown rehypePlugins={[rehypeRaw]}>{msg.content}</Markdown>
+                    ) : (
+                      msg.content
+                    )}
+                  </div>
                 </div>
+
+                {/* Sources attached to this answer */}
+                {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && (
+                  <div className={`${styles.message} ${styles.assistant}`}>
+                    <div className={styles.sources}>
+                      <span style={{ fontSize: 11, color: 'var(--c-text-muted)', marginRight: 4 }}>
+                        📎 参考来源:
+                      </span>
+                      {msg.sources.map((src) => (
+                        <button
+                          key={src.article_id}
+                          className={styles.sourceCard}
+                          onClick={() => setViewedArticleId(src.article_id)}
+                          title={src.excerpt}
+                        >
+                          <span className={styles.sourceRelevance}>{Math.round(src.relevance * 100)}%</span>
+                          {src.title}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             ))}
-
-            {/* Sources for the last assistant message */}
-            {currentSources.length > 0 && (
-              <div className={`${styles.message} ${styles.assistant}`}>
-                <div className={styles.sources}>
-                  <span style={{ fontSize: 11, color: 'var(--c-text-muted)', marginRight: 4 }}>
-                    📎 参考来源:
-                  </span>
-                  {currentSources.map((src) => (
-                    <button
-                      key={src.article_id}
-                      className={styles.sourceCard}
-                      onClick={() => navigate(`/articles/${src.article_id}`)}
-                      title={src.excerpt}
-                    >
-                      <span className={styles.sourceRelevance}>{Math.round(src.relevance * 100)}%</span>
-                      {src.title}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
 
             {loading && (
               <div className={`${styles.message} ${styles.assistant}`}>
@@ -208,12 +225,59 @@ export function QA() {
           </div>
         )}
 
-        <div className={styles.inputArea}>
-          {messages.length > 0 && (
-            <button className={styles.clearBtn} onClick={clearHistory} title="清除对话">
-              清除
+        {/* ── Uploaded file chips ── */}
+        {fileContexts.length > 0 && (
+          <div className={styles.fileChips}>
+            {fileContexts.map((fc: FileContext, i: number) => (
+              <span key={i} className={styles.fileChip} title={fc.is_image ? fc.filename : fc.content.slice(0, 200)}>
+                {fc.is_image ? '🖼' : '📎'} {fc.filename}
+                <button
+                  className={styles.fileChipRemove}
+                  onClick={() => removeFileContext(i)}
+                  title="移除"
+                >✕</button>
+              </span>
+            ))}
+            <button className={styles.fileChipClear} onClick={clearFileContexts} title="清除全部">
+              清除全部
             </button>
-          )}
+          </div>
+        )}
+
+        <div className={styles.inputArea}>
+          <button
+            className={styles.clearBtn}
+            onClick={clearHistory}
+            disabled={messages.length === 0}
+            title="清除对话"
+          >
+            清除
+          </button>
+          {/* Hidden file input */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            className={styles.fileInput}
+            onChange={handleFileUpload}
+            accept=".txt,.md,.json,.xml,.csv,.yaml,.yml,.py,.js,.ts,.html,.css,.docx,.xlsx,.xls,.pptx,.ppt,.pdf,.jpg,.jpeg,.png,.gif,.webp,.svg,.bmp,.ico,.tiff,.tif,.mp3,.wav,.m4a,.flac,.ogg,.wma,.mp4,.avi,.mov,.mkv,.webm,.wmv"
+            aria-label="上传文件作为问答上下文"
+          />
+          <button
+            className={`${styles.kbToggle} ${kbEnabled ? styles.kbToggleOn : styles.kbToggleOff}`}
+            onClick={() => setKbEnabled(!kbEnabled)}
+            disabled={loading}
+            title={kbEnabled ? '知识库已开启 — 点击关闭' : '知识库已关闭 — 点击开启'}
+          >
+            📚
+          </button>
+          <button
+            className={styles.uploadBtn}
+            onClick={() => fileInputRef.current?.click()}
+            disabled={loading}
+            title="上传文件作为问答上下文"
+          >
+            📎
+          </button>
           <input
             ref={inputRef}
             type="text"
@@ -233,6 +297,16 @@ export function QA() {
           </button>
         </div>
       </div>
+
+      {/* ── Article detail modal ── */}
+      {viewedArticleId && (
+        <div className={styles.modalOverlay} onClick={() => setViewedArticleId(null)}>
+          <div className={styles.modalContent} onClick={(e) => e.stopPropagation()}>
+            <button className={styles.modalClose} onClick={() => setViewedArticleId(null)}>✕</button>
+            <ArticleDetailInline articleId={viewedArticleId} onBack={() => setViewedArticleId(null)} />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
