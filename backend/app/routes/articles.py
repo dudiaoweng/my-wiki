@@ -1,16 +1,26 @@
 import json
+import asyncio
 import logging
 import os
 import re
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, Query, Path as PathParam
+from fastapi import APIRouter, Depends, HTTPException, Query, Path as PathParam, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import desc
 from app.dependencies import get_db
+from app.database import SessionLocal
 from app.models import Article, Category, EntityInfo
 from app.schemas import ArticleCreate, ArticleUpdate, ArticleResponse
 from app.llm_extract import extract_tags_and_entities
+from app.routes.upload import (
+    generate_title,
+    parse_text_from_bytes, parse_docx, parse_xlsx, parse_pptx, parse_pdf,
+    parse_image, parse_video, parse_media,
+    TEXT_EXTENSIONS, WORD_EXTENSIONS, EXCEL_EXTENSIONS, PPT_EXTENSIONS,
+    PDF_EXTENSIONS, IMAGE_EXTENSIONS, AUDIO_EXTENSIONS, VIDEO_EXTENSIONS,
+)
+from app.routes.qa import _extract_video_thumbnail
 import uuid
 
 logger = logging.getLogger(__name__)
@@ -40,12 +50,12 @@ def _extract_and_merge(article: Article, user_tags: list[str], db: Session) -> N
     if llm_tags or entities:
         merged_tags = list(dict.fromkeys([*user_tags, *llm_tags]))
         article.tags = json.dumps(merged_tags, ensure_ascii=False)
-        if entities:
+        if isinstance(entities, dict) and entities:
             article.entities = json.dumps(entities, ensure_ascii=False)
         db.commit()
         logger.info(
             "LLM extraction success for article %s: %d tags, %d entities",
-            article.id, len(llm_tags), len(entities.get("entities", [])) if entities else 0,
+            article.id, len(llm_tags), len(entities.get("entities", [])) if isinstance(entities, dict) else 0,
         )
 
 
@@ -90,62 +100,557 @@ def get_article(
     return article
 
 
+async def _bg_extract(article_id: str, user_tags: list[str], need_title: bool) -> None:
+    """Background task: extract tags, entities, and optionally generate title via LLM."""
+    db2 = SessionLocal()
+    try:
+        art = db2.query(Article).filter(Article.id == article_id).first()
+        if not art:
+            return
+
+        # Run tag/entity extraction and title generation concurrently
+        extract_task = asyncio.to_thread(extract_tags_and_entities, art.content)
+        title_task = generate_title(art.content) if need_title else None
+
+        if title_task:
+            (llm_tags, entities), generated = await asyncio.gather(
+                extract_task, title_task,
+            )
+        else:
+            llm_tags, entities = await extract_task
+
+        # Apply tag + entity extraction results
+        if llm_tags or entities:
+            merged_tags = list(dict.fromkeys([*user_tags, *llm_tags]))
+            art.tags = json.dumps(merged_tags, ensure_ascii=False)
+            if isinstance(entities, dict) and entities:
+                art.entities = json.dumps(entities, ensure_ascii=False)
+            db2.commit()
+            logger.info(
+                "[BG_EXTRACT] article %s: %d tags, %d entities",
+                article_id, len(llm_tags),
+                len(entities.get("entities", [])) if isinstance(entities, dict) else 0,
+            )
+
+        # Apply auto-generated title, or fall back to default
+        if need_title:
+            if generated:
+                art.title = generated
+                logger.info(f"[BG_EXTRACT] Auto-generated title: {generated}")
+            else:
+                art.title = "无标题"
+                logger.info("[BG_EXTRACT] Title generation empty, using default")
+            db2.commit()
+
+        art.processing = None
+        db2.commit()
+        logger.info(f"[BG_EXTRACT] article {article_id} processing complete")
+    except Exception as e:
+        logger.warning(f"[BG_EXTRACT] Failed: {e}")
+        try:
+            art = db2.query(Article).filter(Article.id == article_id).first()
+            if art:
+                art.processing = None
+                db2.commit()
+        except Exception:
+            pass
+    finally:
+        db2.close()
+
+
+def _replace_media_placeholder(full_text: str, storage_name: str, replacement: str) -> str:
+    """Replace the media tag placeholder line(s) in full_text with the parse result."""
+    # Find the line containing the storage_name (appears in <img src="..." /> etc.)
+    lines = full_text.split('\n')
+    new_lines = []
+    for line in lines:
+        if storage_name in line and ('<img' in line or '<video' in line or '<audio' in line):
+            # Replace this line with the full description (which includes the media tag)
+            new_lines.append(replacement)
+            replacement = ''  # only replace first occurrence
+        else:
+            new_lines.append(line)
+    # If no placeholder found, prepend — this would create a duplicate!
+    if replacement:
+        print(f"[BG_ATTACH] WARNING: placeholder not found for storage_name={storage_name!r} in content. Prepending.")
+        new_lines.insert(0, replacement)
+    return '\n'.join(new_lines)
+
+
+async def _bg_attachment_enhance(
+    article_id: str, uploaded_files: list[dict], need_title: bool,
+) -> None:
+    """Background: describe media files via vision/ASR, then extract tags+entities+title."""
+    from app.database import SessionLocal as _SessionLocal
+    import asyncio as _asyncio
+
+    db2 = _SessionLocal()
+    try:
+        art = db2.query(Article).filter(Article.id == article_id).first()
+        if not art:
+            return
+
+        full_text = art.content or ""
+        has_media = False
+
+        logger.info(
+            "[BG_ATTACH] Starting for article %s with %d files: %s",
+            article_id, len(uploaded_files),
+            [uf["filename"] for uf in uploaded_files],
+        )
+        # Step A: Parse documents and describe media files
+        for uf in uploaded_files:
+            ext = Path(uf["filename"]).suffix.lower()
+            storage_name = Path(uf["storage_path"]).name
+
+            # ── Document parsing (async) ──
+            if ext in (TEXT_EXTENSIONS | WORD_EXTENSIONS | EXCEL_EXTENSIONS | PPT_EXTENSIONS | PDF_EXTENSIONS):
+                try:
+                    if ext in TEXT_EXTENSIONS:
+                        with open(uf["storage_path"], "rb") as f:
+                            parsed = parse_text_from_bytes(f.read())
+                    elif ext in WORD_EXTENSIONS:
+                        parsed = await _asyncio.to_thread(parse_docx, uf["storage_path"])
+                    elif ext in EXCEL_EXTENSIONS and ext != '.csv':
+                        parsed = await _asyncio.to_thread(parse_xlsx, uf["storage_path"])
+                    elif ext in PPT_EXTENSIONS:
+                        parsed = await _asyncio.to_thread(parse_pptx, uf["storage_path"])
+                    elif ext in PDF_EXTENSIONS:
+                        parsed = await _asyncio.to_thread(parse_pdf, uf["storage_path"])
+                    else:
+                        parsed = ""
+                    if parsed:
+                        # Replace placeholder div with parsed text
+                        placeholder = f'<div data-attachment="{uf["filename"]}"'
+                        idx = full_text.find(placeholder)
+                        if idx >= 0:
+                            end_idx = full_text.find('</div>', idx)
+                            if end_idx >= 0:
+                                full_text = full_text[:idx] + parsed + full_text[end_idx + 6:]
+                except Exception as e:
+                    logger.warning(f"[BG_ATTACH] Document parsing failed for {uf['filename']}: {e}")
+                continue
+
+            # ── Media files (image/video/audio) ──
+            if ext not in IMAGE_EXTENSIONS | AUDIO_EXTENSIONS | VIDEO_EXTENSIONS:
+                continue
+            has_media = True
+            try:
+                if ext in IMAGE_EXTENSIONS:
+                    desc = await parse_image(uf["storage_path"], uf["filename"])
+                    full_text = _replace_media_placeholder(full_text, storage_name, desc)
+                elif ext in VIDEO_EXTENSIONS:
+                    # Preserve poster and alt from THIS file's placeholder
+                    poster_url = ""
+                    alt_name = uf["filename"]
+                    for line in full_text.split('\n'):
+                        if storage_name in line and '<video' in line:
+                            pm = re.search(r'poster="([^"]*)"', line, re.IGNORECASE)
+                            if pm:
+                                poster_url = pm.group(1)
+                            am = re.search(r'alt="([^"]*)"', line, re.IGNORECASE)
+                            if am:
+                                alt_name = am.group(1)
+                            break
+                    desc = await parse_video(uf["storage_path"], uf["filename"])
+                    if poster_url:
+                        desc = desc.replace(
+                            '<video controls src=',
+                            f'<video controls poster="{poster_url}" src=',
+                        )
+                    if alt_name:
+                        desc = desc.replace(
+                            '<video controls ',
+                            f'<video controls alt="{alt_name}" ',
+                        )
+                    full_text = _replace_media_placeholder(full_text, storage_name, desc)
+                elif ext in AUDIO_EXTENSIONS:
+                    with open(uf["storage_path"], "rb") as f:
+                        audio_bytes = f.read()
+                    desc = await parse_media(audio_bytes, uf["filename"], uf["content_type"])
+                    full_text = full_text + "\n\n" + desc if full_text else desc
+            except Exception as e:
+                logger.warning(f"[BG_ATTACH] Media description failed for {uf['filename']}: {e}")
+
+        # Step B: Generate title + extract tags/entities in parallel
+        title_task = generate_title(full_text) if need_title else None
+        extract_task = _asyncio.to_thread(extract_tags_and_entities, full_text)
+
+        if title_task:
+            (bg_tags, bg_entities), generated_title = await _asyncio.gather(
+                extract_task, title_task,
+            )
+        else:
+            bg_tags, bg_entities = await extract_task
+
+        # Re-fetch article (may have been modified)
+        art = db2.query(Article).filter(Article.id == article_id).first()
+        if not art:
+            return
+
+        # Apply title
+        if need_title:
+            if generated_title and len(generated_title) >= 4:
+                art.title = generated_title
+            elif art.title == "无标题" and uploaded_files:
+                art.title = uploaded_files[0]["filename"]  # fallback to first filename
+
+        # Apply tags + entities
+        if bg_tags or bg_entities:
+            if bg_tags:
+                existing_tags = json.loads(art.tags) if art.tags else []
+                merged = list(dict.fromkeys([*existing_tags, *bg_tags]))
+                art.tags = json.dumps(merged, ensure_ascii=False)
+            if isinstance(bg_entities, dict) and bg_entities:
+                art.entities = json.dumps(bg_entities, ensure_ascii=False)
+
+        # Apply enriched content (media descriptions + document parsing)
+        if full_text != (art.content or ""):
+            art.content = full_text
+
+        art.processing = None
+        db2.commit()
+        logger.info(f"[BG_ATTACH] article {article_id} processing complete")
+    except Exception as e:
+        logger.warning(f"[BG_ATTACH] Failed: {e}")
+        try:
+            art = db2.query(Article).filter(Article.id == article_id).first()
+            if art:
+                art.processing = None
+                db2.commit()
+        except Exception:
+            pass
+    finally:
+        db2.close()
+
+
 @router.post("", response_model=ArticleResponse, status_code=201)
-def create_article(body: ArticleCreate, db: Session = Depends(get_db)):
-    user_tags = list(dict.fromkeys(body.tags))  # dedup, preserve order
+async def create_article(
+    title: str = Form(default="", max_length=200),
+    content: str = Form(default=""),
+    category_id: str = Form(default=""),
+    tags: str = Form(default="[]"),
+    files: list[UploadFile] = File(default=[]),
+    db: Session = Depends(get_db),
+):
+    # Parse tags from JSON string (Form data)
+    try:
+        user_tags: list[str] = json.loads(tags) if isinstance(tags, str) else (tags or [])
+    except (json.JSONDecodeError, TypeError):
+        user_tags = []
+    user_tags = list(dict.fromkeys(user_tags))  # dedup, preserve order
+    user_title = title.strip()
+
+    # Handle file uploads
+    attachment_path = None
+    attachment_name = None
+    attachment_type = None
+    initial_content = content
+    storage_paths: list[str] = []  # track paths for background enhancement
+    uploaded_files: list[dict] = []  # track file info for background enhancement
+
+    for upload_file in files:
+        if not upload_file.filename:
+            continue
+        ext = Path(upload_file.filename).suffix.lower()
+        content_bytes = await upload_file.read()
+        safe_fname = re.sub(r'[^\w.\-]', '_', upload_file.filename)
+        safe_name = f"{uuid.uuid4().hex}_{safe_fname}"
+        storage_path = UPLOAD_DIR / safe_name
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        with open(storage_path, "wb") as f:
+            f.write(content_bytes)
+
+        storage_paths.append(str(storage_path))
+        uploaded_files.append({
+            "filename": upload_file.filename,
+            "content_type": upload_file.content_type or "",
+            "storage_path": str(storage_path),
+        })
+
+        if not attachment_path:  # first file → attachment fields
+            attachment_path = str(safe_name)
+            attachment_name = upload_file.filename
+            attachment_type = upload_file.content_type or ""
+
+        # Generate initial content for this file (media tags or placeholder for documents)
+        try:
+            media_src = f"/api/media/{safe_name}"
+            if ext in IMAGE_EXTENSIONS:
+                img_tag = f'<img src="{media_src}" alt="{upload_file.filename}" style="max-width:100%;height:auto;display:block;border-radius:4px">'
+                initial_content = f"{initial_content}\n\n{img_tag}" if initial_content else img_tag
+            elif ext in AUDIO_EXTENSIONS:
+                audio_tag = f'<audio controls src="{media_src}" alt="{upload_file.filename}" style="width:100%"></audio>'
+                initial_content = f"{initial_content}\n\n{audio_tag}" if initial_content else audio_tag
+            elif ext in VIDEO_EXTENSIONS:
+                poster = ""
+                try:
+                    thumb_name = safe_name + ".thumb.jpg"
+                    if _extract_video_thumbnail(str(storage_path), str(UPLOAD_DIR / thumb_name)):
+                        poster = f' poster="/api/media/{thumb_name}"'
+                except Exception:
+                    pass
+                video_tag = f'<video controls src="{media_src}"{poster} alt="{upload_file.filename}" style="width:100%"></video>'
+                initial_content = f"{initial_content}\n\n{video_tag}" if initial_content else video_tag
+            else:
+                # Document type — placeholder, parsed async in background
+                doc_placeholder = f'<div data-attachment="{upload_file.filename}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {upload_file.filename}（解析中…）</div>'
+                initial_content = f"{initial_content}\n\n{doc_placeholder}" if initial_content else doc_placeholder
+        except Exception as e:
+            logger.warning(f"File parsing failed for {upload_file.filename}: {e}")
+
+    # Track upload order for frontend sorting
+    if uploaded_files:
+        order_list = ", ".join(uf["filename"] for uf in uploaded_files)
+        initial_content += f"\n\n<!-- attachments-order: {order_list} -->"
+
     article = Article(
-        title=body.title,
-        content=body.content,
-        category_id=body.category_id,
+        title=user_title or "无标题",
+        content=initial_content,
+        category_id=category_id or None,
         tags=json.dumps(user_tags, ensure_ascii=False),
-        entities=json.dumps(body.entities, ensure_ascii=False) if body.entities else None,
+        entities=None,
+        processing="processing" if len(uploaded_files) > 0 or initial_content.strip() else None,
+        attachment_path=attachment_path,
+        attachment_name=attachment_name,
+        attachment_type=attachment_type,
     )
     db.add(article)
     db.commit()
     db.refresh(article)
 
-    # Extract tags + entities + relations via LLM
-    if body.content.strip():
-        _extract_and_merge(article, user_tags, db)
-        db.refresh(article)
+    # Launch background enrichment
+    if len(uploaded_files) > 0:
+        asyncio.create_task(_bg_attachment_enhance(
+            article.id, uploaded_files, need_title=not user_title,
+        ))
+    elif initial_content.strip():
+        # No files, just text content — lightweight background extraction
+        asyncio.create_task(_bg_extract(article.id, user_tags, need_title=not user_title))
 
     return article
 
 
 @router.put("/{article_id}", response_model=ArticleResponse)
-def update_article(
-    body: ArticleUpdate,
+async def update_article(
     article_id: str = PathParam(..., max_length=36),
+    title: str = Form(default=""),
+    content: str = Form(default=""),
+    category_id: str = Form(default=""),
+    tags: str = Form(default=""),
+    files: list[UploadFile] = File(default=[]),
+    keep_attachments: str = Form(default=""),
     db: Session = Depends(get_db),
 ):
     _validate_article_id(article_id)
+    # Parse keep list — only these existing attachments should be preserved.
+    # keep_attachments="" means "not provided" (keep all for backward compat).
+    # keep_attachments="[...]" means the frontend explicitly sent the list.
+    keep_list: list[str] | None = None  # None = not provided, keep all
+    if keep_attachments:
+        try:
+            keep_list = json.loads(keep_attachments)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    keep_set = set(keep_list) if keep_list is not None else None
     article = db.query(Article).filter(Article.id == article_id).first()
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
 
-    update_data = body.model_dump(exclude_unset=True)
-    user_tags = update_data.get("tags") if "tags" in update_data else None
+    # Parse tags
+    try:
+        user_tags: list[str] = json.loads(tags) if tags else []
+    except (json.JSONDecodeError, TypeError):
+        user_tags = []
+    user_tags = list(dict.fromkeys(user_tags))
 
-    if "tags" in update_data and update_data["tags"] is not None:
-        update_data["tags"] = json.dumps(update_data["tags"], ensure_ascii=False)
-    if "entities" in update_data and update_data["entities"] is not None:
-        update_data["entities"] = json.dumps(update_data["entities"], ensure_ascii=False)
+    content_changed = content != (article.content or "")
 
-    for key, value in update_data.items():
-        setattr(article, key, value)
+    # Check if anything actually needs updating
+    has_files = any(f and f.filename for f in files)
+    has_content_change = bool(content and content_changed)
+    has_title_change = bool(title.strip() and title.strip() != (article.title or ""))
+    has_category_change = bool(category_id and category_id != (article.category_id or ""))
+    tags_changed = bool(tags and json.dumps(user_tags, ensure_ascii=False) != (article.tags or "[]"))
+    has_attachment_change = False
+    if keep_set is not None:
+        existing_ids: set[str] = set()
+        for m in re.finditer(r'<(img|video|audio)\b[^>]*>', article.content or "", re.IGNORECASE):
+            tag = m.group(0)
+            a = (re.search(r'alt="([^"]*)"', tag, re.IGNORECASE) or [None, ''])[1]
+            s = (re.search(r'src="([^"]*)"', tag, re.IGNORECASE) or [None, ''])[1]
+            existing_ids.add(a or (s.split('/')[-1].split('?')[0] if s else ''))
+        # Include document attachment name
+        if article.attachment_name:
+            existing_ids.add(article.attachment_name)
+        has_attachment_change = (existing_ids != keep_set)
 
+    if not has_files and not has_content_change and not has_title_change \
+            and not has_category_change and not tags_changed and not has_attachment_change:
+        return article
+
+    # Something changed — apply basic field updates
+    article.title = title.strip() or article.title
+    article.category_id = category_id or None
+    if tags:
+        article.tags = json.dumps(user_tags, ensure_ascii=False)
+
+    # Preserve old media tags from the original article — but only for
+    # attachments the user chose to keep (via `keep_attachments`).
+    # This runs even when content didn't change, to handle attachment removal.
+    if keep_set is not None:
+        # Strip all media tags (including closing) to get text body
+        text_body = content if content else re.sub(
+            r'<(?:img|video|audio)\b[^>]*/?>\s*|<\/(?:video|audio)>\s*', '',
+            article.content or "", flags=re.IGNORECASE,
+        ).strip()
+        # Extract complete media blocks (opening tag + optional closing tag)
+        kept_tags: list[str] = []
+        for m in re.finditer(
+            r'<(img|video|audio)\b[^>]*>',
+            article.content or "", re.IGNORECASE,
+        ):
+            tag = m.group(0)
+            tag_name = m.group(1).lower()
+            # Get identifier: alt (img) or filename from src (video/audio)
+            alt = (re.search(r'alt="([^"]*)"', tag, re.IGNORECASE) or [None, ''])[1]
+            src = (re.search(r'src="([^"]*)"', tag, re.IGNORECASE) or [None, ''])[1]
+            identifier = alt or (src.split('/')[-1].split('?')[0] if src else '')
+            if identifier not in keep_set:
+                continue  # user removed this attachment
+            full_tag = tag
+            if tag_name in ('video', 'audio'):
+                # Find the matching closing tag after this position
+                rest = article.content[m.end():]
+                close_match = re.search(r'</' + tag_name + r'>', rest, re.IGNORECASE)
+                if close_match:
+                    full_tag = tag + rest[:close_match.end()]
+            kept_tags.append(full_tag.strip())
+        if kept_tags:
+            article.content = text_body + '\n\n' + '\n\n'.join(kept_tags)
+        else:
+            article.content = text_body
+        # Also handle document attachment removal (no media tag in content)
+        if article.attachment_name and article.attachment_name not in keep_set:
+            article.attachment_name = None
+            article.attachment_path = None
+            article.attachment_type = None
+    elif content and content_changed:
+        # No keep_attachments filter — preserve ALL old tags (backward compat)
+        old_tags = re.findall(
+            r'<(?:img|video|audio)\s[^>]*/?>',
+            article.content or "", re.IGNORECASE,
+        )
+        if old_tags:
+            article.content = content.rstrip() + '\n\n' + '\n\n'.join(old_tags)
+        else:
+            article.content = content
+    elif content:
+        article.content = content
+    # else: no content sent → keep existing article.content
+
+    # Handle file uploads for edit
+    uploaded_files: list[dict] = []
+    if files:
+        # Collect filenames already referenced in article content (media tags + descriptions)
+        existing_names: set[str] = set()
+        for m in re.finditer(r'<(?:img|video|audio)\b[^>]*>', article.content or "", re.IGNORECASE):
+            tag = m.group(0)
+            alt = (re.search(r'alt="([^"]*)"', tag, re.IGNORECASE) or [None, ''])[1]
+            src = (re.search(r'src="([^"]*)"', tag, re.IGNORECASE) or [None, ''])[1]
+            if alt:
+                existing_names.add(alt)
+            if src:
+                # Also add the src filename (safe name) for matching
+                src_name = src.split('/')[-1].split('?')[0]
+                existing_names.add(src_name)
+        # Also check description headers: "# 图片描述：filename"
+        for m in re.finditer(r'#\s*(?:图片描述|视频|音频)[：:]\s*([^\n]+)', article.content or ""):
+            existing_names.add(m.group(1).strip())
+
+        for upload_file in files:
+            if not upload_file.filename:
+                continue
+            # Skip files that are already attached (identified by filename match)
+            if upload_file.filename in existing_names:
+                logger.info(f"[UPDATE] Skipping already-attached file: {upload_file.filename}")
+                continue
+            ext = Path(upload_file.filename).suffix.lower()
+            content_bytes = await upload_file.read()
+            safe_fname = re.sub(r'[^\w.\-]', '_', upload_file.filename)
+            safe_name = f"{uuid.uuid4().hex}_{safe_fname}"
+            storage_path = UPLOAD_DIR / safe_name
+            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            with open(storage_path, "wb") as f:
+                f.write(content_bytes)
+
+            uploaded_files.append({
+                "filename": upload_file.filename,
+                "content_type": upload_file.content_type or "",
+                "storage_path": str(storage_path),
+            })
+
+            # Update attachment fields on first file if not already set
+            if not article.attachment_path:
+                article.attachment_path = str(safe_name)
+                article.attachment_name = upload_file.filename
+                article.attachment_type = upload_file.content_type or ""
+
+            # Generate initial content for this file
+            try:
+                media_src = f"/api/media/{safe_name}"
+                current = article.content or ""
+                if ext in IMAGE_EXTENSIONS:
+                    img_tag = f'<img src="{media_src}" alt="{upload_file.filename}" style="max-width:100%;height:auto;display:block;border-radius:4px">'
+                    article.content = f"{current}\n\n{img_tag}" if current else img_tag
+                elif ext in AUDIO_EXTENSIONS:
+                    audio_tag = f'<audio controls src="{media_src}" alt="{upload_file.filename}" style="width:100%"></audio>'
+                    article.content = f"{current}\n\n{audio_tag}" if current else audio_tag
+                elif ext in VIDEO_EXTENSIONS:
+                    poster = ""
+                    try:
+                        thumb_name = safe_name + ".thumb.jpg"
+                        if _extract_video_thumbnail(str(storage_path), str(UPLOAD_DIR / thumb_name)):
+                            poster = f' poster="/api/media/{thumb_name}"'
+                    except Exception:
+                        pass
+                    video_tag = f'<video controls src="{media_src}"{poster} alt="{upload_file.filename}" style="width:100%"></video>'
+                    article.content = f"{current}\n\n{video_tag}" if current else video_tag
+                else:
+                    # Document — placeholder, parsed async in background
+                    doc_placeholder = f'<div data-attachment="{upload_file.filename}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {upload_file.filename}（解析中…）</div>'
+                    article.content = f"{current}\n\n{doc_placeholder}" if current else doc_placeholder
+            except Exception as e:
+                logger.warning(f"File parsing failed for {upload_file.filename}: {e}")
+
+    # Track upload order — merge with any existing order from previous uploads
+    if uploaded_files:
+        existing = re.findall(r'<!-- attachments-order: (.+?) -->', article.content or "")
+        all_order = existing[0].split(", ") if existing else []
+        all_order.extend(uf["filename"] for uf in uploaded_files)
+        # Remove old order comment(s) and append consolidated one
+        article.content = re.sub(
+            r'\n*<!-- attachments-order: .+? -->\n*', '\n',
+            article.content or "", flags=re.IGNORECASE,
+        ).strip()
+        article.content += f"\n\n<!-- attachments-order: {', '.join(all_order)} -->"
+
+    if len(uploaded_files) > 0:
+        article.processing = "processing"
+    elif article.processing != "processing":
+        article.processing = None  # don't clear processing set by text extraction
     db.commit()
     db.refresh(article)
 
-    # Extract tags + entities via LLM when content was updated (best-effort)
-    content_changed = "content" in update_data
-    if content_changed and article.content.strip():
-        _extract_and_merge(
-            article,
-            user_tags if isinstance(user_tags, list) else [],
-            db,
-        )
-        db.refresh(article)
+    # Launch background enrichment for new files
+    if len(uploaded_files) > 0:
+        asyncio.create_task(_bg_attachment_enhance(
+            article.id, uploaded_files, need_title=False,
+        ))
+    elif content and content_changed and article.content.strip():
+        article.processing = "processing"
+        db.commit()
+        asyncio.create_task(_bg_extract(article.id, user_tags, need_title=False))
 
     return article
 

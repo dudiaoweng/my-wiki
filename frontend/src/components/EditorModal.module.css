@@ -173,6 +173,155 @@
   border-color: var(--c-accent-hover);
 }
 
+.fileInput {
+  display: none;
+}
+
+/* ── File chips (multi-file attachment) ── */
+
+.fileChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.fileChip {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  width: 72px;
+  padding: 6px 4px 4px;
+  border-radius: 8px;
+  background: var(--c-surface);
+  transition: background 0.15s;
+}
+
+.fileChipExisting {
+  opacity: 0.7;
+}
+
+.fileChipExisting::after {
+  content: '已有';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  font-size: 7px;
+  font-weight: 600;
+  padding: 1px 3px;
+  border-radius: 2px;
+  background: var(--c-accent);
+  color: white;
+  line-height: 1;
+}
+
+.fileChip:hover {
+  background: var(--c-bg-hover, rgba(128, 128, 128, 0.08));
+}
+
+.fileChipThumb {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  border-radius: 6px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--c-bg-card, #f0f0f0);
+  flex-shrink: 0;
+}
+
+.fileChipImg {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.fileChipIcon {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.fileChipPlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.3);
+  color: white;
+  font-size: 14px;
+  pointer-events: none;
+}
+
+.fileChipName {
+  font-size: 9px;
+  line-height: 1.2;
+  color: var(--c-text);
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+  padding: 0 2px;
+}
+
+.fileChipRemove {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--c-border, #ddd);
+  border-radius: 50%;
+  background: var(--c-bg);
+  color: var(--c-text-muted);
+  font-size: 9px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.fileChip:hover .fileChipRemove,
+.fileChipExisting .fileChipRemove {
+  opacity: 1;
+}
+
+.fileChipRemove:hover {
+  background: var(--c-danger);
+  color: white;
+  border-color: var(--c-danger);
+}
+
+.fileAddBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 72px;
+  min-height: 72px;
+  border: 1px dashed var(--c-border, #ddd);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--c-text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-family: var(--font-body);
+  padding: 4px;
+  transition: all var(--transition-fast);
+}
+
+.fileAddBtn:hover {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+
 .dotPicker {
   display: flex;
   gap: 8px;

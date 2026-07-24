@@ -88,6 +88,9 @@ export function ArticleCard({ article, selected, onSelect, onOpen }: Props) {
             {catName}
           </span>
           <span>{formatDate(article.created_at)}</span>
+          {article.processing === 'processing' && (
+            <span className={styles.processingBadge}>⏳ 解析中…</span>
+          )}
           {article.attachment_name && (
             <span style={{ fontSize: 11, color: 'var(--c-text-muted)' }}>📎</span>
           )}

@@ -58,8 +58,12 @@ class ArticleBase(BaseModel):
     entities: Optional[dict] = None
 
 
-class ArticleCreate(ArticleBase):
-    pass
+class ArticleCreate(BaseModel):
+    title: str = Field(default="", max_length=200)  # 允许为空，后端自动生成
+    content: str = Field(default="")
+    category_id: Optional[str] = None
+    tags: list[str] = Field(default_factory=list)
+    entities: Optional[dict] = None
 
 
 class ArticleUpdate(BaseModel):

@@ -7,6 +7,22 @@ import { api } from '../api/client';
 import type { Article } from '../types/article';
 import styles from './EditorModal.module.css';
 
+function getFileIcon(filename: string): string {
+  const ext = (filename.split('.').pop() ?? '').toLowerCase();
+  switch (ext) {
+    case 'pdf': return '📕';
+    case 'doc': case 'docx': return '📝';
+    case 'xls': case 'xlsx': case 'csv': return '📊';
+    case 'ppt': case 'pptx': return '📽';
+    case 'txt': case 'md': case 'log': return '📄';
+    case 'json': case 'xml': case 'yaml': case 'yml': case 'toml': return '📋';
+    case 'py': case 'js': case 'ts': case 'jsx': case 'tsx': return '💻';
+    case 'html': case 'htm': case 'css': case 'scss': return '🌐';
+    case 'zip': case 'rar': case '7z': case 'tar': case 'gz': return '📦';
+    default: return '📎';
+  }
+}
+
 export function EditorModal() {
   const { editorState, closeEditor, notifyArticleSaved } = useApp();
   const { categories } = useCategories();
@@ -20,21 +36,73 @@ export function EditorModal() {
   const [categoryId, setCategoryId] = useState('');
   const [tagsStr, setTagsStr] = useState('');
   const [content, setContent] = useState('');
+  const [attachments, setAttachments] = useState<File[]>([]);
+  const [existingAttachments, setExistingAttachments] = useState<{name: string; type: string; thumbUrl?: string}[]>([]);
   const [saving, setSaving] = useState(false);
 
   const titleRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const originalContentRef = useRef('');
+  const objectUrlsRef = useRef<string[]>([]);
+
+  // Cleanup object URLs on unmount
+  useEffect(() => {
+    return () => {
+      objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, []);
 
   // Load article data when editing
   useEffect(() => {
     if (!editorState) return;
+    // Clear attachments immediately — don't wait for API call
+    setAttachments([]);
+    setExistingAttachments([]);
     if (editorState.articleId) {
       api.getArticle(editorState.articleId).then((a) => {
         setTitle(a.title);
         setCategoryId(a.category_id ?? '');
         setTagsStr(a.tags.join(', '));
-        setContent(a.content);
-        originalContentRef.current = a.content;
+        // Parse existing media attachments from content
+        const existAtt: {name: string; type: string; thumbUrl?: string}[] = [];
+        const tagRe = /<(img|video|audio)\s[^>]*\/?>/gi;
+        let m: RegExpExecArray | null;
+        while ((m = tagRe.exec(a.content)) !== null) {
+          const tag = m[0];
+          const tagName = m[1].toLowerCase();
+          const alt = (tag.match(/alt="([^"]*)"/i) ?? [])[1] || '';
+          const src = (tag.match(/src="([^"]*)"/i) ?? [])[1] || '';
+          const poster = (tag.match(/poster="([^"]*)"/i) ?? [])[1] || '';
+          // video/audio tags may lack alt — derive name from src filename
+          const srcName = src ? decodeURIComponent(src.split('/').pop()?.split('?')[0] ?? '') : '';
+          const name = alt || srcName;
+          const type = tagName === 'img' ? 'image' : tagName === 'video' ? 'video' : 'audio';
+          // For videos, prefer poster (thumbnail image) over src (video file)
+          const thumbUrl = type === 'image' ? src : type === 'video' ? (poster || src) : undefined;
+          existAtt.push({name, type, thumbUrl});
+        }
+        // Also add document attachment from article data (no media tag in content)
+        if (a.attachment_name) {
+          const alreadyShown = existAtt.some((it) => {
+            if (it.name === a.attachment_name) return true;
+            const srcFile = (it.thumbUrl || '').split('/').pop()?.split('?')[0] ?? '';
+            const safeMatch = srcFile.match(/^[a-f0-9]+_(.+)$/i);
+            return safeMatch && safeMatch[1] === a.attachment_name;
+          });
+          if (!alreadyShown) {
+            existAtt.push({name: a.attachment_name!, type: 'document', thumbUrl: undefined});
+          }
+        }
+        setExistingAttachments(existAtt);
+        // Strip media blocks — attachments shown as chips above
+        const cleanContent = a.content
+          .replace(/<(img|video|audio)\b[^>]*\/?>\s*/gi, '')     // opening tags
+          .replace(/<\/(video|audio)>\s*/gi, '')                   // closing tags
+          .replace(/#\s*(图片描述|视频|音频)[：:][^\n]*\n/g, '')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
+        setContent(cleanContent);
+        originalContentRef.current = cleanContent;
       }).catch(() => showToast('Failed to load article', 'error'));
     } else {
       setTitle('');
@@ -49,11 +117,6 @@ export function EditorModal() {
   if (!editorState) return null;
 
   const handleSave = async () => {
-    if (!title.trim()) {
-      showToast('请输入文章标题', 'warning');
-      titleRef.current?.focus();
-      return;
-    }
     setSaving(true);
 
     const tags = tagsStr
@@ -72,7 +135,11 @@ export function EditorModal() {
         if (content !== originalContentRef.current) {
           updateData.content = content;
         }
-        await api.updateArticle(editorState.articleId, updateData);
+        await api.updateArticle(
+          editorState.articleId, updateData,
+          attachments.length > 0 ? attachments : undefined,
+          existingAttachments.map((ea) => ea.name),
+        );
         showToast('文章已更新', 'success');
       } else {
         const article = await api.createArticle({
@@ -80,7 +147,7 @@ export function EditorModal() {
           content,
           category_id: categoryId || null,
           tags,
-        });
+        }, attachments.length > 0 ? attachments : undefined);
         showToast('文章已创建', 'success');
         // Same behavior as file upload: show inline detail with EntityPanel
         closeEditor();
@@ -112,14 +179,14 @@ export function EditorModal() {
 
         <div className={styles.body}>
           <div className={styles.group}>
-            <label className={styles.label}>标题</label>
+            <label className={styles.label}>标题（选填，留空则自动生成）</label>
             <input
               ref={titleRef}
               type="text"
               className={styles.input}
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder="文章标题…"
+              placeholder="文章标题…（留空则自动生成）"
             />
           </div>
 
@@ -149,6 +216,97 @@ export function EditorModal() {
               placeholder="例如: JavaScript, 教程, 前端"
             />
           </div>
+
+          <div className={styles.group}>
+            <label className={styles.label}>附件（选填）</label>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                className={styles.fileInput}
+                onChange={(e) => {
+                  const newFiles = Array.from(e.target.files ?? []);
+                  if (newFiles.length > 0) {
+                    setAttachments((prev) => [...prev, ...newFiles]);
+                  }
+                  if (fileInputRef.current) fileInputRef.current.value = '';
+                }}
+                accept=".txt,.md,.json,.xml,.csv,.yaml,.yml,.py,.js,.ts,.html,.css,.docx,.xlsx,.xls,.pptx,.ppt,.pdf,.jpg,.jpeg,.png,.gif,.webp,.svg,.bmp,.mp3,.wav,.m4a,.flac,.ogg,.mp4,.avi,.mov,.mkv,.webm"
+              />
+              <div className={styles.fileChips}>
+                {/* Existing attachments */}
+                {existingAttachments.map((ea, i) => {
+                  const isImage = ea.type === 'image';
+                  const isVideo = ea.type === 'video';
+                  const isAudio = ea.type === 'audio';
+                  return (
+                    <div key={`existing-${ea.name}-${i}`} className={`${styles.fileChip} ${styles.fileChipExisting}`}>
+                      <div className={styles.fileChipThumb}>
+                        {ea.thumbUrl ? (
+                          <img src={ea.thumbUrl} alt={ea.name} className={styles.fileChipImg} />
+                        ) : (
+                          <span className={styles.fileChipIcon}>
+                            {isVideo ? '🎬' : isAudio ? '🎵' : getFileIcon(ea.name)}
+                          </span>
+                        )}
+                        {isVideo && <span className={styles.fileChipPlay}>▶</span>}
+                      </div>
+                      <span className={styles.fileChipName}>{ea.name}</span>
+                      <button
+                        className={styles.fileChipRemove}
+                        onClick={() => {
+                          setExistingAttachments((prev) => prev.filter((_, j) => j !== i));
+                        }}
+                        title="移除已有附件"
+                      >✕</button>
+                    </div>
+                  );
+                })}
+                {/* Newly added attachments */}
+                {attachments.map((file, i) => {
+                  const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
+                  const isImage = ['jpg','jpeg','png','gif','webp','svg','bmp','ico','tiff','tif'].includes(ext);
+                  const isVideo = ['mp4','avi','mov','mkv','webm','wmv'].includes(ext);
+                  const isAudio = ['mp3','wav','m4a','flac','ogg','wma'].includes(ext);
+                  const rawUrl = isImage ? URL.createObjectURL(file) : '';
+                  if (rawUrl && !objectUrlsRef.current.includes(rawUrl)) {
+                    objectUrlsRef.current.push(rawUrl);
+                  }
+                  const thumbUrl = rawUrl || undefined;
+                  return (
+                    <div key={`${file.name}-${i}`} className={styles.fileChip}>
+                      <div className={styles.fileChipThumb}>
+                        {thumbUrl ? (
+                          <img src={thumbUrl} alt={file.name} className={styles.fileChipImg} />
+                        ) : (
+                          <span className={styles.fileChipIcon}>
+                            {isVideo ? '🎬' : isAudio ? '🎵' : getFileIcon(file.name)}
+                          </span>
+                        )}
+                        {isVideo && <span className={styles.fileChipPlay}>▶</span>}
+                      </div>
+                      <span className={styles.fileChipName}>{file.name}</span>
+                      <button
+                        className={styles.fileChipRemove}
+                        onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}
+                        title="移除"
+                      >✕</button>
+                    </div>
+                  );
+                })}
+                <button
+                  type="button"
+                  className={styles.fileAddBtn}
+                  onClick={() => fileInputRef.current?.click()}
+                  title="添加附件"
+                >
+                  + 添加
+                </button>
+              </div>
+              <span className={styles.hint}>
+                支持文档、图片、音频、视频，保存后自动识别内容
+              </span>
+            </div>
 
           <div className={styles.group}>
             <label className={styles.label}>内容</label>

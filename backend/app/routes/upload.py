@@ -10,6 +10,13 @@ from sqlalchemy.orm import Session
 from app.dependencies import get_db
 from app.models import Article
 from app.schemas import ArticleResponse
+from app.config import (
+    LLM_API_KEY, LLM_API_BASE, LLM_MODEL,
+    VISION_API_KEY, VISION_API_BASE, VISION_MODEL,
+    ASR_API_KEY, ASR_API_BASE, ASR_MODEL,
+    UPLOAD_DIR as UPLOAD_DIR_STR,
+)
+from app.utils import find_ffmpeg
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
 
@@ -17,19 +24,7 @@ logger = logging.getLogger(__name__)
 
 # ─── Config ────────────────────────────────────────
 
-UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads"))
-# ── LLM (text) ──
-LLM_API_KEY = os.getenv("LLM_API_KEY", "")
-LLM_API_BASE = os.getenv("LLM_API_BASE", "https://api.openai.com/v1")
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
-# ── Vision ──
-VISION_API_KEY = os.getenv("VISION_API_KEY", LLM_API_KEY)
-VISION_API_BASE = os.getenv("VISION_API_BASE", LLM_API_BASE)
-VISION_MODEL = os.getenv("VISION_MODEL", "glm-4v-flash")
-# ── ASR ──
-ASR_API_KEY = os.getenv("ASR_API_KEY", LLM_API_KEY)
-ASR_API_BASE = os.getenv("ASR_API_BASE", LLM_API_BASE)
-ASR_MODEL = os.getenv("ASR_MODEL", "GLM-ASR-2512")
+UPLOAD_DIR = Path(UPLOAD_DIR_STR)
 
 # Ensure upload directory exists
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -323,29 +318,6 @@ async def parse_video(file_path: str, original_name: str) -> str:
     )
 
 
-def _find_ffmpeg() -> str | None:
-    """Find ffmpeg executable. Returns path or None."""
-    import platform
-    import shutil
-
-    # Check PATH first
-    ffmpeg = shutil.which('ffmpeg')
-    if ffmpeg:
-        return ffmpeg
-
-    # Search Winget install location on Windows
-    if platform.system() == 'Windows':
-        try:
-            ffmpeg_base = Path(os.environ.get('LOCALAPPDATA', '')) / 'Microsoft' / 'WinGet' / 'Packages'
-            for p in ffmpeg_base.glob('Gyan.FFmpeg_*'):
-                candidates = sorted(p.glob('ffmpeg-*-full_build/bin/ffmpeg.exe'), reverse=True)
-                if candidates:
-                    return str(candidates[0])
-        except Exception:
-            pass
-    return None
-
-
 def _convert_to_mono_wav(audio_bytes: bytes, orig_ext: str) -> bytes | None:
     """Convert audio to 16kHz mono WAV bytes. Returns None if conversion fails."""
     import io
@@ -387,7 +359,7 @@ def _convert_to_mono_wav(audio_bytes: bytes, orig_ext: str) -> bytes | None:
             return None
 
     # ── Other formats: use ffmpeg subprocess ──
-    ffmpeg_path = _find_ffmpeg()
+    ffmpeg_path = find_ffmpeg()
     if not ffmpeg_path:
         logger.info("[AUDIO] ffmpeg not found — cannot convert non-WAV audio")
         return None
@@ -462,8 +434,6 @@ async def transcribe_media_from_bytes(content: bytes, filename: str, content_typ
     except Exception as e:
         logger.info(f"[ASR] GLM-ASR-2512 error: {e}")
         return f"ERROR: GLM-ASR-2512 调用异常：{e}"
-
-    return ""
 
 
 # ─── LLM helpers ───────────────────────────────────
@@ -670,8 +640,8 @@ async def upload_file(
     except Exception as e:
         raw_text = f"# {file.filename}\n\n文件解析失败，文件已作为附件保存。"
 
-    # 3. All uploads show "正在识别…" until background processing completes
-    title = "正在识别…"
+    # 3. Use filename as initial title; background task will generate a better one
+    title = file.filename
 
     # 4. Create article immediately — media visible, marked as processing
     article = Article(
@@ -703,7 +673,10 @@ async def upload_file(
                 elif ext in VIDEO_EXTENSIONS:
                     full_text = await parse_video(str(file_path), file.filename)
                 else:
-                    desc = await parse_media(content_bytes, file.filename, file.content_type or "")
+                    # Re-read from disk to avoid capturing content_bytes in closure
+                    with open(file_path, "rb") as f:
+                        audio_bytes = f.read()
+                    desc = await parse_media(audio_bytes, file.filename, file.content_type or "")
                     full_text = raw_text + "\n\n" + desc
             else:
                 full_text = raw_text

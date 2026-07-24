@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { api } from '../api/client';
 import type { QAMessage, QAResponse, FileContext } from '../types/qa';
 
@@ -66,26 +66,124 @@ export function useQA() {
   const [fileContexts, setFileContexts] = useState<Record<string, FileContext[]>>(() => {
     try {
       const raw = localStorage.getItem(FILE_CTX_KEY);
-      return raw ? JSON.parse(raw) : {};
+      if (!raw) return {};
+      const data = JSON.parse(raw);
+      // Purge entries without file_id (legacy data before async processing)
+      let changed = false;
+      for (const sid of Object.keys(data)) {
+        if (Array.isArray(data[sid])) {
+          data[sid] = data[sid].filter((fc: FileContext) => {
+            if (!fc.file_id) { changed = true; return false; }
+            return true;
+          });
+        }
+      }
+      if (changed) {
+        try { localStorage.setItem(FILE_CTX_KEY, JSON.stringify(data)); } catch {}
+      }
+      return data;
     } catch { return {}; }
   });
 
   const currentFileContexts = activeId ? (fileContexts[activeId] ?? []) : [];
 
-  const addFileContext = useCallback(async (file: File) => {
-    try {
-      const result = await api.parseFileForQA(file);
-      if (!activeId) return;
+  // Ref to track active polling timers so we can cancel them on unmount
+  const pollingTimers = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+
+  // Cleanup polling on unmount
+  useEffect(() => {
+    return () => {
+      pollingTimers.current.forEach(clearTimeout);
+      pollingTimers.current.clear();
+    };
+  }, []);
+
+  /** Poll a file's processing status until done or error. */
+  const pollFileUntilDone = useCallback((fileId: string, sessionId: string, attempts: number = 0) => {
+    if (!fileId || fileId === 'undefined') return;  // Guard against corrupted data
+    const MAX_ATTEMPTS = 90;  // ~3 minutes at 2s intervals
+    if (attempts >= MAX_ATTEMPTS) {
       setFileContexts((prev) => {
-        const updated = { ...prev, [activeId]: [...(prev[activeId] ?? []), result] };
-        localStorage.setItem(FILE_CTX_KEY, JSON.stringify(updated));
+        const list = [...(prev[sessionId] ?? [])];
+        const idx = list.findIndex(fc => fc.file_id === fileId);
+        if (idx >= 0) list[idx] = { ...list[idx], content: '[文件处理超时，请重试]', status: 'error' };
+        const updated = { ...prev, [sessionId]: list };
+        try { localStorage.setItem(FILE_CTX_KEY, JSON.stringify(updated)); } catch {}
         return updated;
       });
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : '文件解析失败';
-      throw new Error(msg);
+      return;
     }
-  }, [activeId]);
+
+    const timer = setTimeout(async () => {
+      pollingTimers.current.delete(timer);
+      try {
+        const status = await api.getFileStatus(fileId);
+        if (status.status === 'done') {
+          setFileContexts((prev) => {
+            if (!prev[sessionId]) return prev;  // session deleted
+            const list = [...prev[sessionId]];
+            const idx = list.findIndex(fc => fc.file_id === fileId);
+            if (idx >= 0) {
+              list[idx] = { ...list[idx], content: status.content!, content_type: status.content_type, is_image: status.is_image, status: 'done', media_url: status.media_url, thumb_url: status.thumb_url };
+            }
+            const updated = { ...prev, [sessionId]: list };
+            try { localStorage.setItem(FILE_CTX_KEY, JSON.stringify(updated)); } catch {}
+            return updated;
+          });
+          return;
+        }
+        if (status.status === 'error') {
+          setFileContexts((prev) => {
+            if (!prev[sessionId]) return prev;
+            const list = [...prev[sessionId]];
+            const idx = list.findIndex(fc => fc.file_id === fileId);
+            if (idx >= 0) {
+              list[idx] = { ...list[idx], content: `[文件解析失败: ${status.error}]`, status: 'error' };
+            }
+            const updated = { ...prev, [sessionId]: list };
+            try { localStorage.setItem(FILE_CTX_KEY, JSON.stringify(updated)); } catch {}
+            return updated;
+          });
+          return;
+        }
+        // Still processing — poll again
+        pollFileUntilDone(fileId, sessionId, attempts + 1);
+      } catch {
+        // Network error — retry
+        pollFileUntilDone(fileId, sessionId, attempts + 1);
+      }
+    }, 2000);
+
+    pollingTimers.current.add(timer);
+  }, []);
+
+  const addFileContext = useCallback(async (file: File) => {
+    // Capture session id synchronously — avoid stale closure after await
+    const sessionId = activeId;
+    if (!sessionId) throw new Error('请先开始对话');
+
+    // Phase 1: upload file, get back a file_id immediately
+    const result = await api.parseFileForQA(file);
+
+    // Phase 2: add placeholder to state, start background polling
+    setFileContexts((prev) => {
+      const fc: FileContext = {
+        file_id: result.file_id,
+        filename: result.filename,
+        content: '' /* filled by polling */,
+        content_type: result.content_type,
+        is_image: result.is_image,
+        status: 'processing',
+        media_url: result.media_url,
+      };
+      const updated = { ...prev, [sessionId]: [...(prev[sessionId] ?? []), fc] };
+      try { localStorage.setItem(FILE_CTX_KEY, JSON.stringify(updated)); } catch {}
+      return updated;
+    });
+
+    // Kick off background polling for this file
+    pollFileUntilDone(result.file_id, sessionId);
+  }, [activeId, pollFileUntilDone]);
 
   const removeFileContext = useCallback((index: number) => {
     if (!activeId) return;
@@ -93,7 +191,9 @@ export function useQA() {
       const list = [...(prev[activeId] ?? [])];
       list.splice(index, 1);
       const updated = { ...prev, [activeId]: list };
-      localStorage.setItem(FILE_CTX_KEY, JSON.stringify(updated));
+      try {
+        localStorage.setItem(FILE_CTX_KEY, JSON.stringify(updated));
+      } catch { /* quota exceeded */ }
       return updated;
     });
   }, [activeId]);
@@ -102,7 +202,9 @@ export function useQA() {
     if (!activeId) return;
     setFileContexts((prev) => {
       const updated = { ...prev, [activeId]: [] };
-      localStorage.setItem(FILE_CTX_KEY, JSON.stringify(updated));
+      try {
+        localStorage.setItem(FILE_CTX_KEY, JSON.stringify(updated));
+      } catch { /* quota exceeded */ }
       return updated;
     });
   }, [activeId]);
@@ -133,21 +235,22 @@ export function useQA() {
   /** Delete a session */
   const deleteSession = useCallback(
     (id: string) => {
+      let nextActive: string | null = null;
       setSessions((prev) => {
-        const next = { ...prev };
-        delete next[id];
-        return next;
+        const { [id]: _, ...rest } = prev;
+        const remaining = Object.values(rest).sort((a, b) => b.createdAt - a.createdAt);
+        nextActive = remaining.length > 0 ? remaining[0].id : null;
+        return rest;
       });
-      setActiveId((prev) => {
-        if (prev !== id) return prev;
-        // Switch to the most recent remaining session
-        const remaining = Object.values(sessions)
-          .filter((s) => s.id !== id)
-          .sort((a, b) => b.createdAt - a.createdAt);
-        return remaining.length > 0 ? remaining[0].id : null;
+      setActiveId((prev) => (prev === id ? nextActive : prev));
+      // Clean up file contexts for the deleted session
+      setFileContexts((prev) => {
+        const { [id]: _, ...rest } = prev;
+        localStorage.setItem(FILE_CTX_KEY, JSON.stringify(rest));
+        return rest;
       });
     },
-    [sessions]
+    []
   );
 
   const askQuestion = useCallback(
@@ -186,7 +289,8 @@ export function useQA() {
       try {
         // Use the session's existing messages (before the user msg was added) for history
         const history = (sessions[sid]?.messages ?? []).slice(-20);
-        const fcs = fileContexts[sid] ?? [];
+        // Only include files that have finished processing (skip 'processing' ones)
+        const fcs = (fileContexts[sid] ?? []).filter(fc => fc.status !== 'processing');
         const result = await api.askQuestion({
           question,
           history,
