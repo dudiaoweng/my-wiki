@@ -2,7 +2,7 @@ import type { Article, ArticleCreate, ArticleUpdate } from '../types/article';
 import type { Category, CategoryCreate } from '../types/category';
 import type { Stats } from '../types/stats';
 import type { GraphData } from '../types/graph';
-import type { QARequest, QAResponse } from '../types/qa';
+import type { QARequest, QAResponse, FileParseResult, FileStatusResult } from '../types/qa';
 
 export interface EntityInfoItem {
   id: string;
@@ -63,17 +63,60 @@ export const api = {
   getArticle(id: string) {
     return request<Article>(`/articles/${id}`);
   },
-  createArticle(data: ArticleCreate) {
-    return request<Article>('/articles', {
+  async createArticle(data: ArticleCreate, files?: File[]): Promise<Article> {
+    const formData = new FormData();
+    formData.append('title', data.title);
+    formData.append('content', data.content);
+    formData.append('category_id', data.category_id ?? '');
+    formData.append('tags', JSON.stringify(data.tags));
+    if (files) {
+      for (const f of files) formData.append('files', f);
+    }
+
+    const res = await fetch(`${BASE}/articles`, {
       method: 'POST',
-      body: JSON.stringify(data),
+      body: formData,
     });
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ detail: res.statusText }));
+      let detail = body.detail ?? res.statusText;
+      if (Array.isArray(detail)) {
+        detail = detail.map((d: { msg?: string }) => d.msg ?? JSON.stringify(d)).join('; ');
+      }
+      throw new ApiError(res.status, detail);
+    }
+
+    return res.json();
   },
-  updateArticle(id: string, data: ArticleUpdate) {
-    return request<Article>(`/articles/${id}`, {
+  async updateArticle(id: string, data: ArticleUpdate, files?: File[], keepAttachments?: string[]): Promise<Article> {
+    const formData = new FormData();
+    if (data.title !== undefined) formData.append('title', data.title);
+    if (data.content !== undefined) formData.append('content', data.content);
+    if (data.category_id !== undefined) formData.append('category_id', data.category_id ?? '');
+    if (data.tags !== undefined) formData.append('tags', JSON.stringify(data.tags));
+    if (files) {
+      for (const f of files) formData.append('files', f);
+    }
+    if (keepAttachments !== undefined) {
+      formData.append('keep_attachments', JSON.stringify(keepAttachments));
+    }
+
+    const res = await fetch(`${BASE}/articles/${id}`, {
       method: 'PUT',
-      body: JSON.stringify(data),
+      body: formData,
     });
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ detail: res.statusText }));
+      let detail = body.detail ?? res.statusText;
+      if (Array.isArray(detail)) {
+        detail = detail.map((d: { msg?: string }) => d.msg ?? JSON.stringify(d)).join('; ');
+      }
+      throw new ApiError(res.status, detail);
+    }
+
+    return res.json();
   },
   deleteArticle(id: string) {
     return request<void>(`/articles/${id}`, { method: 'DELETE' });
@@ -192,13 +235,29 @@ export const api = {
     });
   },
 
-  async parseFileForQA(file: File): Promise<{ filename: string; content: string; content_type: string; is_image: boolean }> {
+  async parseFileForQA(file: File): Promise<FileParseResult> {
     const formData = new FormData();
     formData.append('file', file);
-    const res = await fetch(`${BASE}/qa/parse-file`, {
-      method: 'POST',
-      body: formData,
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);  // 10s timeout for upload only (processing is async)
+    try {
+      const res = await fetch(`${BASE}/qa/parse-file`, {
+        method: 'POST',
+        body: formData,
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new ApiError(res.status, body.detail ?? res.statusText);
+      }
+      return res.json();
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+
+  async getFileStatus(fileId: string): Promise<FileStatusResult> {
+    const res = await fetch(`${BASE}/qa/file-status/${encodeURIComponent(fileId)}`);
     if (!res.ok) {
       const body = await res.json().catch(() => ({ detail: res.statusText }));
       throw new ApiError(res.status, body.detail ?? res.statusText);

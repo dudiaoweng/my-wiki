@@ -1,8 +1,39 @@
-# 忽略 Python 虚拟环境目录
-backend/.venv/
+# ===== Python =====
+# 虚拟环境
+venv/
+.venv/
 
-# 忽略上传目录
+# 字节码缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 打包产物
+*.egg-info/
+dist/
+build/
+
+# 环境变量 (含 API Key 等敏感信息)
+.env
+.env.*
+!.env.example
+
+# ===== 运行时数据 =====
 backend/uploads/
+*.db
+*.sqlite3
 
-# 忽略 IDE 特定配置（如 VS Code 的 .vscode 文件夹）
+# ===== Node / 前端 =====
+node_modules/
+frontend/dist/
+
+# ===== IDE / 编辑器 =====
 .vscode/
+.idea/
+
+# ===== Claude Code =====
+.claude/
+
+# ===== 操作系统 =====
+.DS_Store
+Thumbs.db

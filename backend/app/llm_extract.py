@@ -5,14 +5,11 @@ Used by both upload (async → via asyncio.to_thread) and articles CRUD (sync).
 
 import json
 import logging
-import os
 import re
 
-logger = logging.getLogger(__name__)
+from app.config import LLM_API_KEY, LLM_API_BASE, LLM_MODEL
 
-LLM_API_KEY = os.getenv("LLM_API_KEY", "")
-LLM_API_BASE = os.getenv("LLM_API_BASE", "https://api.openai.com/v1")
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+logger = logging.getLogger(__name__)
 
 _EXTRACT_PROMPT = (
     "从以下文档内容中提取关键概念和实体。\n"

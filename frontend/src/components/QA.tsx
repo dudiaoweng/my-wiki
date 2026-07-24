@@ -5,6 +5,7 @@ import { useQA } from '../hooks/useQA';
 import { useApp } from '../context/AppProvider';
 import { useToast } from '../hooks/useToast';
 import { ArticleDetailInline } from './ArticleDetailInline';
+import { Lightbox } from './Lightbox';
 import type { FileContext } from '../types/qa';
 import styles from './QA.module.css';
 
@@ -14,6 +15,23 @@ const EXAMPLE_QUESTIONS = [
   'React 组件设计有什么原则？',
   '如何配置开发环境？',
 ];
+
+/** Return a file-type emoji icon based on the filename extension. */
+function getFileTypeIcon(filename: string): string {
+  const ext = filename.split('.').pop()?.toLowerCase() ?? '';
+  switch (ext) {
+    case 'pdf': return '📕';
+    case 'doc': case 'docx': return '📝';
+    case 'xls': case 'xlsx': case 'csv': return '📊';
+    case 'ppt': case 'pptx': return '📽';
+    case 'txt': case 'md': case 'log': return '📄';
+    case 'json': case 'xml': case 'yaml': case 'yml': case 'toml': return '📋';
+    case 'py': case 'js': case 'ts': case 'jsx': case 'tsx': return '💻';
+    case 'html': case 'htm': case 'css': case 'scss': return '🌐';
+    case 'zip': case 'rar': case '7z': case 'tar': case 'gz': return '📦';
+    default: return '📎';
+  }
+}
 
 export function QA() {
   const {
@@ -43,6 +61,7 @@ export function QA() {
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [viewedArticleId, setViewedArticleId] = useState<string | null>(null);
+  const [lightboxFile, setLightboxFile] = useState<FileContext | null>(null);
 
   const handleSwitchSession = useCallback(
     (id: string) => {
@@ -89,11 +108,22 @@ export function QA() {
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    // Check file size before uploading (backend limit: 50MB)
+    const MAX_SIZE = 50 * 1024 * 1024;
+    if (file.size > MAX_SIZE) {
+      const sizeMB = (file.size / 1024 / 1024).toFixed(1);
+      showToast(`文件过大（${sizeMB}MB，最大 50MB）`, 'error');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+
     try {
       await addFileContext(file);
-      showToast(`已上传「${file.name}」`, 'success');
-    } catch {
-      showToast('文件解析失败', 'error');
+      showToast(`已上传「${file.name}」，正在处理…`, 'success');
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : '文件解析失败';
+      showToast(msg, 'error');
     }
     // Reset input so the same file can be re-selected
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -228,17 +258,58 @@ export function QA() {
         {/* ── Uploaded file chips ── */}
         {fileContexts.length > 0 && (
           <div className={styles.fileChips}>
-            {fileContexts.map((fc: FileContext, i: number) => (
-              <span key={i} className={styles.fileChip} title={fc.is_image ? fc.filename : fc.content.slice(0, 200)}>
-                {fc.is_image ? '🖼' : '📎'} {fc.filename}
-                <button
-                  className={styles.fileChipRemove}
-                  onClick={() => removeFileContext(i)}
-                  title="移除"
-                >✕</button>
-              </span>
-            ))}
-            <button className={styles.fileChipClear} onClick={clearFileContexts} title="清除全部">
+            {fileContexts.map((fc: FileContext, i: number) => {
+              const ext = (fc.filename.split('.').pop() ?? '').toLowerCase();
+              const isImage = !!(fc.is_image || fc.content_type?.startsWith('image/'));
+              const isVideo = !!(fc.content_type?.startsWith('video/') || ['mp4','avi','mov','mkv','webm','wmv'].includes(ext));
+              const isAudio = !!(fc.content_type?.startsWith('audio/') || ['mp3','wav','m4a','flac','ogg','wma'].includes(ext));
+              return (
+                <div
+                  key={fc.file_id ?? i}
+                  className={`${styles.fileCard} ${fc.status === 'processing' ? styles.fileCardProcessing : ''} ${fc.status === 'error' ? styles.fileCardError : ''}`}
+                  onClick={() => {
+                    if (!fc.media_url || fc.status === 'processing') return;
+                    if (isImage || isVideo || isAudio) {
+                      setLightboxFile(fc);
+                    } else if (fc.media_url) {
+                      window.open(fc.media_url, '_blank');
+                    }
+                  }}
+                  title={fc.status === 'done' ? `点击打开 ${fc.filename}` : fc.filename}
+                >
+                  {/* Thumbnail / icon */}
+                  <div className={styles.fileThumb}>
+                    {fc.status === 'processing' ? (
+                      <div className={styles.fileThumbSpinner}>⏳</div>
+                    ) : isImage && fc.media_url ? (
+                      <img src={fc.media_url} alt={fc.filename} className={styles.fileThumbImg} />
+                    ) : isVideo && fc.thumb_url ? (
+                      <img src={fc.thumb_url} alt={fc.filename} className={styles.fileThumbImg} />
+                    ) : isVideo ? (
+                      <span className={styles.fileIcon}>🎬</span>
+                    ) : isAudio ? (
+                      <span className={styles.fileIcon}>🎵</span>
+                    ) : (
+                      <span className={styles.fileIcon}>{getFileTypeIcon(fc.filename)}</span>
+                    )}
+                    {isVideo && fc.thumb_url && fc.status === 'done' && (
+                      <span className={styles.filePlayOverlay}>▶</span>
+                    )}
+                  </div>
+                  {/* Filename */}
+                  <span className={styles.fileName} title={fc.filename}>{fc.filename}</span>
+                  {/* Error badge */}
+                  {fc.status === 'error' && <span className={styles.fileBadge + ' ' + styles.fileBadgeError}>失败</span>}
+                  {/* Remove button */}
+                  <button
+                    className={styles.fileRemove}
+                    onClick={(e) => { e.stopPropagation(); removeFileContext(i); }}
+                    title="移除"
+                  >✕</button>
+                </div>
+              );
+            })}
+            <button className={styles.fileClearBtn} onClick={clearFileContexts} title="清除全部">
               清除全部
             </button>
           </div>
@@ -306,6 +377,14 @@ export function QA() {
             <ArticleDetailInline articleId={viewedArticleId} onBack={() => setViewedArticleId(null)} />
           </div>
         </div>
+      )}
+
+      {/* ── Media lightbox ── */}
+      {lightboxFile && (
+        <Lightbox
+          file={lightboxFile}
+          onClose={() => setLightboxFile(null)}
+        />
       )}
     </div>
   );

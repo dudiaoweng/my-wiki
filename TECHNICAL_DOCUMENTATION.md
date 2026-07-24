@@ -1,6 +1,6 @@
 # 知识库系统 — 技术文档
 
-> **版本**: 1.1 | **最后更新**: 2026-07-20 | **作者**: dudiaoweng
+> **版本**: 1.2 | **最后更新**: 2026-07-23 | **作者**: dudiaoweng
 
 ---
 
@@ -50,8 +50,9 @@ my-wiki/
 │       ├── dependencies.py      # FastAPI 依赖注入 (get_db)
 │       ├── models.py            # ORM 模型 (Category, Article, ArticleChunk, EntityInfo)
 │       ├── schemas.py           # Pydantic 请求/响应模型
-│       ├── config.py            # 集中化 LLM/应用配置 (环境变量)
+│       ├── config.py            # 集中化配置：LLM/Vision/ASR/Embedding/QA (环境变量)
 │       ├── llm_extract.py       # 共享 LLM 标签+实体提取 (统一超时/重试/容错)
+│       ├── utils.py             # 共享工具函数 (find_ffmpeg 等)
 │       └── routes/
 │           ├── articles.py      # 文章 CRUD + 分页搜索
 │           ├── categories.py    # 分类 CRUD
@@ -153,13 +154,17 @@ my-wiki/
 
 ### 2.3 外部 LLM 服务
 
-| 服务 | 端点 | 用途 |
-|------|------|------|
-| **智谱 (BigModel)** | `https://open.bigmodel.cn/api/paas/v4` | LLM 对话 + 嵌入向量 |
-| 模型: `glm-4` (可配置) | `/chat/completions` | 问答生成、实体提取、标题生成 |
-| 模型: `embedding-3` | `/embeddings` | 文本向量化 (语义搜索) |
+四种模型类型独立配置，每种有独立的 API Key / Base / Model：
 
-> 任何兼容 OpenAI API 格式的服务均可替换使用。
+| 模型类型 | 用途 | 默认模型 | 配置前缀 |
+|---------|------|---------|---------|
+| **LLM 文本** | 标题生成、实体提取、纯文本问答 | `gpt-4o-mini` | `LLM_` |
+| **Vision 视觉** | 图片描述、视频帧分析 | `glm-4v-flash` | `VISION_` |
+| **ASR 语音识别** | 音频转文字 | `GLM-ASR-2512` | `ASR_` |
+| **Embedding 嵌入** | 文本向量化 (语义搜索) | `embedding-3` | `EMBEDDING_` |
+
+> 任何兼容 OpenAI API 格式的服务均可替换使用。未配置独立密钥时自动回退到 LLM 配置。
+> 所有配置统一在 `app/config.py` 中管理，各模块通过 `from app.config import ...` 引用。
 
 ---
 
@@ -229,7 +234,8 @@ my-wiki/
 3. **URL 驱动状态** — 搜索/筛选/视图状态编码在 URL 参数中，支持分享和前进/后退
 4. **乐观更新** — 前端先更新 UI，再等待 API 确认，保证响应速度
 5. **关注点分离** — CSS Modules 隔离样式，Hooks 封装业务逻辑，组件只负责渲染
-6. **代码复用** — 共享 LLM 提取模块 (`llm_extract.py`) 供文章创建/更新/上传共用；共享 D3 钩子 (`useD3ForceGraph`) 供图谱页/实体面板共用；共享实体图标 (`entityIcons.ts`) 跨组件一致
+6. **代码复用** — 共享 LLM 提取模块 (`llm_extract.py`) 供文章创建/更新/上传共用；共享 D3 钩子 (`useD3ForceGraph`) 供图谱页/实体面板共用；共享工具函数 (`utils.py`) 提供 ffmpeg 查找等通用功能；共享实体图标 (`entityIcons.ts`) 跨组件一致
+7. **配置统一** — 所有配置集中在 `config.py`，各模块通过 import 引用，避免 `os.getenv()` 分散在多个文件
 
 ---
 
@@ -367,8 +373,10 @@ my-wiki/
 | | | `/{name}/info/{id}` | DELETE | 删除实体附加信息 |
 | `/api/graph` | `routes/graph.py` | `/` | GET | 知识图谱数据 |
 | `/api/qa` | `routes/qa.py` | `/ask` | POST | 问答 (RAG) |
+| | | `/parse-file` | POST | 解析上传文件为问答上下文 |
 | `/api/stats` | `routes/stats.py` | `/` | GET | 统计数据 |
 | `/api/upload` | `routes/upload.py` | `/` | POST | 文件上传 |
+| `/api` | `main.py` | `/media/{filename}` | GET | 媒体文件直链 |
 | `/api` | `main.py` | `/health` | GET | 健康检查 |
 
 ### 5.2 核心 API 详解
@@ -395,32 +403,49 @@ my-wiki/
   "history": [
     {"role": "user", "content": "..."},
     {"role": "assistant", "content": "..."}
-  ]
+  ],
+  "file_contexts": [
+    {
+      "filename": "photo.jpg",
+      "content": "<base64>",
+      "content_type": "image/jpeg",
+      "is_image": true
+    }
+  ],
+  "kb_enabled": true
 }
 ```
 
 **处理流程:**
 
 ```
-用户问题
+用户问题 + 上传文件(可选)
     │
     ▼
 ┌─────────────────┐
-│ 1. 语义搜索      │  ← 向量化问题 → 余弦相似度 → 取 top-5 文章块
-│  semantic_search │
+│ 1. 文件上下文解析  │  ← 图片→base64(视觉模型) / 文本→直接解析
+│ parse-file       │  ← 音频→ASR转录 / 视频→帧提取+视觉描述
+│ (如上传了文件)    │
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│ 2. 实体信息收集   │  ← 从问题和检索结果中提取实体名 → 查 entity_infos 表
+│ 2. 语义搜索      │  ← 向量化问题 → 余弦相似度 → 取 top-5 文章块
+│  semantic_search │  ← (kb_enabled=false 时跳过)
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ 3. 实体信息收集   │  ← 从问题和检索结果中提取实体名 → 查 entity_infos 表
 │ _collect_entity  │
 │ _info            │
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│ 3. LLM 调用      │  ← 构建系统提示 (知识库内容 + 实体附加信息 + 历史)
-│ call_llm         │     → POST /chat/completions → 返回生成回答
+│ 4. LLM 调用      │  ← 构建系统提示 (知识库内容 + 实体附加信息 + 文件上下文 + 历史)
+│ call_llm         │  ← 有图片时使用视觉模型, 纯文本使用文本模型
+│                  │     → POST /chat/completions → 返回生成回答
 └────────┬────────┘
          │
          ▼
@@ -452,7 +477,7 @@ my-wiki/
 | `file` | File | 上传文件 |
 | `category_id` | string | 目标分类 UUID (可选) |
 
-**处理流程:**
+**处理流程 (两阶段):**
 
 ```
 上传文件
@@ -461,35 +486,32 @@ my-wiki/
 ┌──────────────────┐
 │ 1. 安全校验       │  ← 路径穿越防护 (文件名净化)
 │                  │  ← 大小限制 (500MB)
-│                  │  ← 扩展名校验
 └────────┬─────────┘
          │
          ▼
 ┌──────────────────┐
-│ 2. 文件解析       │  ← .txt/.md → 直接读取
-│ (按类型分发)      │  ← .docx → python-docx
-│                  │  ← .xlsx → openpyxl
-│                  │  ← .pptx → python-pptx
-│                  │  ← .pdf → PyPDF2
-│                  │  ← 图片 → base64 + 视觉 LLM
-│                  │  ← 音视频 → 转录 API
+│ 2. 立即显示       │  ← 文本/图片/音频/视频以媒体标签立即显示
+│ (创建文章)        │  ← 标题="正在识别…", processing="processing"
 └────────┬─────────┘
          │
          ▼
 ┌──────────────────┐
-│ 3. LLM 标题生成   │  ← 从内容中提取简洁标题
+│ 3. 后台渐进增强    │  ← 文本: LLM 提取标签+实体
+│ (_bg_enhance)     │  ← 图片: 视觉模型生成描述
+│                   │  ← 视频: OpenCV 提取帧 → 视觉模型描述
+│                   │  ← 音频: ffmpeg 转单声道 WAV → ASR 转录
 └────────┬─────────┘
          │
          ▼
 ┌──────────────────┐
-│ 4. LLM 标签+实体提取│  ← 调用共享 llm_extract 模块
-│ (60s超时+重试+容错)│    提取标签+实体+关系 JSON
+│ 4. 标题+标签+     │  ← 标题生成 + 实体提取 (并行)
+│    实体提取       │
 └────────┬─────────┘
          │
          ▼
 ┌──────────────────┐
-│ 5. 创建文章 +     │  ← 存储到数据库
-│    异步嵌入计算    │  ← 后台 asyncio.create_task 计算向量
+│ 5. 内容更新 +     │  ← 更新文章内容 (含错误报告)
+│    嵌入计算       │  ← 内容增强完成后才计算向量嵌入
 └──────────────────┘
 ```
 
@@ -624,6 +646,7 @@ export const api = {
   getEntityInfos, createEntityInfo, updateEntityInfo, deleteEntityInfo,
   getGraphData,
   askQuestion,
+  parseFileForQA, // 解析上传文件为问答上下文
   uploadFile,     // FormData 方式, 不用 JSON
 };
 ```
@@ -776,11 +799,22 @@ async def get_embedding(text: str) -> list[float]:
     # 返回浮点向量
 ```
 
+#### 嵌入管理
+
+```python
+# 使用 asyncio.Lock 保护全局计数器，防止并发重复计算
+async def ensure_embeddings(db, force=False):
+    async with _embedding_lock:
+        # 1. 增量检测: 对比缓存计数与 Article 总数
+        # 2. 仅对缺失 chunk 的文章计算嵌入
+        # 3. force=True 时删除旧 chunk 重新计算全部
+```
+
 #### 语义搜索
 
 ```python
 async def semantic_search(db, question, top_k=5):
-    # 1. ensure_embeddings(db)  — 增量计算缺失的嵌入
+    # 1. ensure_embeddings(db)  — 增量计算缺失的嵌入 (asyncio.Lock 保护)
     # 2. q_embedding = get_embedding(question)
     # 3. 遍历所有 chunk，计算余弦相似度
     # 4. 按文章去重，取 top_k
@@ -820,14 +854,31 @@ def fallback_keyword_search(db, question, top_k=5):
 | `.xlsx` | `openpyxl` → 遍历所有工作表 | Excel 表格 |
 | `.pptx` | `python-pptx` → 提取幻灯片文本 | PowerPoint |
 | `.pdf` | `PyPDF2` → 逐页提取文本 | PDF 文档 |
-| `.jpg/.png/.gif/.webp` | base64 → 视觉 LLM 描述 | 图片转文字 |
-| `.mp3/.wav/.mp4/.avi` | 转录 API → 降级为元数据 | 音视频 |
+| 图片 (`.jpg/.png/.gif/.webp` 等) | base64 → 视觉模型描述 | 图片转文字 |
+| 音频 (`.mp3/.wav/.m4a/.flac` 等) | ffmpeg/wave 转单声道 16kHz WAV → ASR 模型转录 | 语音转文字 |
+| 视频 (`.mp4/.avi/.mov/.mkv` 等) | OpenCV 提取 5 帧 → 视觉模型描述 | 视频内容识别 |
+
+### 9.3 音频处理详解
+
+1. **WAV 格式**: 使用内置 `wave` + `audioop` 模块，将多声道转为单声道，重采样为 16kHz
+2. **其他格式 (MP3/M4A 等)**: 通过 `subprocess` 调用 ffmpeg 转换: `ffmpeg -i pipe:0 -ac 1 -ar 16000 -f wav pipe:1`
+3. **转换后**: 调用 ASR API (`/audio/transcriptions` 端点) 获取转录文本
+4. **错误处理**: 转换失败或识别失败时，错误信息写入文章内容供用户查看
+
+### 9.4 视频处理详解
+
+1. 使用 OpenCV (`cv2`) 打开视频文件
+2. 在 0%、25%、50%、75%、90% 位置提取 5 个关键帧
+3. 帧缩放至最大 1024px，JPEG 编码为 base64
+4. 多张图片一次性发送至视觉模型，获取视频内容描述
+5. 文章内容嵌入 `<video>` 标签 + 描述文本
 
 **安全措施:**
-- 文件名净化: `re.sub(r'[^\w.\-]', '_', Path(file.filename).name)` (防路径穿越)
-- 文件大小限制: 500MB
+- **路径穿越防护**: 文件名净化 `re.sub(r'[^\w.\-]', '_', name)` + 媒体文件端点 `Path.resolve()` 校验路径在 UPLOAD_DIR 范围内
+- 文件大小限制: 500MB (上传) / 50MB (问答)
 - UUID 存储名 (防文件名冲突)
 - 同步解析器在 `asyncio.to_thread()` 中运行 (不阻塞事件循环)
+- 后台闭包不再捕获 `content_bytes`，改为从磁盘重新读取（大文件内存友好）
 
 ### 9.3 知识图谱可视化
 
@@ -998,16 +1049,18 @@ interface AppContextValue {
 
 | 类别 | 措施 | 位置 |
 |------|------|------|
-| **路径穿越** | 文件名净化 `re.sub(r'[^\w.\-]', '_', name)` | `upload.py` |
-| **文件大小** | 500MB 上传限制 | `upload.py` |
-| **XSS** | D3 工具提示 `innerHTML` 使用 `esc()` HTML 转义 | `useD3ForceGraph.ts` (共享钩子) |
+| **路径穿越** | 文件名净化 + `/api/media/` 端点 `Path.resolve()` 范围校验 | `upload.py`, `main.py` |
+| **文件大小** | 500MB 上传限制 / 50MB 问答文件限制 | `upload.py`, `qa.py` |
+| **XSS** | HTML/SVG 文件强制 `Content-Disposition: attachment`；D3 `innerHTML` 使用 `esc()` 转义 | `main.py`, `useD3ForceGraph.ts` |
 | **UUID 校验** | 路径参数通过 `uuid.UUID()` 验证 | `articles.py`, `entities.py` |
 | **SQL 注入** | SQLAlchemy ORM 参数化查询 | 全后端 |
-| **错误泄露** | 移除异常消息中的 `str(e)` | `upload.py` |
+| **错误泄露** | 错误信息写入文章内容（用户可见）而非静默丢失 | `upload.py` |
 | **CORS** | 可配置的允许来源列表 | `main.py` |
 | **外键** | `PRAGMA foreign_keys = ON` | `database.py` |
-| **请求体限制** | QA 历史最多 20 条，文章分页最多 200 | `qa.py`, `articles.py` |
+| **请求体限制** | QA 历史最多 20 条/50 条消息，文章分页最多 200，文件上下文最多 5 个 | `qa.py`, `articles.py` |
 | **图谱节点限制** | MAX_NODES = 2000 | `graph.py` |
+| **竞态保护** | `ensure_embeddings` 使用 `asyncio.Lock` 防止并发重复计算 | `qa.py` |
+| **闭包内存** | 后台任务不捕获 `content_bytes`，改为从磁盘重新读取 | `upload.py` |
 
 ### 12.2 已知安全限制
 
@@ -1047,7 +1100,21 @@ npm install
 npm run dev
 ```
 
-### 13.2 项目脚本
+### 13.2 问答文件上传
+
+通过 `/api/qa/parse-file` 端点，用户可在问答中上传文件作为 LLM 对话上下文：
+
+| 文件类型 | 处理方式 | 返回 |
+|---------|---------|------|
+| 文本 (.txt/.md 等) | 直接读取内容 | 文本字符串 |
+| 文档 (.docx/.xlsx/.pptx/.pdf) | 临时文件 + 对应解析器 | 文本字符串 |
+| 图片 (.jpg/.png 等) | base64 编码 | base64 字符串 + MIME 类型，标记 `is_image=true` |
+| 音频 (.mp3/.wav 等) | ffmpeg/wave 单声道转换 → ASR 转录 | 转录文本 |
+| 视频 (.mp4/.avi 等) | OpenCV 帧提取 → 视觉模型描述 | 描述文本 |
+
+> 仅 WORD/EXCEL/PPT/PDF 需要写入临时文件，其它类型直接从内存处理。
+
+### 13.3 项目脚本
 
 ```bash
 # 前端
@@ -1227,10 +1294,12 @@ PUT    /api/entities/:name/info/:id        更新实体附加信息
 DELETE /api/entities/:name/info/:id        删除实体附加信息
 GET    /api/graph                          知识图谱数据
 POST   /api/qa/ask                         智能问答
+POST   /api/qa/parse-file                  解析上传文件为问答上下文
 GET    /api/stats                          统计数据
 POST   /api/upload                         文件上传
+GET    /api/media/:filename                媒体文件直链
 ```
 
 ---
 
-> 📝 本文档由 Claude Code 基于项目源码自动生成，最后更新于 2026-07-20。
+> 📝 本文档由 Claude Code 基于项目源码自动生成，最后更新于 2026-07-23。

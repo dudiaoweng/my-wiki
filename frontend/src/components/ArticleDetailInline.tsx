@@ -5,12 +5,16 @@ import rehypeRaw from 'rehype-raw';
 import { api } from '../api/client';
 import { useApp } from '../context/AppProvider';
 import { useToast } from '../hooks/useToast';
+import { AttachmentGallery, useAttachments } from './AttachmentGallery';
 import type { Article } from '../types/article';
 import styles from './ArticleDetailInline.module.css';
 
 interface Props {
   articleId: string;
   onBack: () => void;
+  prevArticleId?: string;
+  nextArticleId?: string;
+  onNavigate?: (id: string) => void;
 }
 
 function formatDate(iso: string): string {
@@ -18,7 +22,7 @@ function formatDate(iso: string): string {
   return d.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
 }
 
-export function ArticleDetailInline({ articleId, onBack }: Props) {
+export function ArticleDetailInline({ articleId, onBack, prevArticleId, nextArticleId, onNavigate }: Props) {
   const { openEditor, requestConfirm, notifyArticleSaved } = useApp();
   const { showToast } = useToast();
   const [article, setArticle] = useState<Article | null>(null);
@@ -55,10 +59,12 @@ export function ArticleDetailInline({ articleId, onBack }: Props) {
     return () => clearInterval(timer);
   }, [article, articleId, notifyArticleSaved]);
 
+  // Must be called before any early returns (Rules of Hooks)
+  const { mediaItems, cleanContent } = useAttachments(article?.content ?? '', article?.attachment_name);
+
   if (loading) return <div className={styles.loading}>加载中…</div>;
   if (error) return <div className={styles.loading}>加载失败：{error}</div>;
   if (!article) return <div className={styles.loading}>文章不存在</div>;
-
   const catColor = article.category?.color ?? 'var(--c-text-muted)';
   const catName = article.category?.name ?? '未分类';
 
@@ -78,7 +84,27 @@ export function ArticleDetailInline({ articleId, onBack }: Props) {
   return (
     <div className={styles.detail}>
       <div className={styles.topBar}>
-        <button className={styles.backBtn} onClick={onBack}>← 返回列表</button>
+        <div className={styles.topBarLeft}>
+          <button className={styles.backBtn} onClick={onBack}>← 返回列表</button>
+          {onNavigate && (
+            <div className={styles.navGroup}>
+              <button
+                className={styles.navBtn}
+                disabled={!prevArticleId}
+                onClick={() => prevArticleId && onNavigate(prevArticleId)}
+              >
+                ← 上一篇
+              </button>
+              <button
+                className={styles.navBtn}
+                disabled={!nextArticleId}
+                onClick={() => nextArticleId && onNavigate(nextArticleId)}
+              >
+                下一篇 →
+              </button>
+            </div>
+          )}
+        </div>
         <div className={styles.actions}>
           <button className={styles.btn} onClick={() => openEditor(article.id)}>✏️ 编辑</button>
           <button className={`${styles.btn} ${styles.btnDanger}`} onClick={handleDelete}>🗑 删除</button>
@@ -86,7 +112,12 @@ export function ArticleDetailInline({ articleId, onBack }: Props) {
       </div>
 
       <div className={styles.categoryLabel} style={{ color: catColor }}>{catName}</div>
-      <h1 className={styles.title}>{article.title}</h1>
+      <h1 className={styles.title}>
+        {article.title}
+        {article.processing === 'processing' && (
+          <span className={styles.processingBadge}>⏳ 解析中…</span>
+        )}
+      </h1>
 
       <div className={styles.meta}>
         <span>📅 {formatDate(article.created_at)}</span>
@@ -104,15 +135,10 @@ export function ArticleDetailInline({ articleId, onBack }: Props) {
       )}
 
 
-      {article.attachment_name && (
-        <div className={styles.attachment}>
-          📎 {article.attachment_name}
-          <a href={`/api/articles/${article.id}/download`} download={article.attachment_name} className={styles.dlLink}>下载</a>
-        </div>
-      )}
+      <AttachmentGallery items={mediaItems} articleId={articleId} />
 
       <div className={`${styles.content} markdown-content`}>
-        <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{article.content}</Markdown>
+        <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{cleanContent}</Markdown>
       </div>
     </div>
   );

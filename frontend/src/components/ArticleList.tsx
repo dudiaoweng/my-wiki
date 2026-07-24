@@ -253,7 +253,27 @@ export function ArticleList() {
     <div className={styles.layout}>
       <div className={styles.mainCol}>
         {viewedArticleId ? (
-          <ArticleDetailInline key={`${viewedArticleId}-${articleVersion}`} articleId={viewedArticleId} onBack={handleBack} />
+          (() => {
+            const currentIndex = displayedArticles.findIndex((a) => a.id === viewedArticleId);
+            const prevId = currentIndex > 0 ? displayedArticles[currentIndex - 1]?.id : undefined;
+            const nextId = currentIndex >= 0 && currentIndex < displayedArticles.length - 1
+              ? displayedArticles[currentIndex + 1]?.id : undefined;
+            const handleNavigate = (id: string) => {
+              setViewedArticleId(id);
+              setSelectedArticleIds(new Set([id]));
+              setSelectedEntities(new Set());
+            };
+            return (
+              <ArticleDetailInline
+                key={`${viewedArticleId}-${articleVersion}`}
+                articleId={viewedArticleId}
+                onBack={handleBack}
+                prevArticleId={prevId}
+                nextArticleId={nextId}
+                onNavigate={handleNavigate}
+              />
+            );
+          })()
         ) : (
           <>
             {/* Header + search — always visible, never unmounted */}

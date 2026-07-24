@@ -6,38 +6,35 @@ import os
 import re
 import uuid
 from pathlib import Path
-from dotenv import load_dotenv
-load_dotenv()
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from app.dependencies import get_db
 from app.models import Article, ArticleChunk, EntityInfo
+from app.config import (
+    LLM_API_KEY, LLM_API_BASE, LLM_MODEL,
+    VISION_API_KEY, VISION_API_BASE, VISION_MODEL,
+    ASR_API_KEY, ASR_API_BASE, ASR_MODEL,
+    EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL,
+    QA_TEMPERATURE,
+    UPLOAD_DIR as UPLOAD_DIR_STR,
+)
+from app.utils import find_ffmpeg
 
 logger = logging.getLogger(__name__)
+# Ensure custom log messages are visible alongside uvicorn access logs
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+
 router = APIRouter(prefix="/api/qa", tags=["qa"])
 
 # ─── Config ────────────────────────────────────────
 
-# ── LLM (text) ──
-LLM_API_KEY = os.getenv("LLM_API_KEY", "")
-LLM_API_BASE = os.getenv("LLM_API_BASE", "https://api.openai.com/v1")
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
-# ── Vision ──
-VISION_API_KEY = os.getenv("VISION_API_KEY", LLM_API_KEY)
-VISION_API_BASE = os.getenv("VISION_API_BASE", LLM_API_BASE)
-VISION_MODEL = os.getenv("VISION_MODEL", "glm-4v-flash")
-# ── ASR ──
-ASR_API_KEY = os.getenv("ASR_API_KEY", LLM_API_KEY)
-ASR_API_BASE = os.getenv("ASR_API_BASE", LLM_API_BASE)
-ASR_MODEL = os.getenv("ASR_MODEL", "GLM-ASR-2512")
-# ── Embedding ──
-EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", LLM_API_KEY)
-EMBEDDING_API_BASE = os.getenv("EMBEDDING_API_BASE", LLM_API_BASE)
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "embedding-3")
-# ── Q&A ──
-QA_TEMPERATURE = float(os.getenv("QA_TEMPERATURE", "0.4"))
+UPLOAD_DIR = Path(UPLOAD_DIR_STR)
 
 # ─── Schemas ───────────────────────────────────────
 
@@ -169,53 +166,56 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
 
 # Track last-known article count to skip repeated ensure_embeddings scans
 _embedded_article_count: int | None = None
+_embedding_lock = asyncio.Lock()
 
 
 async def ensure_embeddings(db: Session, force: bool = False):
     """Compute embeddings for articles missing them (incremental, not full table scan)."""
     global _embedded_article_count
-    if not force and _embedded_article_count is not None:
-        total = db.query(Article).count()
-        if total == _embedded_article_count:
-            return  # All articles already embedded
 
-    if not force:
-        from sqlalchemy import exists, select
-        has_chunks = exists().where(ArticleChunk.article_id == Article.id)
-        articles = db.query(Article).filter(~has_chunks).all()
-    else:
-        articles = db.query(Article).all()
+    async with _embedding_lock:
+        if not force and _embedded_article_count is not None:
+            total = db.query(Article).count()
+            if total == _embedded_article_count:
+                return  # All articles already embedded
 
-    for article in articles:
-        # For force mode: delete old chunks first
-        if force:
-            db.query(ArticleChunk).filter(ArticleChunk.article_id == article.id).delete()
+        if not force:
+            from sqlalchemy import exists, select
+            has_chunks = exists().where(ArticleChunk.article_id == Article.id)
+            articles = db.query(Article).filter(~has_chunks).all()
+        else:
+            articles = db.query(Article).all()
 
-        # Chunk and embed
-        chunks = chunk_article(article.content)
-        for i, chunk_text in enumerate(chunks):
-            try:
-                vec = await get_embedding(chunk_text)
-                db.add(ArticleChunk(
-                    article_id=article.id,
-                    chunk_index=str(i),
-                    chunk_text=chunk_text,
-                    embedding=json.dumps(vec),
-                ))
-            except Exception:
-                logger.warning("Failed to embed chunk %s of article %s", i, article.id, exc_info=True)
-                # Store chunk without embedding (will be skipped in search)
-                db.add(ArticleChunk(
-                    article_id=article.id,
-                    chunk_index=str(i),
-                    chunk_text=chunk_text,
-                    embedding=None,
-                ))
+        for article in articles:
+            # For force mode: delete old chunks first
+            if force:
+                db.query(ArticleChunk).filter(ArticleChunk.article_id == article.id).delete()
 
-        db.commit()
+            # Chunk and embed
+            chunks = chunk_article(article.content)
+            for i, chunk_text in enumerate(chunks):
+                try:
+                    vec = await get_embedding(chunk_text)
+                    db.add(ArticleChunk(
+                        article_id=article.id,
+                        chunk_index=str(i),
+                        chunk_text=chunk_text,
+                        embedding=json.dumps(vec),
+                    ))
+                except Exception:
+                    logger.warning("Failed to embed chunk %s of article %s", i, article.id, exc_info=True)
+                    # Store chunk without embedding (will be skipped in search)
+                    db.add(ArticleChunk(
+                        article_id=article.id,
+                        chunk_index=str(i),
+                        chunk_text=chunk_text,
+                        embedding=None,
+                    ))
 
-    # Update cache (declared global at top of function)
-    _embedded_article_count = db.query(Article).count()
+            db.commit()
+
+        # Update cache
+        _embedded_article_count = db.query(Article).count()
 
 
 async def semantic_search(db: Session, question: str, top_k: int = 5) -> list[tuple[float, Article, str]]:
@@ -305,8 +305,6 @@ from app.routes.upload import (
     PDF_EXTENSIONS, IMAGE_EXTENSIONS, AUDIO_EXTENSIONS, VIDEO_EXTENSIONS,
 )
 
-UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads"))
-
 # MIME map for image types
 IMAGE_MIME_MAP = {
     '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
@@ -316,25 +314,6 @@ IMAGE_MIME_MAP = {
 
 # Re-parse helper for QA: extracts text or encodes images for LLM context
 # ─── Audio / Video Q&A helpers ──────────────────────
-
-def _find_ffmpeg_qa() -> str | None:
-    """Find ffmpeg executable."""
-    import platform
-    import shutil
-    ffmpeg = shutil.which('ffmpeg')
-    if ffmpeg:
-        return ffmpeg
-    if platform.system() == 'Windows':
-        try:
-            from pathlib import Path
-            ffmpeg_base = Path(os.environ.get('LOCALAPPDATA', '')) / 'Microsoft' / 'WinGet' / 'Packages'
-            for p in ffmpeg_base.glob('Gyan.FFmpeg_*'):
-                candidates = sorted(p.glob('ffmpeg-*-full_build/bin/ffmpeg.exe'), reverse=True)
-                if candidates:
-                    return str(candidates[0])
-        except Exception:
-            pass
-    return None
 
 
 async def parse_audio_for_qa(content_bytes: bytes, filename: str) -> str:
@@ -369,7 +348,7 @@ async def parse_audio_for_qa(content_bytes: bytes, filename: str) -> str:
         except Exception as e:
             return f"[音频转换失败：{e}]"
     else:
-        ffmpeg_path = _find_ffmpeg_qa()
+        ffmpeg_path = find_ffmpeg()
         if not ffmpeg_path:
             return "[音频识别失败：需要安装 ffmpeg 来转换非 WAV 格式的音频。]"
         try:
@@ -406,23 +385,43 @@ async def parse_audio_for_qa(content_bytes: bytes, filename: str) -> str:
         return f"[音频识别异常：{e}]"
 
 
+from contextlib import contextmanager
+
+
+@contextmanager
+def _temp_video_file(content_bytes: bytes, suffix: str):
+    """Write video bytes to a named temp file for OpenCV, guaranteeing cleanup."""
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    try:
+        tmp.write(content_bytes)
+        tmp.close()
+        yield tmp.name
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+
 async def parse_video_for_qa(content_bytes: bytes, filename: str) -> str:
-    """Extract frames from video and describe for Q&A context."""
+    """Extract frames from video and describe for Q&A context.
+    Temp file is cleaned up immediately after frame extraction, before the slow API call."""
     import base64
     import cv2
-    import tempfile
     import httpx
 
     if not VISION_API_KEY:
         return "[视频识别失败：未配置视觉模型 API。]"
 
-    # Write video bytes to temp file (OpenCV needs a file path)
-    tmp = tempfile.NamedTemporaryFile(suffix=Path(filename).suffix, delete=False)
-    try:
-        tmp.write(content_bytes)
-        tmp.close()
+    ext = Path(filename).suffix
+    name_no_ext = Path(filename).stem
+    frames_b64: list[str] = []
+    duration = 0
 
-        cap = cv2.VideoCapture(tmp.name)
+    # ── Phase 1: Write temp file → extract frames → delete temp file ──
+    with _temp_video_file(content_bytes, ext) as video_path:
+        cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             return "[视频识别失败：无法打开视频文件。]"
 
@@ -432,7 +431,6 @@ async def parse_video_for_qa(content_bytes: bytes, filename: str) -> str:
 
         # Extract up to 4 frames
         positions = [0, 0.3, 0.6, 0.85]
-        frames_b64: list[str] = []
         for pos in positions:
             frame_idx = int(total_frames * pos)
             if frame_idx >= total_frames:
@@ -448,27 +446,28 @@ async def parse_video_for_qa(content_bytes: bytes, filename: str) -> str:
                 _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
                 frames_b64.append(base64.b64encode(buf).decode('utf-8'))
         cap.release()
+    # Temp file is now deleted — API call below doesn't need it
 
-        if not frames_b64:
-            return "[视频识别失败：无法从视频中提取画面。]"
+    if not frames_b64:
+        return "[视频识别失败：无法从视频中提取画面。]"
 
-        # ── Call vision model ──
-        name_no_ext = Path(filename).stem
-        user_content: list[dict] = [
-            {
-                "type": "text",
-                "text": (
-                    f"视频「{name_no_ext}」，{len(frames_b64)} 个关键帧，时长约 {duration:.0f} 秒。"
-                    "请用中文简要描述视频内容（100-200 字）。"
-                ),
-            }
-        ]
-        for b64 in frames_b64:
-            user_content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-            })
+    # ── Phase 2: Call vision model ──
+    user_content: list[dict] = [
+        {
+            "type": "text",
+            "text": (
+                f"视频「{name_no_ext}」，{len(frames_b64)} 个关键帧，时长约 {duration:.0f} 秒。"
+                "请用中文简要描述视频内容（100-200 字）。"
+            ),
+        }
+    ]
+    for b64 in frames_b64:
+        user_content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+        })
 
+    try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(
                 f"{VISION_API_BASE.rstrip('/')}/chat/completions",
@@ -489,11 +488,6 @@ async def parse_video_for_qa(content_bytes: bytes, filename: str) -> str:
             return f"[视频识别失败（HTTP {resp.status_code}）：{resp.text[:200]}]"
     except Exception as e:
         return f"[视频识别异常：{e}]"
-    finally:
-        try:
-            os.unlink(tmp.name)
-        except Exception:
-            pass
 
 
 async def parse_file_for_qa(content_bytes: bytes, file_path: str, content_type: str) -> dict:
@@ -535,10 +529,102 @@ async def parse_file_for_qa(content_bytes: bytes, file_path: str, content_type: 
         return {"content": text, "content_type": "text/plain", "is_image": False, "filename": filename}
 
 
+# Extensions that need a file path on disk (parsers that can't work from bytes)
+EXTENSIONS_NEEDING_DISK = WORD_EXTENSIONS | EXCEL_EXTENSIONS | PPT_EXTENSIONS | PDF_EXTENSIONS
+
+# In-memory store for async file processing status
+_qa_file_store: dict[str, dict] = {}
+
+
+def _extract_video_thumbnail(video_path: str, thumb_path: str) -> bool:
+    """Extract the first frame from a video and save as a JPEG thumbnail.
+    Returns True on success, False if the frame could not be extracted."""
+    import cv2
+    try:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            logger.warning("Video thumbnail: OpenCV cannot open %s", video_path)
+            return False
+        ret, frame = cap.read()
+        cap.release()
+        if not ret or frame is None:
+            logger.warning("Video thumbnail: failed to read first frame from %s", video_path)
+            return False
+        # Resize to a small thumbnail (max 256px on longest side)
+        h, w = frame.shape[:2]
+        max_side = max(h, w)
+        if max_side > 256:
+            scale = 256 / max_side
+            frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
+        cv2.imwrite(thumb_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        logger.info("Video thumbnail saved: %s (%dx%d)", thumb_path, w, h)
+        return True
+    except Exception as e:
+        logger.warning("Video thumbnail extraction failed for %s: %s", video_path, e)
+        return False
+
+
+async def _process_qa_file(file_id: str, storage_path: str, filename: str, content_type: str):
+    """Background task: parse file content and update the in-memory store."""
+    logger.info("QA file background processing started: %s (id=%s)", filename, file_id)
+    storage_name = Path(storage_path).name
+    thumb_url = ""
+
+    # For video files, extract a thumbnail for the UI card.
+    # Check both MIME type (may be empty from browser) and file extension.
+    ext = Path(filename).suffix.lower()
+    is_video = content_type.startswith("video/") or ext in VIDEO_EXTENSIONS
+    if is_video:
+        thumb_name = storage_name + ".thumb.jpg"
+        thumb_path = str(Path(storage_path).parent / thumb_name)
+        if _extract_video_thumbnail(storage_path, thumb_path):
+            thumb_url = f"/api/media/{thumb_name}"
+            logger.info("Video thumbnail extracted: %s", thumb_name)
+
+    try:
+        # Read bytes from disk
+        with open(storage_path, "rb") as f:
+            content_bytes = f.read()
+
+        result = await parse_file_for_qa(content_bytes, storage_path, content_type)
+
+        # result["content"] may contain the storage filename in description
+        # strings (e.g. "[音频转录：_qa_xxx_name.mp3]").  Patch it back to the
+        # original filename for display.
+        content = result["content"]
+        if storage_name != filename:
+            content = content.replace(storage_name, filename)
+
+        # Preserve the original MIME type from upload (parse_file_for_qa always
+        # returns "text/plain" for audio/video, which would break frontend detection).
+        final_content_type = content_type or result["content_type"]
+        _qa_file_store[file_id].update({
+            "status": "done",
+            "content": content,
+            "content_type": final_content_type,
+            "is_image": result["is_image"],
+            "thumb_url": thumb_url,
+        })
+        logger.info("QA file background processing complete: %s (id=%s)", filename, file_id)
+    except Exception as e:
+        logger.exception("QA file background processing failed: %s (id=%s)", filename, file_id)
+        _qa_file_store[file_id].update({
+            "status": "error",
+            "error": str(e),
+            "thumb_url": thumb_url,
+        })
+    finally:
+        # Keep the file on disk so the frontend can serve it for
+        # thumbnail / preview via /api/media/{storage_name}.
+        # Stale files are cleaned up on next server start (see main.py).
+        pass
+
+
 @router.post("/parse-file")
 async def parse_file_for_question(file: UploadFile = File(...)):
-    """Parse an uploaded file and return its text for use as Q&A context.
-    Does NOT create an article — purely for on-the-fly Q&A."""
+    """Upload a file for Q&A context. Returns immediately with a file_id;
+    processing happens asynchronously in the background.  Poll /file-status/{file_id}
+    to get the result when ready."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided")
 
@@ -548,26 +634,63 @@ async def parse_file_for_question(file: UploadFile = File(...)):
     if len(content_bytes) > 50 * 1024 * 1024:  # 50MB for Q&A
         raise HTTPException(status_code=413, detail="File too large (max 50MB)")
 
-    # Save temporarily for docx/xlsx/pptx/pdf parsers that need a file path
+    # Always save to disk — background task needs the file
+    file_id = uuid.uuid4().hex
     safe_fname = re.sub(r'[^\w.\-]', '_', file.filename)
-    tmp_name = f"_qa_{uuid.uuid4().hex}_{safe_fname}"
-    tmp_path = UPLOAD_DIR / tmp_name
-    # Only write to disk if we need a file path (non-text parsers)
-    needs_disk = ext not in TEXT_EXTENSIONS
-    if needs_disk:
-        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        with open(tmp_path, "wb") as f:
-            f.write(content_bytes)
+    storage_name = f"_qa_{file_id}_{safe_fname}"
+    storage_path = UPLOAD_DIR / storage_name
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    with open(storage_path, "wb") as f:
+        f.write(content_bytes)
 
-    try:
-        result = await parse_file_for_qa(content_bytes, str(tmp_path) if needs_disk else file.filename, file.content_type or "")
-    except Exception:
-        result = {"content": f"[文件解析失败: {file.filename}]", "content_type": "text/plain", "is_image": False, "filename": file.filename}
-    finally:
-        if needs_disk and tmp_path.exists():
-            tmp_path.unlink()
+    is_image = ext in IMAGE_EXTENSIONS
 
-    return result
+    # Register in the in-memory store
+    _qa_file_store[file_id] = {
+        "status": "processing",
+        "filename": file.filename,
+        "content_type": file.content_type or "",
+        "is_image": is_image,
+        "content": None,
+        "error": None,
+        "storage_name": storage_name,
+    }
+
+    # Schedule background processing as an asyncio task (runs in the same
+    # event loop, after the response has been sent — no thread-pool overhead).
+    asyncio.create_task(
+        _process_qa_file(file_id, str(storage_path), file.filename, file.content_type or "")
+    )
+    logger.info("QA file upload accepted: %s (id=%s), background task scheduled", file.filename, file_id)
+
+    return {
+        "file_id": file_id,
+        "filename": file.filename,
+        "content_type": file.content_type or "",
+        "is_image": is_image,
+        "status": "processing",
+        "media_url": f"/api/media/{storage_name}",
+    }
+
+
+@router.get("/file-status/{file_id}")
+async def get_file_status(file_id: str):
+    """Poll the processing status of an uploaded Q&A file."""
+    info = _qa_file_store.get(file_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="File not found")
+    storage_name = info.get("storage_name", "")
+    return {
+        "file_id": file_id,
+        "status": info["status"],
+        "filename": info["filename"],
+        "content": info.get("content"),
+        "content_type": info.get("content_type", "text/plain"),
+        "is_image": info.get("is_image", False),
+        "error": info.get("error"),
+        "media_url": f"/api/media/{storage_name}" if storage_name else "",
+        "thumb_url": info.get("thumb_url", ""),
+    }
 
 
 # ─── Routes ────────────────────────────────────────

@@ -1,4 +1,5 @@
 import json
+import logging
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 load_dotenv()
@@ -12,6 +13,9 @@ from starlette.responses import FileResponse
 from app.database import init_db, SessionLocal
 from app.models import Category, Article
 from app.routes import articles, categories, tags, entities, stats, graph, qa, upload
+from app.config import UPLOAD_DIR as UPLOAD_DIR_STR
+
+logger = logging.getLogger(__name__)
 
 # ─── Default seed data ──────────────────────────────
 
@@ -96,7 +100,25 @@ def seed_database():
 async def lifespan(app: FastAPI):
     init_db()
     seed_database()
+    # Clean up stale Q&A temp files left over from previous runs (e.g. crashes)
+    _cleanup_qa_temp_files()
     yield
+
+
+def _cleanup_qa_temp_files():
+    """Remove stale _qa_* temp files from UPLOAD_DIR left by crashed processes."""
+    upload_dir = Path(UPLOAD_DIR_STR)
+    if not upload_dir.exists():
+        return
+    cleaned = 0
+    for f in upload_dir.glob("_qa_*"):
+        try:
+            f.unlink()
+            cleaned += 1
+        except Exception:
+            pass
+    if cleaned:
+        logger.info("Cleaned up %d stale Q&A temp file(s)", cleaned)
 
 
 app = FastAPI(
@@ -143,19 +165,26 @@ class _DownloadStaticFiles(StaticFiles):
         resp.headers["X-Content-Type-Options"] = "nosniff"
         return resp
 
-UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads"))
+UPLOAD_DIR = Path(UPLOAD_DIR_STR)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", _DownloadStaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 
 # Dedicated endpoint for inline media display (images/audio/video)
 @app.get("/api/media/{filename:path}")
-def serve_media(filename: str):
-    """Serve uploaded media files inline (no forced download)."""
-    file_path = UPLOAD_DIR / filename
+def serve_media(filename: str, download: bool = False):
+    """Serve uploaded media files — inline by default, attachment if ?download=1."""
+    file_path = (UPLOAD_DIR / filename).resolve()
+    if not str(file_path).startswith(str(UPLOAD_DIR.resolve())):
+        raise HTTPException(status_code=403, detail="Forbidden")
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(str(file_path))
+    headers = {}
+    if download:
+        import urllib.parse
+        encoded = urllib.parse.quote(filename.split('_', 1)[-1] if '_' in filename else filename)
+        headers["Content-Disposition"] = f'attachment; filename*=UTF-8\'\'{encoded}'
+    return FileResponse(str(file_path), headers=headers)
 
 
 @app.get("/api/health")

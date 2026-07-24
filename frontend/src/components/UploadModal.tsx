@@ -55,6 +55,15 @@ export function UploadModal() {
   const handleUpload = async () => {
     if (!file) return;
 
+    // Check file size before uploading (backend limit: 500MB)
+    const MAX_SIZE = 500 * 1024 * 1024;
+    if (file.size > MAX_SIZE) {
+      const sizeMB = (file.size / 1024 / 1024).toFixed(1);
+      setError(`文件过大（${sizeMB}MB，最大 500MB）`);
+      showToast(`文件过大（${sizeMB}MB，最大 500MB）`, 'error');
+      return;
+    }
+
     setError(null);
     setStep('uploading');
 

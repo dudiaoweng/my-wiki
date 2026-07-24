@@ -17,8 +17,10 @@
 - **标签提取**：自动从文章内容提取概念标签
 - **实体识别**：提取人物、组织、地点、事件、产品等实体及其关系
 - **图片描述**：上传图片自动用视觉模型生成描述
+- **视频分析**：提取关键帧，通过视觉模型生成视频内容描述
+- **音频转写**：自动转写音频为文字（语音识别）
 - **文档摘要**：上传文档自动生成标题
-- **智能问答**：基于知识库的 RAG 问答（语义搜索 + LLM 回答）
+- **智能问答**：基于知识库的 RAG 问答（语义搜索 + LLM 回答），支持上传图片/音频/视频作为上下文
 
 ### 🗺️ 知识图谱
 - D3.js 力导向图可视化
@@ -54,7 +56,8 @@
 | **可视化** | D3.js v7 |
 | **Markdown** | react-markdown + remark-gfm |
 | **HTTP 客户端** | httpx (后端) / fetch (前端) |
-| **文件解析** | python-docx / openpyxl / python-pptx / PyPDF2 |
+| **文件解析** | python-docx / openpyxl / python-pptx / PyPDF2 / OpenCV |
+| **音频处理** | wave / audioop / ffmpeg |
 | **AI 接口** | OpenAI 兼容 API（智谱 GLM / GPT 系列等） |
 
 ---
@@ -70,7 +73,9 @@ my-wiki/
 │   │   ├── dependencies.py        # FastAPI 依赖注入 (get_db)
 │   │   ├── models.py              # 数据模型 (Article/Category/EntityInfo/Chunk)
 │   │   ├── schemas.py             # Pydantic 请求/响应模型
+│   │   ├── config.py              # 集中配置（LLM/Vision/ASR/Embedding）
 │   │   ├── llm_extract.py         # 共享 LLM 标签+实体提取
+│   │   ├── utils.py               # 共享工具（ffmpeg 查找等）
 │   │   └── routes/
 │   │       ├── articles.py        # 文章 CRUD + 下载
 │   │       ├── categories.py      # 分类 CRUD
@@ -150,11 +155,30 @@ pip install -r requirements.txt
 cat > .env << EOF
 DATABASE_URL=sqlite:///./knowledge_base.db
 UPLOAD_DIR=./uploads
+CORS_ORIGINS=http://localhost:5173
+
+# LLM 文本模型（标题生成、实体提取、纯文本问答）
 LLM_API_KEY=your-api-key-here
 LLM_API_BASE=https://open.bigmodel.cn/api/paas/v4
-LLM_MODEL=glm-4
+LLM_MODEL=GLM-5.2
+
+# 视觉模型（图片描述、视频分析）
+VISION_API_KEY=your-vision-api-key
+VISION_API_BASE=https://open.bigmodel.cn/api/paas/v4
+VISION_MODEL=GLM-5V-Turbo
+
+# 语音识别模型（音频转文字）
+ASR_API_KEY=your-asr-api-key
+ASR_API_BASE=https://open.bigmodel.cn/api/paas/v4
+ASR_MODEL=GLM-ASR-2512
+
+# 嵌入模型（语义搜索）
+EMBEDDING_API_KEY=your-embedding-api-key
+EMBEDDING_API_BASE=https://open.bigmodel.cn/api/paas/v4
 EMBEDDING_MODEL=embedding-3
-CORS_ORIGINS=http://localhost:5173
+
+# 问答温度
+QA_TEMPERATURE=0.2
 EOF
 
 # 启动服务 (端口 8000)
@@ -183,15 +207,53 @@ npm run dev
 
 ## 环境变量
 
+### 基础设施
+
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `DATABASE_URL` | SQLite 数据库路径 | `sqlite:///./knowledge_base.db` |
 | `UPLOAD_DIR` | 上传文件存储目录 | `./uploads` |
-| `LLM_API_KEY` | LLM API 密钥 | (空，不配置则禁用 AI 功能) |
+| `CORS_ORIGINS` | 前端地址 | `http://localhost:5173` |
+
+### LLM 文本模型
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `LLM_API_KEY` | API 密钥 | (空，不配置则禁用 AI 功能) |
 | `LLM_API_BASE` | API 地址 | `https://api.openai.com/v1` |
 | `LLM_MODEL` | 模型名称 | `gpt-4o-mini` |
+
+### 视觉模型（图片描述、视频分析）
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `VISION_API_KEY` | API 密钥 | 同 `LLM_API_KEY` |
+| `VISION_API_BASE` | API 地址 | 同 `LLM_API_BASE` |
+| `VISION_MODEL` | 模型名称 | `glm-4v-flash` |
+
+### 语音识别模型（音频转文字）
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `ASR_API_KEY` | API 密钥 | 同 `LLM_API_KEY` |
+| `ASR_API_BASE` | API 地址 | 同 `LLM_API_BASE` |
+| `ASR_MODEL` | 模型名称 | `GLM-ASR-2512` |
+
+### 嵌入模型（语义搜索）
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `EMBEDDING_API_KEY` | API 密钥 | 同 `LLM_API_KEY` |
+| `EMBEDDING_API_BASE` | API 地址 | 同 `LLM_API_BASE` |
 | `EMBEDDING_MODEL` | 向量模型 | `embedding-3` |
-| `CORS_ORIGINS` | 前端地址 | `http://localhost:5173` |
+
+### 问答
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `QA_TEMPERATURE` | LLM 回答温度 | `0.4` |
+
+> 每种模型可配置独立的 API Key/Base/Model。未配置的字段自动回退到 LLM 配置。
 
 ---
 
@@ -214,7 +276,9 @@ npm run dev
 | `GET /api/graph` | 知识图谱数据 |
 | `GET /api/stats` | 统计 (文章/分类/标签/实体数) |
 | `POST /api/qa/ask` | RAG 问答 |
+| `POST /api/qa/parse-file` | 为问答解析上传文件 |
 | `POST /api/upload` | 文件上传 |
+| `GET /api/media/{filename}` | 媒体文件直链 |
 | `GET /api/health` | 健康检查 |
 
 ---
@@ -264,11 +328,17 @@ id, article_id, chunk_index, chunk_text, embedding (JSON数组)
 - 前端 Vite 运行在 `localhost:5173`，开发时通过 Vite proxy 转发 API 请求
 - 生产环境可将前端构建产物放到后端 `/static` 目录下
 
+### 模型配置分离
+- 四种模型类型独立配置：LLM 文本 / Vision 视觉 / ASR 语音识别 / Embedding 嵌入
+- 每种模型有独立的 API Key、Base URL、Model 名称，回退到 LLM 配置
+- 所有配置统一在 `app/config.py` 中管理，各模块通过 import 引用
+
 ### LLM 集成
-- 统一通过 `app/llm_extract.py` 调用 LLM（60s 超时 + 2 次重试 + JSON 容错解析）
-- 上传文件：异步提取（通过 `asyncio.to_thread` 桥接同步函数）
+- 标签/实体提取：共享 `app/llm_extract.py`（60s 超时 + 2 次重试 + JSON 容错解析）
+- 上传文件：异步提取（通过 `asyncio.to_thread` 桥接同步函数）+ 后台渐进增强
 - 文章编辑：仅内容变更时触发提取
-- Q&A：语义搜索 + LLM 生成回答，有 embedding fallback 机制
+- 标题生成：基于内容理解合成标题（非句子提取），温度 0.7，8000 字符上下文
+- Q&A：语义搜索 + LLM 生成回答，GLM-5.2 推理模型有 reasoning_content 回退
 
 ### 知识图谱
 - `/api/graph` 端点聚合所有文章/分类/实体节点 + 边
@@ -277,10 +347,11 @@ id, article_id, chunk_index, chunk_text, embedding (JSON数组)
 - 实体节点使用类型图标区分（人物/组织/地点/事件/产品/其他）
 
 ### 向量搜索 (RAG)
+- 文章先上传显示，后台 LLM 增强（标题/内容/标签/实体）完成后才计算嵌入
 - 文章按 Markdown 标题分段，每段调用 embedding API 生成向量
-- 增量计算（记录已处理文章数，跳过已生成向量的文章）
+- 增量计算（`asyncio.Lock` 保护 + 记录已处理文章数，跳过已生成向量的文章）
 - 问答时计算 query 向量与所有 chunk 的余弦相似度
-- LLM 不可用时自动降级为关键词匹配
+- LLM 不可用时自动降级为关键词匹配（CJK 双字母组 + 英文单词）
 
 ---
 
