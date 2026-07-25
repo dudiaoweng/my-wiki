@@ -395,7 +395,9 @@ async def create_article(
             else:
                 # Document type — placeholder, parsed async in background
                 doc_placeholder = f'<div data-attachment="{upload_file.filename}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {upload_file.filename}（解析中…）</div>'
-                initial_content = f"{initial_content}\n\n{doc_placeholder}" if initial_content else doc_placeholder
+                # Persistent marker so the frontend can always discover document attachments
+                doc_marker = f'<!-- doc-attachment: {upload_file.filename} | {safe_name} -->'
+                initial_content = f"{initial_content}\n\n{doc_placeholder}\n{doc_marker}" if initial_content else f"{doc_placeholder}\n{doc_marker}"
         except Exception as e:
             logger.warning(f"File parsing failed for {upload_file.filename}: {e}")
 
@@ -452,7 +454,19 @@ async def update_article(
             keep_list = json.loads(keep_attachments)
         except (json.JSONDecodeError, TypeError):
             pass
-    keep_set = set(keep_list) if keep_list is not None else None
+    # Use a mutable list (NOT a set) so same-named attachments consume distinct slots.
+    keep_remaining: list[str] | None = (list(keep_list) if keep_list is not None else None)
+
+    def _consume_keep(name: str) -> bool:
+        """Return True if `name` should be kept, consuming one occurrence from the list."""
+        if keep_remaining is None:
+            return True  # keep all (no filter provided)
+        try:
+            keep_remaining.remove(name)
+            return True
+        except ValueError:
+            return False
+
     article = db.query(Article).filter(Article.id == article_id).first()
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
@@ -473,17 +487,20 @@ async def update_article(
     has_category_change = bool(category_id and category_id != (article.category_id or ""))
     tags_changed = bool(tags and json.dumps(user_tags, ensure_ascii=False) != (article.tags or "[]"))
     has_attachment_change = False
-    if keep_set is not None:
-        existing_ids: set[str] = set()
+    if keep_list is not None:
+        existing_ids: list[str] = []
         for m in re.finditer(r'<(img|video|audio)\b[^>]*>', article.content or "", re.IGNORECASE):
             tag = m.group(0)
             a = (re.search(r'alt="([^"]*)"', tag, re.IGNORECASE) or [None, ''])[1]
             s = (re.search(r'src="([^"]*)"', tag, re.IGNORECASE) or [None, ''])[1]
-            existing_ids.add(a or (s.split('/')[-1].split('?')[0] if s else ''))
-        # Include document attachment name
+            existing_ids.append(a or (s.split('/')[-1].split('?')[0] if s else ''))
+        # Include doc-attachment marker names
+        for dm in re.finditer(r'<!-- doc-attachment: (.+?) \|', article.content or "", re.IGNORECASE):
+            existing_ids.append(dm.group(1).strip())
+        # Include legacy document attachment name
         if article.attachment_name:
-            existing_ids.add(article.attachment_name)
-        has_attachment_change = (existing_ids != keep_set)
+            existing_ids.append(article.attachment_name)
+        has_attachment_change = (sorted(existing_ids) != sorted(keep_list))
 
     if not has_files and not has_content_change and not has_title_change \
             and not has_category_change and not tags_changed and not has_attachment_change:
@@ -498,12 +515,43 @@ async def update_article(
     # Preserve old media tags from the original article — but only for
     # attachments the user chose to keep (via `keep_attachments`).
     # This runs even when content didn't change, to handle attachment removal.
-    if keep_set is not None:
+    if keep_remaining is not None:
+        # Capture doc-attachment markers & order from original content BEFORE we overwrite it
+        kept_doc_markers: list[str] = []
+        for m in re.finditer(
+            r'<!-- doc-attachment: (.+?) \| (.+?) -->',
+            article.content or "", re.IGNORECASE,
+        ):
+            filename = m.group(1).strip()
+            if _consume_keep(filename):
+                kept_doc_markers.append(m.group(0))
+
+        # Capture original order list (filtered later, after we know what was kept)
+        order_match = re.search(r'<!-- attachments-order: (.+?) -->', article.content or "")
+        all_order: list[str] = []
+        if order_match:
+            all_order = [n.strip() for n in order_match.group(1).split(',')]
+
         # Strip all media tags (including closing) to get text body
         text_body = content if content else re.sub(
             r'<(?:img|video|audio)\b[^>]*/?>\s*|<\/(?:video|audio)>\s*', '',
             article.content or "", flags=re.IGNORECASE,
         ).strip()
+        # Strip doc-attachment markers and placeholder divs from text_body
+        text_body = re.sub(
+            r'<!-- doc-attachment: .+? -->\s*', '',
+            text_body, flags=re.IGNORECASE,
+        )
+        text_body = re.sub(
+            r'<div data-attachment="[^"]*"[^>]*>[\s\S]*?</div>\s*', '',
+            text_body, flags=re.IGNORECASE,
+        )
+        # Strip attachments-order markers
+        text_body = re.sub(
+            r'<!-- attachments-order: .+? -->\s*', '',
+            text_body, flags=re.IGNORECASE,
+        ).strip()
+
         # Extract complete media blocks (opening tag + optional closing tag)
         kept_tags: list[str] = []
         for m in re.finditer(
@@ -516,7 +564,7 @@ async def update_article(
             alt = (re.search(r'alt="([^"]*)"', tag, re.IGNORECASE) or [None, ''])[1]
             src = (re.search(r'src="([^"]*)"', tag, re.IGNORECASE) or [None, ''])[1]
             identifier = alt or (src.split('/')[-1].split('?')[0] if src else '')
-            if identifier not in keep_set:
+            if not _consume_keep(identifier):
                 continue  # user removed this attachment
             full_tag = tag
             if tag_name in ('video', 'audio'):
@@ -526,25 +574,67 @@ async def update_article(
                 if close_match:
                     full_tag = tag + rest[:close_match.end()]
             kept_tags.append(full_tag.strip())
-        if kept_tags:
-            article.content = text_body + '\n\n' + '\n\n'.join(kept_tags)
-        else:
-            article.content = text_body
+
         # Also handle document attachment removal (no media tag in content)
-        if article.attachment_name and article.attachment_name not in keep_set:
+        if article.attachment_name and not _consume_keep(article.attachment_name):
             article.attachment_name = None
             article.attachment_path = None
             article.attachment_type = None
+
+        # Filter order list: keep entries matching actually-kept items.
+        # Use consumption so duplicate names match distinct slots.
+        kept_item_names: list[str] = []
+        for tag in kept_tags:
+            alt = (re.search(r'alt="([^"]*)"', tag, re.IGNORECASE) or [None, ''])[1]
+            s = (re.search(r'src="([^"]*)"', tag, re.IGNORECASE) or [None, ''])[1]
+            kept_item_names.append(alt or (s.split('/')[-1].split('?')[0] if s else ''))
+        for marker in kept_doc_markers:
+            nm = re.search(r'<!-- doc-attachment: (.+?) \|', marker)
+            if nm:
+                kept_item_names.append(nm.group(1).strip())
+        if article.attachment_name:
+            kept_item_names.append(article.attachment_name)
+
+        order_remaining = list(kept_item_names)
+        kept_order: list[str] = []
+        for n in all_order:
+            try:
+                order_remaining.remove(n)
+                kept_order.append(n)
+            except ValueError:
+                pass
+
+        # Build final content
+        parts = [text_body]
+        if kept_tags:
+            parts.append('\n\n'.join(kept_tags))
+        if kept_doc_markers:
+            parts.append('\n'.join(kept_doc_markers))
+        if kept_order:
+            parts.append(f'<!-- attachments-order: {", ".join(kept_order)} -->')
+        article.content = '\n\n'.join(parts)
     elif content and content_changed:
         # No keep_attachments filter — preserve ALL old tags (backward compat)
         old_tags = re.findall(
             r'<(?:img|video|audio)\s[^>]*/?>',
             article.content or "", re.IGNORECASE,
         )
+        old_doc_markers = re.findall(
+            r'<!-- doc-attachment: .+? -->',
+            article.content or "", re.IGNORECASE,
+        )
+        old_order = re.findall(
+            r'<!-- attachments-order: .+? -->',
+            article.content or "", re.IGNORECASE,
+        )
+        parts = [content.rstrip()]
         if old_tags:
-            article.content = content.rstrip() + '\n\n' + '\n\n'.join(old_tags)
-        else:
-            article.content = content
+            parts.append('\n\n'.join(old_tags))
+        if old_doc_markers:
+            parts.append('\n'.join(old_doc_markers))
+        if old_order:
+            parts.append(old_order[0])
+        article.content = '\n\n'.join(parts)
     elif content:
         article.content = content
     # else: no content sent → keep existing article.content
@@ -552,28 +642,8 @@ async def update_article(
     # Handle file uploads for edit
     uploaded_files: list[dict] = []
     if files:
-        # Collect filenames already referenced in article content (media tags + descriptions)
-        existing_names: set[str] = set()
-        for m in re.finditer(r'<(?:img|video|audio)\b[^>]*>', article.content or "", re.IGNORECASE):
-            tag = m.group(0)
-            alt = (re.search(r'alt="([^"]*)"', tag, re.IGNORECASE) or [None, ''])[1]
-            src = (re.search(r'src="([^"]*)"', tag, re.IGNORECASE) or [None, ''])[1]
-            if alt:
-                existing_names.add(alt)
-            if src:
-                # Also add the src filename (safe name) for matching
-                src_name = src.split('/')[-1].split('?')[0]
-                existing_names.add(src_name)
-        # Also check description headers: "# 图片描述：filename"
-        for m in re.finditer(r'#\s*(?:图片描述|视频|音频)[：:]\s*([^\n]+)', article.content or ""):
-            existing_names.add(m.group(1).strip())
-
         for upload_file in files:
             if not upload_file.filename:
-                continue
-            # Skip files that are already attached (identified by filename match)
-            if upload_file.filename in existing_names:
-                logger.info(f"[UPDATE] Skipping already-attached file: {upload_file.filename}")
                 continue
             ext = Path(upload_file.filename).suffix.lower()
             content_bytes = await upload_file.read()
@@ -619,7 +689,9 @@ async def update_article(
                 else:
                     # Document — placeholder, parsed async in background
                     doc_placeholder = f'<div data-attachment="{upload_file.filename}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {upload_file.filename}（解析中…）</div>'
-                    article.content = f"{current}\n\n{doc_placeholder}" if current else doc_placeholder
+                    # Persistent marker so the frontend can always discover document attachments
+                    doc_marker = f'<!-- doc-attachment: {upload_file.filename} | {safe_name} -->'
+                    article.content = f"{current}\n\n{doc_placeholder}\n{doc_marker}" if current else f"{doc_placeholder}\n{doc_marker}"
             except Exception as e:
                 logger.warning(f"File parsing failed for {upload_file.filename}: {e}")
 
@@ -627,6 +699,23 @@ async def update_article(
     if uploaded_files:
         existing = re.findall(r'<!-- attachments-order: (.+?) -->', article.content or "")
         all_order = existing[0].split(", ") if existing else []
+        # If no existing order comment, prepend names from kept existing attachments
+        # (so legacy articles don't have their original file pushed to the end).
+        if not existing:
+            for tag in re.finditer(r'<(img|video|audio)\b[^>]*>', article.content or "", re.IGNORECASE):
+                t = tag.group(0)
+                a = (re.search(r'alt="([^"]*)"', t, re.IGNORECASE) or [None, ''])[1]
+                s = (re.search(r'src="([^"]*)"', t, re.IGNORECASE) or [None, ''])[1]
+                name = a or (s.split('/')[-1].split('?')[0] if s else '')
+                if name and name not in all_order:
+                    all_order.append(name)
+            for dm in re.finditer(r'<!-- doc-attachment: (.+?) \|', article.content or "", re.IGNORECASE):
+                name = dm.group(1).strip()
+                if name and name not in all_order:
+                    all_order.append(name)
+            if article.attachment_name and article.attachment_name not in all_order:
+                # Only add if there's still an attachment (wasn't removed in keep_set processing)
+                all_order.append(article.attachment_name)
         all_order.extend(uf["filename"] for uf in uploaded_files)
         # Remove old order comment(s) and append consolidated one
         article.content = re.sub(

@@ -63,8 +63,12 @@ export function EditorModal() {
         setTitle(a.title);
         setCategoryId(a.category_id ?? '');
         setTagsStr(a.tags.join(', '));
-        // Parse existing media attachments from content
+        // Parse existing media attachments from content.
+        // Use a Set of unique keys (src/safeName) to dedup same files, while
+        // allowing different files with the same original name to all appear.
         const existAtt: {name: string; type: string; thumbUrl?: string}[] = [];
+        const seenKeys = new Set<string>();
+
         const tagRe = /<(img|video|audio)\s[^>]*\/?>/gi;
         let m: RegExpExecArray | null;
         while ((m = tagRe.exec(a.content)) !== null) {
@@ -73,31 +77,74 @@ export function EditorModal() {
           const alt = (tag.match(/alt="([^"]*)"/i) ?? [])[1] || '';
           const src = (tag.match(/src="([^"]*)"/i) ?? [])[1] || '';
           const poster = (tag.match(/poster="([^"]*)"/i) ?? [])[1] || '';
-          // video/audio tags may lack alt — derive name from src filename
           const srcName = src ? decodeURIComponent(src.split('/').pop()?.split('?')[0] ?? '') : '';
           const name = alt || srcName;
           const type = tagName === 'img' ? 'image' : tagName === 'video' ? 'video' : 'audio';
-          // For videos, prefer poster (thumbnail image) over src (video file)
           const thumbUrl = type === 'image' ? src : type === 'video' ? (poster || src) : undefined;
+          const key = src ? decodeURIComponent(src.split('/').pop()?.split('?')[0] ?? '') : ''; // safe_name from URL
+          if (key && seenKeys.has(key)) continue;
+          if (key) seenKeys.add(key);
           existAtt.push({name, type, thumbUrl});
         }
-        // Also add document attachment from article data (no media tag in content)
+        // Also add document attachments from persistent markers in content
+        const docMarkerRe = /<!-- doc-attachment: (.+?) \| (.+?) -->/gi;
+        let dm: RegExpExecArray | null;
+        while ((dm = docMarkerRe.exec(a.content)) !== null) {
+          const docName = dm[1].trim();
+          const safeName = dm[2].trim();
+          const key = safeName; // safe_name is unique per uploaded file
+          if (seenKeys.has(key)) continue;
+          seenKeys.add(key);
+          existAtt.push({name: docName, type: 'document', thumbUrl: undefined});
+        }
+        // Also add document attachment from article data (legacy, no marker)
         if (a.attachment_name) {
-          const alreadyShown = existAtt.some((it) => {
-            if (it.name === a.attachment_name) return true;
-            const srcFile = (it.thumbUrl || '').split('/').pop()?.split('?')[0] ?? '';
-            const safeMatch = srcFile.match(/^[a-f0-9]+_(.+)$/i);
-            return safeMatch && safeMatch[1] === a.attachment_name;
-          });
-          if (!alreadyShown) {
-            existAtt.push({name: a.attachment_name!, type: 'document', thumbUrl: undefined});
+          // key from attachment_path (safe name stored on disk)
+          const key = a.attachment_name; // unique per article (only one legacy attachment)
+          if (key && !seenKeys.has(key)) {
+            // Also check against media items by matching attachment_name with safe_name pattern
+            const alreadyViaMedia = existAtt.some((it) => {
+              if (it.name === a.attachment_name) return true;
+              const srcFile = (it.thumbUrl || '').split('/').pop()?.split('?')[0] ?? '';
+              const safeMatch = srcFile.match(/^[a-f0-9]+_(.+)$/i);
+              return safeMatch && safeMatch[1] === a.attachment_name;
+            });
+            if (!alreadyViaMedia) {
+              seenKeys.add(key);
+              existAtt.push({name: a.attachment_name!, type: 'document', thumbUrl: undefined});
+            }
           }
         }
+
+        // Sort existing attachments by upload order.
+        // Walk the order list and assign each matching item its ORIGINAL position.
+        const orderMatch2 = a.content.match(/<!-- attachments-order: (.+?) -->/);
+        if (orderMatch2) {
+          const orderList = orderMatch2[1].split(', ').map((s: string) => s.trim());
+          const assigned = new Map<typeof existAtt[0], number>();
+          for (let orderIdx = 0; orderIdx < orderList.length; orderIdx++) {
+            const o = orderList[orderIdx];
+            const match = existAtt.find((att) => !assigned.has(att) && o === att.name);
+            if (match) {
+              assigned.set(match, orderIdx);
+            }
+          }
+          const idxMap = new Map(existAtt.map((att, i) => [att, i]));
+          existAtt.sort((x, y) => {
+            const xiNorm = assigned.has(x) ? assigned.get(x)! : 999 + (idxMap.get(x) ?? 0);
+            const yiNorm = assigned.has(y) ? assigned.get(y)! : 999 + (idxMap.get(y) ?? 0);
+            return xiNorm - yiNorm;
+          });
+        }
+
         setExistingAttachments(existAtt);
         // Strip media blocks — attachments shown as chips above
         const cleanContent = a.content
           .replace(/<(img|video|audio)\b[^>]*\/?>\s*/gi, '')     // opening tags
           .replace(/<\/(video|audio)>\s*/gi, '')                   // closing tags
+          .replace(/<div data-attachment="[^"]*"[^>]*>[\s\S]*?<\/div>\s*/gi, '') // document placeholders
+          .replace(/<!-- doc-attachment: .+? -->\s*/gi, '')        // persistent doc markers
+          .replace(/<!-- attachments-order: .+? -->\s*/gi, '')     // order markers
           .replace(/#\s*(图片描述|视频|音频)[：:][^\n]*\n/g, '')
           .replace(/\n{3,}/g, '\n\n')
           .trim();

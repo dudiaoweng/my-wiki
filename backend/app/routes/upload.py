@@ -615,6 +615,7 @@ async def upload_file(
 
     # 2. Build initial content (no LLM — immediate display of media)
     is_media = ext in IMAGE_EXTENSIONS or ext in AUDIO_EXTENSIONS or ext in VIDEO_EXTENSIONS
+    is_doc = ext in (TEXT_EXTENSIONS | WORD_EXTENSIONS | EXCEL_EXTENSIONS | PPT_EXTENSIONS | PDF_EXTENSIONS)
     media_src = f"/api/media/{safe_name}"
     raw_text = ""  # text extracted without LLM help
 
@@ -640,10 +641,18 @@ async def upload_file(
     except Exception as e:
         raw_text = f"# {file.filename}\n\n文件解析失败，文件已作为附件保存。"
 
-    # 3. Use filename as initial title; background task will generate a better one
-    title = file.filename
+    # 3. Add persistent doc-attachment marker for non-media files (so the frontend
+    #    can uniquely identify each file, even when multiple share the same name).
+    if is_doc:
+        raw_text += f"\n\n<!-- doc-attachment: {file.filename} | {safe_name} -->"
 
-    # 4. Create article immediately — media visible, marked as processing
+    # 4. Track upload order so later-added attachments preserve correct ordering
+    raw_text += f"\n\n<!-- attachments-order: {file.filename} -->"
+
+    # 5. Use filename (without extension) as initial title; background task will generate a better one
+    title = Path(file.filename).stem or file.filename
+
+    # 5. Create article immediately — media visible, marked as processing
     article = Article(
         title=title,
         content=raw_text,
@@ -681,11 +690,8 @@ async def upload_file(
             else:
                 full_text = raw_text
 
-            # Step B: Generate title + extract tags/entities in parallel
-            bg_title, (bg_tags, bg_entities) = await asyncio.gather(
-                generate_title(full_text),
-                extract_entities_and_relations(full_text),
-            )
+            # Step B: Extract tags/entities (title is already set from filename)
+            bg_tags, bg_entities = await extract_entities_and_relations(full_text)
 
             art = db2.query(Article).filter(Article.id == article_id).first()
             if not art:
@@ -693,13 +699,6 @@ async def upload_file(
 
             # Collect errors for transparency
             errs: list[str] = []
-
-            # Update title — prefer LLM-generated; fall back to filename only
-            if bg_title and len(bg_title) >= 4:
-                art.title = bg_title
-            else:
-                art.title = file.filename
-                errs.append(f"标题生成失败（使用文件名作为标题）")
 
             # Update content with full description
             if is_media:

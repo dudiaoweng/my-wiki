@@ -76,35 +76,74 @@ export function useAttachments(
     for (const r of toRemove.reverse()) {
       result = result.slice(0, r.start) + result.slice(r.end);
     }
+    // Parse document attachment markers: <!-- doc-attachment: filename | safe_name -->
+    const docMarkerRe = /<!-- doc-attachment: (.+?) \| (.+?) -->/g;
+    let dm: RegExpExecArray | null;
+    const docAttachments: { name: string; safeName: string }[] = [];
+    while ((dm = docMarkerRe.exec(result)) !== null) {
+      docAttachments.push({ name: dm[1].trim(), safeName: dm[2].trim() });
+    }
+
+    // Helper: check if an item with the same unique src is already in the list.
+    // Dedup by src (unique per file) rather than name (may collide for same-named files).
+    const isAlreadyShown = (src: string, name: string): boolean => {
+      if (src) {
+        return items.some((it) => it.src === src);
+      }
+      // Legacy fallback (no src): check by name against media item src filenames
+      return items.some((it) => {
+        if (it.name === name) return true;
+        const srcFile = it.src.split('/').pop()?.split('?')[0] ?? '';
+        const safeNameMatch = srcFile.match(/^[a-f0-9]+_(.+)$/i);
+        return safeNameMatch && safeNameMatch[1] === name;
+      });
+    };
+
+    // Add document attachments from persistent markers (before sorting, so order applies)
+    for (const da of docAttachments) {
+      const docSrc = `/api/media/${da.safeName}`;
+      if (!isAlreadyShown(docSrc, da.name)) {
+        items.push({ type: 'document', src: docSrc, name: da.name });
+      }
+    }
+
+    // Add document attachment from article metadata (fallback for legacy articles without markers)
+    if (attachmentName && !isAlreadyShown('', attachmentName)) {
+      items.push({ type: 'document', src: '', name: attachmentName });
+    }
+
     // Parse upload order from content marker
     const orderMatch = result.match(/<!-- attachments-order: (.+?) -->/);
     const orderList = orderMatch ? orderMatch[1].split(', ').map(s => s.trim()) : [];
-    // Remove the order comment from clean content
-    let cleanContent = result.replace(/\n*<!-- attachments-order: .+? -->\n*/g, '\n').trim();
+    // Remove marker comments from clean content
+    let cleanContent = result
+      .replace(/\n*<!-- doc-attachment: .+? -->\n*/g, '\n')
+      .replace(/\n*<!-- attachments-order: .+? -->\n*/g, '\n')
+      .trim();
 
-    // Sort items by upload order
+    // Sort ALL items (media + documents + legacy) by upload order.
+    // Walk the order list and assign each matching item its ORIGINAL position.
     if (orderList.length > 0) {
-      items.sort((a, b) => {
-        const ai = orderList.findIndex(o => o === a.name || a.src.includes(o) || (a.src.split('/').pop()?.startsWith(o.split('.')[0])));
-        const bi = orderList.findIndex(o => o === b.name || b.src.includes(o) || (b.src.split('/').pop()?.startsWith(o.split('.')[0])));
-        return (ai >= 0 ? ai : 999) - (bi >= 0 ? bi : 999);
-      });
-    }
-
-    // Add document attachment from article data (only if not already shown as media)
-    if (attachmentName) {
-      const alreadyShown = items.some((it) => {
-        // Match by original name OR by safe name embedded in src
-        if (it.name === attachmentName) return true;
-        const srcFile = it.src.split('/').pop()?.split('?')[0] ?? '';
-        // Safe name format: {uuid}_{original}.ext — strip UUID prefix for comparison
-        const safeNameMatch = srcFile.match(/^[a-f0-9]+_(.+)$/i);
-        return safeNameMatch && safeNameMatch[1] === attachmentName;
-      });
-      if (!alreadyShown) {
-        // Document attachment was uploaded first — insert at beginning
-        items.splice(0, 0, { type: 'document', src: '', name: attachmentName });
+      const assigned = new Map<MediaItem, number>();
+      for (let orderIdx = 0; orderIdx < orderList.length; orderIdx++) {
+        const o = orderList[orderIdx];
+        const match = items.find(
+          (it) =>
+            !assigned.has(it) &&
+            (o === it.name ||
+              it.src.includes(o) ||
+              (it.src.split('/').pop()?.startsWith(o.split('.')[0]) ?? false)),
+        );
+        if (match) {
+          assigned.set(match, orderIdx);
+        }
       }
+      const idxMap = new Map(items.map((it, i) => [it, i]));
+      items.sort((a, b) => {
+        const aiNorm = assigned.has(a) ? assigned.get(a)! : 999 + (idxMap.get(a) ?? 0);
+        const biNorm = assigned.has(b) ? assigned.get(b)! : 999 + (idxMap.get(b) ?? 0);
+        return aiNorm - biNorm;
+      });
     }
 
     return { mediaItems: items, cleanContent };
