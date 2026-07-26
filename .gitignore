@@ -2,7 +2,6 @@
 # 虚拟环境
 venv/
 .venv/
-backend/.venv/
 
 # 字节码缓存
 __pycache__/
@@ -26,7 +25,6 @@ backend/uploads/
 
 # ===== Node / 前端 =====
 node_modules/
-frontend/dist/
 
 # ===== IDE / 编辑器 =====
 .vscode/
