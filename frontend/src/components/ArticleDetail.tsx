@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -8,6 +8,9 @@ import { useArticles } from '../hooks/useArticles';
 import { useApp } from '../context/AppProvider';
 import { useToast } from '../hooks/useToast';
 import { AttachmentGallery, useAttachments } from './AttachmentGallery';
+import { createEntityHighlightPlugin } from '../utils/rehypeEntityHighlight';
+import { useEntityOccurrences } from '../hooks/useEntityOccurrences';
+import { EntityOccurrenceBar } from './EntityOccurrenceBar';
 import type { Article } from '../types/article';
 import styles from './ArticleDetail.module.css';
 
@@ -25,6 +28,7 @@ export function ArticleDetail() {
   const [article, setArticle] = useState<Article | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [selectedEntity, setSelectedEntity] = useState<string | null>(null);
 
   // Fetch full article list for prev/next navigation
   const { articles: allArticles } = useArticles();
@@ -65,6 +69,22 @@ export function ArticleDetail() {
 
   // Must be called before any early returns (Rules of Hooks)
   const { mediaItems, cleanContent } = useAttachments(article?.content ?? '', article?.attachment_name);
+
+  // Entity highlighting
+  const highlightPlugin = useMemo(
+    () => createEntityHighlightPlugin(selectedEntity),
+    [selectedEntity],
+  );
+  const rehypePlugins = useMemo(
+    () => [rehypeRaw, highlightPlugin] as any,
+    [highlightPlugin],
+  );
+  const {
+    count: occurrenceCount,
+    activeIndex: activeOccurrenceIndex,
+    occurrences,
+    scrollToOccurrence,
+  } = useEntityOccurrences(cleanContent, selectedEntity);
 
   if (loading) {
     return <div className={styles.loading}>加载中…</div>;
@@ -166,7 +186,21 @@ export function ArticleDetail() {
       <AttachmentGallery items={mediaItems} articleId={id} />
 
       <div className={`${styles.content} markdown-content`}>
-        <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{cleanContent}</Markdown>
+        <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={rehypePlugins}>
+          {cleanContent}
+        </Markdown>
+
+        {selectedEntity && occurrenceCount > 0 && (
+          <EntityOccurrenceBar
+            entityName={selectedEntity}
+            entityType={article.entities?.entities?.find((e) => e.name === selectedEntity)?.type}
+            totalCount={occurrenceCount}
+            activeIndex={activeOccurrenceIndex}
+            occurrences={occurrences}
+            onNavigate={scrollToOccurrence}
+            onClose={() => setSelectedEntity(null)}
+          />
+        )}
       </div>
 
       <div className={styles.actions}>
