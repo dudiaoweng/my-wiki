@@ -48,6 +48,9 @@ export function ArticleList() {
   // Inline article view
   const [viewedArticleId, setViewedArticleId] = useState<string | null>(null);
 
+  // Entity highlight (for article content highlighting via rehype plugin)
+  const [highlightEntity, setHighlightEntity] = useState<string | null>(null);
+
   const categoryName = categoryId
     ? categories.find((c) => c.id === categoryId)?.name ?? '分类'
     : null;
@@ -77,6 +80,7 @@ export function ArticleList() {
     setViewedArticleId(id);
     setSelectedArticleIds(new Set([id]));
     setSelectedEntities(new Set());
+    setHighlightEntity(null);
   }, []);
 
   // Handle entity selection
@@ -91,6 +95,8 @@ export function ArticleList() {
       }
       return next;
     });
+    // Toggle entity highlight when viewing an article inline
+    setHighlightEntity((prev) => (prev === entity ? null : entity));
   }, []);
 
   // Handle knowledge graph node click → toggle selection, filter article list locally
@@ -231,6 +237,7 @@ export function ArticleList() {
     setSelectedArticleIds(new Set());
     setSelectedEntities(new Set());
     setViewedArticleId(null);
+    setHighlightEntity(null);
   };
 
   const handleBack = () => {
@@ -241,6 +248,7 @@ export function ArticleList() {
     }
     setViewedArticleId(null);
     setSelectedArticleIds(new Set());
+    setHighlightEntity(null);
   };
 
   // Memoize to avoid new array reference on every render (triggers D3 restart)
@@ -262,6 +270,7 @@ export function ArticleList() {
               setViewedArticleId(id);
               setSelectedArticleIds(new Set([id]));
               setSelectedEntities(new Set());
+              setHighlightEntity(null);
             };
             return (
               <ArticleDetailInline
@@ -271,6 +280,8 @@ export function ArticleList() {
                 prevArticleId={prevId}
                 nextArticleId={nextId}
                 onNavigate={handleNavigate}
+                highlightEntity={highlightEntity}
+                onClearHighlight={() => setHighlightEntity(null)}
               />
             );
           })()

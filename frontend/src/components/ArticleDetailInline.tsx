@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
@@ -6,6 +6,9 @@ import { api } from '../api/client';
 import { useApp } from '../context/AppProvider';
 import { useToast } from '../hooks/useToast';
 import { AttachmentGallery, useAttachments } from './AttachmentGallery';
+import { createEntityHighlightPlugin } from '../utils/rehypeEntityHighlight';
+import { useEntityOccurrences } from '../hooks/useEntityOccurrences';
+import { EntityOccurrenceBar } from './EntityOccurrenceBar';
 import type { Article } from '../types/article';
 import styles from './ArticleDetailInline.module.css';
 
@@ -15,6 +18,8 @@ interface Props {
   prevArticleId?: string;
   nextArticleId?: string;
   onNavigate?: (id: string) => void;
+  highlightEntity?: string | null;
+  onClearHighlight?: () => void;
 }
 
 function formatDate(iso: string): string {
@@ -22,7 +27,7 @@ function formatDate(iso: string): string {
   return d.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
 }
 
-export function ArticleDetailInline({ articleId, onBack, prevArticleId, nextArticleId, onNavigate }: Props) {
+export function ArticleDetailInline({ articleId, onBack, prevArticleId, nextArticleId, onNavigate, highlightEntity, onClearHighlight }: Props) {
   const { openEditor, requestConfirm, notifyArticleSaved } = useApp();
   const { showToast } = useToast();
   const [article, setArticle] = useState<Article | null>(null);
@@ -61,6 +66,24 @@ export function ArticleDetailInline({ articleId, onBack, prevArticleId, nextArti
 
   // Must be called before any early returns (Rules of Hooks)
   const { mediaItems, cleanContent } = useAttachments(article?.content ?? '', article?.attachment_name);
+
+  // Entity highlighting — normalize optional prop to null
+  const entityToHighlight = highlightEntity ?? null;
+
+  const highlightPlugin = useMemo(
+    () => createEntityHighlightPlugin(entityToHighlight),
+    [entityToHighlight],
+  );
+  const rehypePlugins = useMemo(
+    () => [rehypeRaw, highlightPlugin] as any,
+    [highlightPlugin],
+  );
+  const {
+    count: occurrenceCount,
+    activeIndex: activeOccurrenceIndex,
+    occurrences,
+    scrollToOccurrence,
+  } = useEntityOccurrences(cleanContent, entityToHighlight);
 
   if (loading) return <div className={styles.loading}>加载中…</div>;
   if (error) return <div className={styles.loading}>加载失败：{error}</div>;
@@ -134,11 +157,24 @@ export function ArticleDetailInline({ articleId, onBack, prevArticleId, nextArti
         </div>
       )}
 
-
       <AttachmentGallery items={mediaItems} articleId={articleId} />
 
       <div className={`${styles.content} markdown-content`}>
-        <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{cleanContent}</Markdown>
+        <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={rehypePlugins}>
+          {cleanContent}
+        </Markdown>
+
+        {entityToHighlight && occurrenceCount > 0 && (
+          <EntityOccurrenceBar
+            entityName={entityToHighlight}
+            entityType={article.entities?.entities?.find((e) => e.name === entityToHighlight)?.type}
+            totalCount={occurrenceCount}
+            activeIndex={activeOccurrenceIndex}
+            occurrences={occurrences}
+            onNavigate={scrollToOccurrence}
+            onClose={() => onClearHighlight?.()}
+          />
+        )}
       </div>
     </div>
   );
