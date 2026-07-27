@@ -20,7 +20,7 @@ export function createEntityHighlightPlugin(entityName: string | null): Plugin {
 
   const escaped = entityName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const regex = new RegExp(escaped, 'gi');
-  const SKIP_TAGS = new Set(['code', 'pre', 'style', 'script', 'svg']);
+  const SKIP_TAGS = new Set(['code', 'pre', 'style', 'script', 'svg', 'mark']);
 
   return function entityHighlightAttacher() {
     let occurrenceIndex = 0;

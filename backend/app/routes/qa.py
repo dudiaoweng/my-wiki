@@ -21,6 +21,15 @@ from app.config import (
     UPLOAD_DIR as UPLOAD_DIR_STR,
 )
 from app.utils import find_ffmpeg
+from app.prompts import (
+    QA_VIDEO_DESCRIPTION,
+    QA_WITH_KB_INTRO,
+    QA_WITH_KB_INSTRUCTIONS,
+    QA_WITH_KB_IMAGES,
+    QA_WITH_KB_FALLBACK,
+    QA_CLOSING,
+    QA_NO_KB,
+)
 
 logger = logging.getLogger(__name__)
 # Ensure custom log messages are visible alongside uvicorn access logs
@@ -456,8 +465,9 @@ async def parse_video_for_qa(content_bytes: bytes, filename: str) -> str:
         {
             "type": "text",
             "text": (
-                f"视频「{name_no_ext}」，{len(frames_b64)} 个关键帧，时长约 {duration:.0f} 秒。"
-                "请用中文简要描述视频内容（100-200 字）。"
+                QA_VIDEO_DESCRIPTION.format(
+                    name=name_no_ext, frame_count=len(frames_b64), duration=duration,
+                ),
             ),
         }
     ]
@@ -784,23 +794,18 @@ async def call_llm(
     has_images = bool(image_contexts)
 
     if has_kb or has_images:
-        prompt_parts = ["你是一个知识库问答助手。"]
+        prompt_parts = [QA_WITH_KB_INTRO]
         if has_kb:
-            prompt_parts.append("请根据以下知识库文章的内容回答用户的问题。")
-            prompt_parts.append("如果知识库中有'实体附加信息'部分，请优先参考。")
+            prompt_parts.append(QA_WITH_KB_INSTRUCTIONS)
         if has_images:
-            prompt_parts.append("用户上传了图片，请基于图片内容回答问题。")
-        prompt_parts.append("如果信息不足以完整回答，可以结合你的通用知识补充。")
-        prompt_parts.append("回答要简洁、准确，使用中文。")
+            prompt_parts.append(QA_WITH_KB_IMAGES)
+        prompt_parts.append(QA_WITH_KB_FALLBACK)
+        prompt_parts.append(QA_CLOSING)
         if has_kb:
             prompt_parts.append(f"\n知识库相关内容：\n\n{context}")
         system_prompt = "\n".join(prompt_parts)
     else:
-        system_prompt = (
-            "你是一个知识库问答助手。当前知识库中没有与问题直接相关的内容。"
-            "请利用你的通用知识回答用户的问题。\n"
-            "回答要简洁、准确，使用中文。"
-        )
+        system_prompt = QA_NO_KB
 
     messages: list[dict] = [{"role": "system", "content": system_prompt}]
     for h in history:

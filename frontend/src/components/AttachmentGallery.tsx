@@ -94,7 +94,7 @@ export function useAttachments(
       return items.some((it) => {
         if (it.name === name) return true;
         const srcFile = it.src.split('/').pop()?.split('?')[0] ?? '';
-        const safeNameMatch = srcFile.match(/^[a-f0-9]+_(.+)$/i);
+        const safeNameMatch = srcFile.match(/^[a-f0-9-]+_(.+)$/i);
         return safeNameMatch && safeNameMatch[1] === name;
       });
     };

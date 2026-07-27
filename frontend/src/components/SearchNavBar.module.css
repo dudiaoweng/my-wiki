@@ -1,0 +1,235 @@
+.bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  margin-top: 24px;
+  background: var(--c-card);
+  border: 1px solid var(--c-accent);
+  border-radius: var(--radius-md);
+  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.06);
+  font-size: 13px;
+  user-select: none;
+}
+
+/* ── Info ── */
+.info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.searchTerm {
+  font-weight: 600;
+  color: var(--c-accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+}
+
+/* ── Dots track ── */
+.dotsTrack {
+  flex: 1;
+  position: relative;
+  height: 24px;
+  min-width: 50px;
+  display: flex;
+  align-items: center;
+}
+
+.dot {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--c-border);
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  transition: background var(--transition-fast),
+              transform var(--transition-fast),
+              width var(--transition-fast),
+              height var(--transition-fast);
+}
+
+.dot:hover {
+  background: var(--c-accent);
+  transform: translate(-50%, -50%) scale(1.4);
+}
+
+.dotPassed {
+  background: var(--c-accent);
+  opacity: 0.55;
+}
+
+.dotPassed:hover {
+  opacity: 0.85;
+  transform: translate(-50%, -50%) scale(1.3);
+}
+
+.dotActive {
+  background: var(--c-accent);
+  width: 9px;
+  height: 9px;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+.dotActive:hover {
+  transform: translate(-50%, -50%) scale(1.2);
+}
+
+/* ── Controls (count + arrows + close) ── */
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.count {
+  color: var(--c-text-muted);
+  font-size: 12px;
+  min-width: 40px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.arrowBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--c-border);
+  background: var(--c-card);
+  color: var(--c-text-soft);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  transition: background var(--transition-fast),
+              color var(--transition-fast),
+              border-color var(--transition-fast);
+}
+
+.arrowBtn:hover:not(:disabled) {
+  background: var(--c-accent-wash);
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+
+.arrowBtn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.closeBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  background: transparent;
+  color: var(--c-text-muted);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  margin-left: 2px;
+  transition: background var(--transition-fast),
+              color var(--transition-fast);
+}
+
+.closeBtn:hover {
+  background: var(--c-danger-wash);
+  color: var(--c-danger);
+}
+
+/* ── Responsive: smaller tablets ── */
+@media (max-width: 720px) {
+  .bar {
+    gap: 8px;
+    padding: 8px 12px;
+  }
+
+  .searchTerm {
+    max-width: 80px;
+    font-size: 12px;
+  }
+
+  .dotsTrack {
+    min-width: 30px;
+  }
+
+  .arrowBtn,
+  .closeBtn {
+    width: 28px;
+    height: 28px;
+  }
+}
+
+/* ── Responsive: mobile (stack layout) ── */
+@media (max-width: 480px) {
+  .bar {
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 10px;
+    margin-top: 20px;
+    border-radius: var(--radius-sm);
+  }
+
+  .info {
+    order: 1;
+  }
+
+  .searchTerm {
+    max-width: 70px;
+  }
+
+  .dotsTrack {
+    order: 3;
+    flex: 1 1 100%;
+    width: 100%;
+    height: 20px;
+    min-width: 0;
+  }
+
+  .dot {
+    width: 6px;
+    height: 6px;
+  }
+
+  .dotActive {
+    width: 8px;
+    height: 8px;
+  }
+
+  .controls {
+    order: 2;
+    margin-left: auto;
+  }
+
+  .count {
+    font-size: 11px;
+    min-width: 32px;
+  }
+
+  .arrowBtn,
+  .closeBtn {
+    width: 26px;
+    height: 26px;
+    font-size: 11px;
+  }
+}

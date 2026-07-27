@@ -17,6 +17,7 @@ from app.config import (
     UPLOAD_DIR as UPLOAD_DIR_STR,
 )
 from app.utils import find_ffmpeg
+from app.prompts import IMAGE_DESCRIPTION, VIDEO_DESCRIPTION, GENERATE_TITLE
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
 
@@ -150,7 +151,7 @@ async def parse_image(file_path: str, original_name: str) -> str:
                             "content": [
                                 {
                                     "type": "text",
-                                    "text": "请用中文详细描述这张图片的内容（不超过300字）。如果是文档截图、表格、图表，请尽可能提取其中的文字信息。",
+                                    "text": IMAGE_DESCRIPTION,
                                 },
                                 {
                                     "type": "image_url",
@@ -211,13 +212,16 @@ async def parse_media(content_bytes: bytes, filename: str, content_type: str) ->
 
 async def parse_video(file_path: str, original_name: str) -> str:
     """Extract key frames from video and describe via vision LLM.
-    Returns markdown with an embedded video player + description."""
+    Returns markdown with an embedded video player (with poster thumbnail) + description."""
     import base64
     import cv2
     import httpx
 
     storage_name = Path(file_path).name
-    video_tag = f'<video controls src="/api/media/{storage_name}" style="width:100%;max-width:100%"></video>'
+    poster_name = f"{Path(file_path).stem}_poster.jpg"
+    poster_path = str(Path(file_path).parent / poster_name)
+    poster_src = f"/api/media/{poster_name}"
+    video_tag = f'<video controls src="/api/media/{storage_name}" poster="{poster_src}" style="width:100%;max-width:100%"></video>'
     name_no_ext = Path(original_name).stem.replace('_', ' ').replace('-', ' ')
 
     if not VISION_API_KEY:
@@ -231,6 +235,12 @@ async def parse_video(file_path: str, original_name: str) -> str:
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
     duration = total_frames / fps if fps > 0 else 0
+
+    # Extract first frame as poster/thumbnail
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    ret, first_frame = cap.read()
+    if ret and first_frame is not None:
+        cv2.imwrite(poster_path, first_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
 
     # Extract up to 5 frames at 0%, 25%, 50%, 75%, 90% of the video
     positions = [0, 0.25, 0.5, 0.75, 0.9]
@@ -263,14 +273,8 @@ async def parse_video(file_path: str, original_name: str) -> str:
     user_content: list[dict] = [
         {
             "type": "text",
-            "text": (
-                f"这是一个视频文件「{name_no_ext}」，时长约 {duration:.0f} 秒。"
-                f"以下是从视频中提取的 {n_frames} 个关键帧画面（按时间顺序）。"
-                "请用中文详细描述这个视频的内容（不超过 300 字），包括：\n"
-                "1. 视频的主题和场景\n"
-                "2. 出现的人物、物体或活动\n"
-                "3. 画面随时间的变化\n"
-                "4. 视频想要传达的信息"
+            "text": VIDEO_DESCRIPTION.format(
+                name=name_no_ext, duration=duration, frame_count=n_frames,
             ),
         }
     ]
@@ -479,35 +483,7 @@ async def generate_title(text: str) -> str:
     # Send more context for better understanding (up to 8000 chars)
     context = cleaned[:8000]
 
-    prompt = (
-        "你是一个专业的文档摘要专家。请仔细阅读以下文档内容，在**理解全文主旨**的基础上，"
-        "用一句完整、精炼的话概括文档的核心内容，作为标题。\n\n"
-        "核心原则：\n"
-        "1. 先通读全文，理解文档在讲什么，然后用自己的话提炼标题\n"
-        "2. 标题应该概括文档的整体主题，而不是照抄文中的某一句\n"
-        "3. 让读者一眼就能知道这份文档是关于什么的\n\n"
-        "具体要求：\n"
-        "- 15-40 个字，简洁完整\n"
-        "- 技术文档 → 概括技术主题和要点\n"
-        "- 聊天记录/对话 → 概括讨论的主要话题和结论\n"
-        "- 图片描述 → 概括图片的主要内容和场景\n"
-        "- 音视频内容 → 概括主题和关键信息\n"
-        "- 不要包含\"标题：\"\"本文\"\"该文档\"等冗余词语\n"
-        "- 不要使用引号、书名号或 Markdown 格式\n"
-        "- 只输出标题文本本身，不要任何解释\n\n"
-        "好的标题示例：\n"
-        "- Python 异步编程的核心概念与最佳实践\n"
-        "- 2025 年产品路线图与关键里程碑规划\n"
-        "- 基于深度学习的图像分类模型优化方法\n"
-        "- 团队关于微服务架构迁移的技术方案讨论\n"
-        "- 城市夜景航拍照片，展示 CBD 核心区的灯光与建筑群\n\n"
-        "差的标题（避免）：\n"
-        "- 在本文中我们将讨论异步编程  ← 冗余前缀\n"
-        "- 第一章 概述  ← 没有实际信息\n"
-        "- 接下来我们来看一下  ← 口语化，无概括\n\n"
-        f"---\n文档内容：\n\n{context}\n\n---\n"
-        "请为以上文档生成标题（只输出标题本身）："
-    )
+    prompt = GENERATE_TITLE.format(context=context)
 
     try:
         logger.info(f"[TITLE] Calling LLM model={LLM_MODEL} with {len(context)} chars of context...")
@@ -700,9 +676,15 @@ async def upload_file(
             # Collect errors for transparency
             errs: list[str] = []
 
-            # Update content with full description
+            # Update content with full description (preserve order/doc-attachment markers)
             if is_media:
-                art.content = full_text
+                markers = []
+                for m in re.finditer(r'<!-- (?:attachments-order|doc-attachment): .+? -->', raw_text):
+                    markers.append(m.group())
+                if markers:
+                    art.content = full_text + '\n\n' + '\n'.join(markers)
+                else:
+                    art.content = full_text
 
             # Update tags + entities; report if LLM extraction returned nothing
             if bg_tags:

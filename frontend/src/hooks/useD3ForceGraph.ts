@@ -47,6 +47,9 @@ export interface UseD3ForceGraphOptions {
   showArrows?: boolean;
   /** Initial scale for zoom */
   initialScale?: number;
+  /** Whether the graph container is currently visible (DOM mounted).
+   *  When false, the effect skips rendering and waits for it to become true. */
+  enabled?: boolean;
 }
 
 /**
@@ -67,11 +70,15 @@ export function useD3ForceGraph(
     selectedNodeIds,
     showArrows = true,
     initialScale = 1.0,
+    enabled = true,
   } = options;
 
-  // Keep a ref to selectedNodeIds so D3 event handlers always read the latest value
+  // Keep refs so D3 event handlers always read the latest value without re-creating the graph
   const selectedRef = useRef(selectedNodeIds);
   selectedRef.current = selectedNodeIds;
+
+  const onNodeClickRef = useRef(onNodeClick);
+  onNodeClickRef.current = onNodeClick;
 
   // ── Tooltip show/hide ──
   const showTooltip = (html: string, x: number, y: number) => {
@@ -99,6 +106,7 @@ export function useD3ForceGraph(
 
   // ── D3 effect ──
   useEffect(() => {
+    if (!enabled) return;
     if (!graph || graph.nodes.length === 0) return;
     if (!containerRef.current || !svgRef.current) return;
 
@@ -207,7 +215,7 @@ export function useD3ForceGraph(
         d3.select(this).select('rect,circle').attr('filter', null);
       })
       .on('click', (event, d) => {
-        onNodeClick?.(d.id, d.type, d.label, event.ctrlKey || event.metaKey);
+        onNodeClickRef.current?.(d.id, d.type, d.label, event.ctrlKey || event.metaKey);
       });
 
     // ── Article nodes: rounded rects ──
@@ -301,5 +309,43 @@ export function useD3ForceGraph(
     );
 
     return () => { simulation.stop(); };
-  }, [graph, entityTypeMap, onNodeClick, showArrows, initialScale, containerRef, svgRef, tooltipRef, tooltipStyle]);
+  }, [enabled, graph, entityTypeMap, showArrows, initialScale, containerRef, svgRef, tooltipRef, tooltipStyle]);
+  // NOTE: onNodeClick intentionally omitted — we use onNodeClickRef to avoid recreating the graph on every render
+
+  // ── Update node selection visuals WITHOUT recreating the graph ──
+  useEffect(() => {
+    if (!svgRef.current) return;
+    const svg = d3.select(svgRef.current);
+    const nodeGroups = svg.selectAll<SVGGElement, SimNode>('.d3-nodes > g');
+
+    if (nodeGroups.empty()) return;
+
+    const isSel = (id: string) => selectedNodeIds?.has(id) ?? false;
+
+    // Article nodes: update rect stroke/filter/opacity
+    nodeGroups
+      .filter((d) => d.type === 'article')
+      .select('rect')
+      .attr('stroke', (d) => isSel(d.id) ? 'var(--c-accent)' : 'white')
+      .attr('stroke-width', (d) => isSel(d.id) ? 3 : 2)
+      .attr('opacity', (d) => isSel(d.id) ? 1 : 0.92)
+      .style('filter', (d) => isSel(d.id) ? 'drop-shadow(0 0 6px var(--c-accent))' : 'none');
+
+    // Category nodes
+    nodeGroups
+      .filter((d) => d.type === 'category')
+      .select('circle')
+      .attr('stroke', (d) => isSel(d.id) ? 'var(--c-accent)' : 'white')
+      .attr('stroke-width', (d) => isSel(d.id) ? 3 : 2.5)
+      .style('filter', (d) => isSel(d.id) ? 'drop-shadow(0 0 6px var(--c-accent))' : 'none');
+
+    // Entity nodes
+    nodeGroups
+      .filter((d) => d.type === 'entity')
+      .select('circle')
+      .attr('fill', (d) => isSel(d.id) ? 'var(--c-accent)' : '#E8DEF8')
+      .attr('stroke', (d) => isSel(d.id) ? 'var(--c-accent)' : '#8B6BAE')
+      .attr('stroke-width', (d) => isSel(d.id) ? 2 : 1.2)
+      .style('filter', (d) => isSel(d.id) ? 'drop-shadow(0 0 4px var(--c-accent))' : 'none');
+  }, [selectedNodeIds, svgRef]);
 }

@@ -8,6 +8,9 @@ export interface Occurrence {
 export function useEntityOccurrences(content: string, entityName: string | null) {
   const [activeIndex, setActiveIndex] = useState(0);
   const observerRef = useRef<IntersectionObserver | null>(null);
+  // Prevent IntersectionObserver from overriding manual navigation during scroll animation
+  const isManualScrolling = useRef(false);
+  const manualTimer = useRef<ReturnType<typeof setTimeout>>();
 
   // ── Compute occurrence list from raw text ──
   const occurrences = useMemo<Occurrence[]>(() => {
@@ -60,6 +63,9 @@ export function useEntityOccurrences(content: string, entityName: string | null)
 
       const observer = new IntersectionObserver(
         (entries) => {
+          // Don't override manual navigation during scroll animation
+          if (isManualScrolling.current) return;
+
           for (const entry of entries) {
             const idxAttr = (entry.target as HTMLElement).dataset.entityOccurrence;
             if (idxAttr === undefined) continue;
@@ -129,10 +135,17 @@ export function useEntityOccurrences(content: string, entityName: string | null)
   // ── Scroll to a specific occurrence ──
   const scrollToOccurrence = useCallback((index: number) => {
     const el = document.getElementById(`entity-occurrence-${index}`);
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      setActiveIndex(index);
-    }
+    if (!el) return;
+
+    // Prevent IntersectionObserver from overriding during manual navigation
+    isManualScrolling.current = true;
+    if (manualTimer.current) clearTimeout(manualTimer.current);
+    manualTimer.current = setTimeout(() => {
+      isManualScrolling.current = false;
+    }, 400);
+
+    el.scrollIntoView({ behavior: 'auto', block: 'center' });
+    setActiveIndex(index);
   }, []);
 
   // Reset activeIndex and scroll to first occurrence when entity changes
@@ -144,7 +157,7 @@ export function useEntityOccurrences(content: string, entityName: string | null)
     const timer = setTimeout(() => {
       const first = document.getElementById('entity-occurrence-0');
       if (first) {
-        first.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        first.scrollIntoView({ behavior: 'auto', block: 'center' });
       }
     }, 100);
 

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useDeferredValue } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
@@ -7,8 +7,11 @@ import { useApp } from '../context/AppProvider';
 import { useToast } from '../hooks/useToast';
 import { AttachmentGallery, useAttachments } from './AttachmentGallery';
 import { createEntityHighlightPlugin } from '../utils/rehypeEntityHighlight';
+import { createSearchHighlightPlugin } from '../utils/rehypeSearchHighlight';
 import { useEntityOccurrences } from '../hooks/useEntityOccurrences';
+import { useArticleSearch } from '../hooks/useArticleSearch';
 import { EntityOccurrenceBar } from './EntityOccurrenceBar';
+import { SearchNavBar } from './SearchNavBar';
 import type { Article } from '../types/article';
 import styles from './ArticleDetailInline.module.css';
 
@@ -70,13 +73,25 @@ export function ArticleDetailInline({ articleId, onBack, prevArticleId, nextArti
   // Entity highlighting — normalize optional prop to null
   const entityToHighlight = highlightEntity ?? null;
 
+  // In-article search state
+  const [searchQuery, setSearchQuery] = useState('');
+  const deferredSearchQuery = useDeferredValue(searchQuery);
+
   const highlightPlugin = useMemo(
     () => createEntityHighlightPlugin(entityToHighlight),
     [entityToHighlight],
   );
+
+  // Search highlighting — uses deferred value to keep UI responsive while typing
+  const searchTerm = deferredSearchQuery.trim();
+  const searchPlugin = useMemo(
+    () => createSearchHighlightPlugin(searchTerm || null),
+    [searchTerm],
+  );
+
   const rehypePlugins = useMemo(
-    () => [rehypeRaw, highlightPlugin] as any,
-    [highlightPlugin],
+    () => [rehypeRaw, highlightPlugin, searchPlugin] as any,
+    [highlightPlugin, searchPlugin],
   );
   const {
     count: occurrenceCount,
@@ -84,6 +99,28 @@ export function ArticleDetailInline({ articleId, onBack, prevArticleId, nextArti
     occurrences,
     scrollToOccurrence,
   } = useEntityOccurrences(cleanContent, entityToHighlight);
+
+  // In-article search — uses deferred value for DOM-based hook
+  const contentLength = useMemo(() => cleanContent.length, [cleanContent]);
+  const {
+    count: searchCount,
+    activeIndex: activeSearchIndex,
+    occurrences: searchOccurrences,
+    scrollToMatch,
+  } = useArticleSearch(searchTerm, contentLength);
+
+  const isSearchActive = searchTerm.length > 0;
+  const isSearchPending = searchQuery.trim() && searchQuery.trim() !== searchTerm;
+
+  // Memoize Markdown element BEFORE early returns (Rules of Hooks)
+  const markdownEl = useMemo(
+    () => (
+      <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={rehypePlugins}>
+        {cleanContent}
+      </Markdown>
+    ),
+    [cleanContent, rehypePlugins],
+  );
 
   if (loading) return <div className={styles.loading}>加载中…</div>;
   if (error) return <div className={styles.loading}>加载失败：{error}</div>;
@@ -128,9 +165,42 @@ export function ArticleDetailInline({ articleId, onBack, prevArticleId, nextArti
             </div>
           )}
         </div>
-        <div className={styles.actions}>
-          <button className={styles.btn} onClick={() => openEditor(article.id)}>✏️ 编辑</button>
-          <button className={`${styles.btn} ${styles.btnDanger}`} onClick={handleDelete}>🗑 删除</button>
+        <div className={styles.topBarRight}>
+          <div className={styles.searchWrap}>
+            <span className={styles.searchIcon}>🔍</span>
+            <input
+              type="text"
+              className={styles.searchInput}
+              placeholder="在文章中搜索…"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  setSearchQuery('');
+                  (e.target as HTMLInputElement).blur();
+                }
+              }}
+            />
+            {searchQuery && (
+              <button
+                className={styles.searchClear}
+                onClick={() => setSearchQuery('')}
+                title="清除搜索"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+          {isSearchPending && (
+            <span className={styles.searchNoResults}>搜索中…</span>
+          )}
+          {isSearchActive && !isSearchPending && searchCount === 0 && (
+            <span className={styles.searchNoResults}>无匹配</span>
+          )}
+          <div className={styles.actions}>
+            <button className={styles.btn} onClick={() => openEditor(article.id)}>✏️ 编辑</button>
+            <button className={`${styles.btn} ${styles.btnDanger}`} onClick={handleDelete}>🗑 删除</button>
+          </div>
         </div>
       </div>
 
@@ -159,10 +229,19 @@ export function ArticleDetailInline({ articleId, onBack, prevArticleId, nextArti
 
       <AttachmentGallery items={mediaItems} articleId={articleId} />
 
-      <div className={`${styles.content} markdown-content`}>
-        <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={rehypePlugins}>
-          {cleanContent}
-        </Markdown>
+      <div className={`${styles.content} markdown-content`} id="article-content">
+        {markdownEl}
+
+        {isSearchActive && searchCount > 0 && (
+          <SearchNavBar
+            searchTerm={searchTerm}
+            totalCount={searchCount}
+            activeIndex={activeSearchIndex}
+            occurrences={searchOccurrences}
+            onNavigate={scrollToMatch}
+            onClose={() => setSearchQuery('')}
+          />
+        )}
 
         {entityToHighlight && occurrenceCount > 0 && (
           <EntityOccurrenceBar

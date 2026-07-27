@@ -248,6 +248,7 @@ export function EntityPanel({
     selectedNodeIds: selectedGraphNodeIds,
     showArrows: true,
     initialScale: 1.0,
+    enabled: mode === 'graph',
   });
 
 
