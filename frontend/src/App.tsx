@@ -1,10 +1,10 @@
+import { Suspense, lazy } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AppProvider } from './context/AppProvider';
 import { ToastProvider } from './hooks/useToast';
 import { Layout } from './components/Layout/Layout';
 import { Hero } from './components/Hero';
 import { ArticleList } from './components/ArticleList';
-import { ArticleDetail } from './components/ArticleDetail';
 
 import { QA } from './components/QA';
 import { UploadModal } from './components/UploadModal';
@@ -13,6 +13,11 @@ import { ConfirmDialog } from './components/ConfirmDialog';
 import { ToastContainer } from './components/Toast';
 import { ReadingProgress } from './components/ReadingProgress';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
+
+// Lazy-load heavy article detail page (react-markdown + rehype pipeline)
+const ArticleDetail = lazy(() =>
+  import('./components/ArticleDetail').then((m) => ({ default: m.ArticleDetail })),
+);
 
 function KbShortcuts() {
   useKeyboardShortcuts();
@@ -29,7 +34,14 @@ export default function App() {
             <Route element={<Layout />}>
               <Route index element={<Hero />} />
               <Route path="articles" element={<ArticleList />} />
-              <Route path="articles/:id" element={<ArticleDetail />} />
+              <Route
+                path="articles/:id"
+                element={
+                  <Suspense fallback={<div style={{ textAlign: 'center', padding: '80px 20px', color: 'var(--c-text-muted)' }}>加载中…</div>}>
+                    <ArticleDetail />
+                  </Suspense>
+                }
+              />
 
               <Route path="qa" element={<QA />} />
             </Route>

@@ -8,18 +8,9 @@ import logging
 import re
 
 from app.config import LLM_API_KEY, LLM_API_BASE, LLM_MODEL
+from app.prompts import EXTRACT_TAGS_ENTITIES
 
 logger = logging.getLogger(__name__)
-
-_EXTRACT_PROMPT = (
-    "从以下文档内容中提取关键概念和实体。\n"
-    "- 概念类（概念、技术、工具、方法、标准、语言）→ 作为标签\n"
-    "- 实体类（人物、组织、地点、事件、产品）→ 作为实体，含关系\n"
-    "以 JSON 格式返回（只返回 JSON，不要其他内容）：\n"
-    '{{"tags":["标签1","标签2"],"entities":[{{"name":"实体名","type":"类型"}}],"relations":[{{"source":"源实体","target":"目标实体","label":"关系描述"}}]}}\n'
-    "根据内容量自动决定提取数量，尽可能全面覆盖所有关键概念和实体。\n\n"
-    "{text}"
-)
 
 
 def extract_tags_and_entities(text: str, max_chars: int = 2000) -> tuple[list[str], dict | None]:
@@ -35,7 +26,7 @@ def extract_tags_and_entities(text: str, max_chars: int = 2000) -> tuple[list[st
 
     import httpx
 
-    prompt = _EXTRACT_PROMPT.format(text=text[:max_chars])
+    prompt = EXTRACT_TAGS_ENTITIES.format(text=text[:max_chars])
 
     last_error = None
     for attempt in (1, 2):

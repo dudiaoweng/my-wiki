@@ -61,12 +61,29 @@ body {
   border-radius: 3px;
   padding: 0 2px;
   transition: background var(--transition-fast);
+  scroll-margin-top: 80px; /* clear sticky top bar */
 }
 
 .entity-highlight-active {
   background: rgba(255, 180, 0, 0.55);
   outline: 2px solid rgba(255, 180, 0, 0.35);
   outline-offset: 1px;
+}
+
+/* ─── Search result highlighting ─── */
+.search-highlight {
+  background: rgba(255, 200, 50, 0.4);
+  border-radius: 3px;
+  padding: 0 2px;
+  transition: background var(--transition-fast);
+  scroll-margin-top: 80px; /* clear sticky top bar */
+}
+
+.search-highlight-active {
+  background: rgba(255, 140, 0, 0.6);
+  outline: 2px solid rgba(255, 140, 0, 0.4);
+  outline-offset: 1px;
+  border-radius: 3px;
 }
 
 /* ─── Reduced motion ─── */

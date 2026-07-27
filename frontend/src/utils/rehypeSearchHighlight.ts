@@ -1,28 +1,28 @@
 import type { Plugin } from 'unified';
 
 /**
- * Create a rehype plugin that wraps all occurrences of `entityName`
- * in <mark class="entity-highlight" data-entity-occurrence="N"
- * id="entity-occurrence-N"> elements within text nodes.
+ * Create a rehype plugin that wraps all occurrences of `searchTerm`
+ * in <mark class="search-highlight" data-search-occurrence="N"
+ * id="search-occurrence-N"> elements within text nodes.
  *
  * - Skips <code>, <pre>, <style>, <script>, <svg> subtrees.
- * - Runs with `gi` flags: case-insensitive for ASCII, exact for CJK.
- * - Returns a no-op plugin when entityName is null/empty.
+ * - Case-insensitive matching.
+ * - Returns a no-op plugin when searchTerm is null/empty.
  */
-export function createEntityHighlightPlugin(entityName: string | null): Plugin {
-  if (!entityName) {
+export function createSearchHighlightPlugin(searchTerm: string | null): Plugin {
+  if (!searchTerm) {
     return function noop() {
       return function transform() {
-        /* no-op: no entity selected */
+        /* no-op: no search term */
       };
     };
   }
 
-  const escaped = entityName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escaped = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const regex = new RegExp(escaped, 'gi');
   const SKIP_TAGS = new Set(['code', 'pre', 'style', 'script', 'svg', 'mark']);
 
-  return function entityHighlightAttacher() {
+  return function searchHighlightAttacher() {
     let occurrenceIndex = 0;
 
     return function transform(tree: any) {
@@ -54,7 +54,6 @@ export function createEntityHighlightPlugin(entityName: string | null): Plugin {
 
           if (matches.length === 0) continue;
 
-          // Build replacements — occurrenceIndex assigned in forward text order
           const replacements: any[] = [];
           let lastEnd = 0;
 
@@ -69,9 +68,9 @@ export function createEntityHighlightPlugin(entityName: string | null): Plugin {
               type: 'element',
               tagName: 'mark',
               properties: {
-                className: ['entity-highlight'],
-                'data-entity-occurrence': occurrenceIndex,
-                id: `entity-occurrence-${occurrenceIndex}`,
+                className: ['search-highlight'],
+                'data-search-occurrence': occurrenceIndex,
+                id: `search-occurrence-${occurrenceIndex}`,
               },
               children: [{ type: 'text', value: text.slice(match.start, match.end) }],
             });
@@ -83,9 +82,7 @@ export function createEntityHighlightPlugin(entityName: string | null): Plugin {
             replacements.push({ type: 'text', value: text.slice(lastEnd) });
           }
 
-          // Replace the single text node with the built nodes
           children.splice(i, 1, ...replacements);
-          // Advance i past the replacements we just inserted
           i += replacements.length - 1;
         }
       }
