@@ -1,0 +1,104 @@
+.container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 20px;
+  background: var(--c-bg);
+}
+
+.card {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 16px;
+  padding: 48px 40px;
+  max-width: 440px;
+  width: 100%;
+  text-align: center;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.08);
+}
+
+.icon {
+  font-size: 56px;
+  display: block;
+  margin-bottom: 16px;
+}
+
+.title {
+  font-size: 22px;
+  font-weight: 700;
+  margin: 0 0 8px;
+  color: var(--c-text);
+}
+
+.message {
+  font-size: 14px;
+  color: var(--c-text-muted);
+  margin: 0 0 24px;
+  line-height: 1.5;
+}
+
+.instructions {
+  text-align: left;
+  font-size: 13px;
+  color: var(--c-text-muted);
+  background: var(--c-bg);
+  border-radius: 10px;
+  padding: 16px 20px;
+  margin-bottom: 24px;
+}
+
+.instructions h2 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 10px;
+  color: var(--c-text);
+}
+
+.instructions ol {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.instructions li {
+  margin-bottom: 4px;
+  line-height: 1.6;
+}
+
+.instructions code {
+  font-size: 12px;
+  background: var(--c-surface);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.retryBtn {
+  width: 100%;
+  padding: 14px;
+  font-size: 16px;
+  font-weight: 600;
+  border: none;
+  border-radius: 10px;
+  background: var(--c-accent);
+  color: #fff;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.retryBtn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.retryBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.error {
+  margin-top: 16px;
+  font-size: 13px;
+  color: var(--c-danger, #d32f2f);
+  padding: 10px 14px;
+  background: var(--c-danger-soft, #fff0f0);
+  border-radius: 8px;
+}

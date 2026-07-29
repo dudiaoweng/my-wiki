@@ -1,17 +1,30 @@
 # 📚 My-Wiki — 个人知识库
 
-基于 AI 的个人知识库系统，支持文章管理、文件上传解析、知识图谱可视化、语义搜索问答。
+基于 AI 的个人知识库系统，支持文章管理、文件上传解析、知识图谱可视化、语义搜索问答，通过 mTLS 客户端证书进行身份验证。
 
 ---
 
 ## 功能
 
 ### 📝 文章管理
-- 创建/编辑/删除文章，Markdown 编写
-- 文件上传自动解析（文本/Word/Excel/PPT/PDF/图片/音视频）
-- 分类管理（颜色标签，创建/编辑/删除，含文章保护）
+- 创建 / 编辑 / 删除文章，Markdown 编写
+- 文件上传自动解析（文本 / Word / Excel / PPT / PDF / 图片 / 音视频）
+- 分类管理（颜色标签，含文章保护）
 - 标签系统（手动 + AI 自动提取）
 - 附件下载（原始文件保留）
+
+### 🔒 证书认证 (mTLS)
+- 双向 TLS 客户端证书验证，无需密码
+- 证书 CN 格式为 `[姓名] [18位身份证号]`，后端自动解析提取
+- **开发模式**：前端显示用户选择页，Vite 代理根据选择动态切换客户端证书
+- **生产模式**：浏览器出示客户端证书即可登录
+- 顶栏右侧显示姓名，hover 显示完整身份证号
+
+### 🔍 文章内搜索
+- 文章详情页顶栏搜索框，实时高亮匹配文本
+- 底部导航条：圆点位置轨道 + ▲▼ 跳转 + 计数
+- 大小写不敏感，跳过代码块
+- 搜索输入防抖，大文章下保持流畅
 
 ### 🤖 AI 能力（需配置 LLM API）
 - **标签提取**：自动从文章内容提取概念标签
@@ -20,19 +33,14 @@
 - **视频分析**：提取关键帧，通过视觉模型生成视频内容描述
 - **音频转写**：自动转写音频为文字（语音识别）
 - **文档摘要**：上传文档自动生成标题
-- **智能问答**：基于知识库的 RAG 问答（语义搜索 + LLM 回答），支持上传图片/音频/视频作为上下文
+- **智能问答**：基于知识库的 RAG 问答（语义搜索 + LLM 回答），支持上传图片 / 音频 / 视频作为上下文
 
 ### 🗺️ 知识图谱
 - D3.js 力导向图可视化
-- 文章/分类/实体三种节点
+- 文章 / 分类 / 实体三种节点
 - 实体间关系边（LLM 提取的关联）
-- 支持缩放、拖拽、节点点击跳转
-
-### 🔍 搜索与过滤
-- 全文搜索
-- 分类筛选
-- 标签过滤
-- 知识图谱节点联动筛选
+- 缩放 / 拖拽 / 节点点击跳转
+- 选中节点高亮，不重建图谱
 
 ### 📊 其他
 - 阅读进度条
@@ -40,6 +48,7 @@
 - Toast 提示
 - 确认对话框
 - 侧边栏响应式
+- 实体出现位置导航（文章内高亮 + 跳转）
 
 ---
 
@@ -54,11 +63,12 @@
 | **构建工具** | Vite 6 |
 | **路由** | react-router-dom v6 |
 | **可视化** | D3.js v7 |
-| **Markdown** | react-markdown + remark-gfm |
+| **Markdown** | react-markdown + remark-gfm + rehype-raw |
 | **HTTP 客户端** | httpx (后端) / fetch (前端) |
 | **文件解析** | python-docx / openpyxl / python-pptx / PyPDF2 / OpenCV |
 | **音频处理** | wave / audioop / ffmpeg |
 | **AI 接口** | OpenAI 兼容 API（智谱 GLM / GPT 系列等） |
+| **认证** | mTLS 双向 TLS（ssl.CERT_OPTIONAL + WWW-Authenticate） |
 
 ---
 
@@ -68,32 +78,36 @@
 my-wiki/
 ├── backend/                       # 后端
 │   ├── app/
-│   │   ├── main.py                # FastAPI 入口 + 种子数据
+│   │   ├── main.py                # FastAPI 入口 + 种子数据 + mTLS + SPA 服务
 │   │   ├── database.py            # SQLAlchemy 引擎 + SQLite 外键启用
-│   │   ├── dependencies.py        # FastAPI 依赖注入 (get_db)
 │   │   ├── models.py              # 数据模型 (Article/Category/EntityInfo/Chunk)
 │   │   ├── schemas.py             # Pydantic 请求/响应模型
-│   │   ├── config.py              # 集中配置（LLM/Vision/ASR/Embedding）
+│   │   ├── config.py              # 集中配置（LLM/Vision/ASR/Embedding/TLS）
+│   │   ├── auth.py                # mTLS 客户端证书验证依赖
+│   │   ├── prompts.py             # 所有 LLM 提示词模板
+│   │   ├── dependencies.py        # FastAPI 依赖注入 (get_db)
 │   │   ├── llm_extract.py         # 共享 LLM 标签+实体提取
 │   │   ├── utils.py               # 共享工具（ffmpeg 查找等）
 │   │   └── routes/
-│   │       ├── articles.py        # 文章 CRUD + 下载
+│   │       ├── articles.py        # 文章 CRUD + 后台 LLM 增强
 │   │       ├── categories.py      # 分类 CRUD
 │   │       ├── tags.py            # 标签 CRUD
 │   │       ├── entities.py        # 实体 CRUD + 附加信息
 │   │       ├── graph.py           # 知识图谱数据
 │   │       ├── stats.py           # 统计信息
 │   │       ├── qa.py              # RAG 问答 (语义搜索 + LLM)
-│   │       └── upload.py          # 文件上传 + 解析 + AI 提取
+│   │       └── upload.py          # 文件上传 + 解析 + AI 增强
+│   ├── static/                    # 前端构建产物（生产模式）
 │   ├── uploads/                   # 上传文件存储
 │   ├── requirements.txt
 │   └── .env                       # 环境变量 (需自行创建)
 ├── frontend/                      # 前端
 │   ├── src/
 │   │   ├── main.tsx               # React 入口
-│   │   ├── App.tsx                # 路由配置
+│   │   ├── App.tsx                # 路由配置 + mTLS 认证守卫
 │   │   ├── api/client.ts          # API 客户端
-│   │   ├── context/AppProvider.tsx # 全局状态 (编辑器/版本号/确认框)
+│   │   ├── api/auth.ts            # mTLS 认证状态检查
+│   │   ├── context/AppProvider.tsx # 全局状态 (编辑器/版本号/确认框/用户)
 │   │   ├── hooks/
 │   │   │   ├── useArticles.ts     # 文章列表状态
 │   │   │   ├── useCategories.ts   # 分类状态 + 操作
@@ -104,9 +118,12 @@ my-wiki/
 │   │   │   ├── useTags.ts         # 标签状态
 │   │   │   ├── useToast.tsx       # Toast 通知
 │   │   │   ├── useKeyboardShortcuts.ts
-│   │   │   └── useReadingProgress.ts
+│   │   │   ├── useReadingProgress.ts
+│   │   │   ├── useArticleSearch.ts      # 文章内搜索 (IntersectionObserver)
+│   │   │   └── useEntityOccurrences.ts  # 实体出现位置追踪
 │   │   ├── components/
 │   │   │   ├── Layout/            # Layout / TopBar / Sidebar
+│   │   │   ├── Hero.tsx           # 首页
 │   │   │   ├── ArticleCard.tsx    # 文章卡片
 │   │   │   ├── ArticleList.tsx    # 文章列表 + EntityPanel
 │   │   │   ├── ArticleDetail.tsx  # 文章详情页 (独立路由)
@@ -114,19 +131,34 @@ my-wiki/
 │   │   │   ├── EditorModal.tsx    # 文章编辑弹窗
 │   │   │   ├── UploadModal.tsx    # 文件上传弹窗
 │   │   │   ├── EntityPanel.tsx    # 实体面板 (列表 + 知识图谱)
+│   │   │   ├── EntityOccurrenceBar.tsx  # 实体出现导航条
 │   │   │   ├── KnowledgeGraph.tsx # 全屏知识图谱页
-│   │   │   ├── Hero.tsx           # 首页
 │   │   │   ├── QA.tsx             # 问答页面
+│   │   │   ├── AttachmentGallery.tsx  # 附件画廊
+│   │   │   ├── Lightbox.tsx       # 文件预览灯箱
+│   │   │   ├── SearchNavBar.tsx   # 文章内搜索导航条
+│   │   │   ├── CertErrorPage.tsx  # mTLS 证书错误页面
+│   │   │   ├── LoginPage.tsx      # 开发模式用户选择页面
 │   │   │   ├── ConfirmDialog.tsx  # 确认弹窗
 │   │   │   ├── Toast.tsx          # Toast 容器
 │   │   │   └── ReadingProgress.tsx
-│   │   ├── utils/entityIcons.ts   # 实体类型图标映射
+│   │   ├── utils/
+│   │   │   ├── entityIcons.ts     # 实体类型图标映射
+│   │   │   ├── rehypeEntityHighlight.ts  # 实体高亮 rehype 插件
+│   │   │   └── rehypeSearchHighlight.ts  # 搜索高亮 rehype 插件
 │   │   ├── types/                 # TypeScript 类型定义
 │   │   └── styles/                # 全局样式 (reset/tokens/global)
 │   ├── index.html
 │   ├── vite.config.ts
 │   └── package.json
-└── knowledge-base.html            # 前端入口文件
+├── certs/                         # PKI 证书
+│   ├── ca.key / ca.crt            # CA 根证书
+│   ├── server.key / server.crt    # 服务器证书 (CN=localhost)
+│   ├── client.key                 # 客户端私钥（共享）
+│   ├── client_zh.crt / client_zh.p12  # 周衡的客户端证书
+│   ├── client_xl.crt / client_xl.p12  # 谢林的客户端证书
+│   └── readme.txt                 # 证书生成说明
+└── README.md
 ```
 
 ---
@@ -139,69 +171,102 @@ my-wiki/
 - Node.js 18+
 - LLM API Key（可选，推荐智谱 GLM）
 
-### 1. 启动后端
+### 1. 安装依赖
 
 ```bash
+# 后端
 cd backend
-
-# 创建虚拟环境
 python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-
-# 安装依赖
+source .venv/bin/activate    # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-# 配置环境变量 (创建 .env 文件)
-cat > .env << EOF
+# 前端
+cd frontend
+npm install
+```
+
+### 2. 配置环境变量
+
+在 `backend/` 下创建 `.env` 文件：
+
+```bash
+# ─── 基础设施 ───
 DATABASE_URL=sqlite:///./knowledge_base.db
 UPLOAD_DIR=./uploads
-CORS_ORIGINS=http://localhost:5173
 
-# LLM 文本模型（标题生成、实体提取、纯文本问答）
+# ─── LLM 文本模型 ───
 LLM_API_KEY=your-api-key-here
 LLM_API_BASE=https://open.bigmodel.cn/api/paas/v4
 LLM_MODEL=GLM-5.2
 
-# 视觉模型（图片描述、视频分析）
+# ─── 视觉模型 ───
 VISION_API_KEY=your-vision-api-key
 VISION_API_BASE=https://open.bigmodel.cn/api/paas/v4
 VISION_MODEL=GLM-5V-Turbo
 
-# 语音识别模型（音频转文字）
+# ─── 语音识别模型 ───
 ASR_API_KEY=your-asr-api-key
 ASR_API_BASE=https://open.bigmodel.cn/api/paas/v4
 ASR_MODEL=GLM-ASR-2512
 
-# 嵌入模型（语义搜索）
+# ─── 嵌入模型 ───
 EMBEDDING_API_KEY=your-embedding-api-key
 EMBEDDING_API_BASE=https://open.bigmodel.cn/api/paas/v4
 EMBEDDING_MODEL=embedding-3
 
-# 问答温度
+# ─── 问答 ───
 QA_TEMPERATURE=0.2
-EOF
 
-# 启动服务 (端口 8000)
-uvicorn app.main:app --reload --port 8000
+# ─── TLS / mTLS 证书认证 ───
+SSL_CERTFILE=../certs/server.crt
+SSL_KEYFILE=../certs/server.key
+SSL_CA_CERTS=../certs/ca.crt
+ALLOWED_CERT_SUBJECTS=/C=CN/ST=32/L=00/O=11/OU=00/CN=zhouheng 320923197608270018
 ```
 
-### 2. 启动前端
+### 3. 导入客户端证书
+
+开发和生产模式都需要浏览器出示客户端证书。双击 `certs/client_zh.p12`（或 `client_xl.p12`），密码 `123456`，导入到"当前用户"→"个人"存储。
+
+### 4. 启动
+
+**开发模式**（前后端分离，热重载）：
 
 ```bash
+# 终端 1：启动后端（HTTPS + mTLS，热重载）
+cd backend
+.venv\Scripts\python -m app.main     # Windows
+# source .venv/bin/python -m app.main  # macOS/Linux
+
+# 终端 2：启动前端（HTTPS 开发服务器，Vite 代理携带客户端证书连接后端）
 cd frontend
-
-# 安装依赖
-npm install
-
-# 启动开发服务器 (端口 5173)
 npm run dev
+# 访问 https://localhost:5173 → 显示用户选择页面 → 选择身份登录
+# 后端自动切换对应的客户端证书，无需重启
 ```
 
-### 3. 访问
+> Vite 代理根据前端的 `X-Dev-User` 请求头动态选择客户端证书。用户注册表在 `vite.config.ts` 的 `DEV_USERS` 中配置，添加新用户只需放入证书文件并更新注册表。
 
-打开浏览器访问 **http://localhost:5173**
+**生产模式**（后端直接提供前端，单端口）：
 
-首次启动会自动创建 SQLite 数据库并填充示例数据（5 篇示例文章、4 个分类）。
+```bash
+cd frontend && npm run build          # 构建前端 → backend/static/
+cd backend && .venv\Scripts\python run.py  # 启动 (HTTPS + mTLS)
+# 访问 https://localhost:8000 → 浏览器弹出证书选择框
+```
+
+### 5. 访问
+
+开发模式访问 **https://localhost:5173**，生产模式访问 **https://localhost:8000**：
+
+**开发模式**：
+1. 首次访问显示用户选择页面 → 选择身份 → 点击「登录」
+2. 进入知识库，顶栏右侧显示姓名，hover 显示完整身份证号
+
+**生产模式**：
+1. 首次访问浏览器提示"不安全" → 点击"高级 → 继续访问"
+2. 浏览器弹出证书选择框 → 选择对应证书 → 确认
+3. 进入知识库，顶栏右侧显示姓名，hover 显示完整身份证号
 
 ---
 
@@ -213,9 +278,9 @@ npm run dev
 |------|------|--------|
 | `DATABASE_URL` | SQLite 数据库路径 | `sqlite:///./knowledge_base.db` |
 | `UPLOAD_DIR` | 上传文件存储目录 | `./uploads` |
-| `CORS_ORIGINS` | 前端地址 | `http://localhost:5173` |
+| `CORS_ORIGINS` | 跨域白名单（Vite 代理模式下通常不需要） | `https://localhost:5173` |
 
-### LLM 文本模型
+### LLM 文本模型（标题生成、实体提取、纯文本问答）
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
@@ -253,33 +318,46 @@ npm run dev
 |------|------|--------|
 | `QA_TEMPERATURE` | LLM 回答温度 | `0.4` |
 
-> 每种模型可配置独立的 API Key/Base/Model。未配置的字段自动回退到 LLM 配置。
+### TLS / mTLS
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `SSL_CERTFILE` | 服务器证书路径 | `certs/server.crt` |
+| `SSL_KEYFILE` | 服务器私钥路径 | `certs/server.key` |
+| `SSL_CA_CERTS` | CA 证书路径 | `certs/ca.crt` |
+| `ALLOWED_CERT_SUBJECTS` | 允许的证书 subject DN（逗号分隔） | (空) |
+
 
 ---
 
 ## API 概览
 
-| 路由 | 说明 |
-|------|------|
-| `GET/POST /api/articles` | 文章列表 / 创建 |
-| `GET/PUT/DELETE /api/articles/{id}` | 文章详情 / 更新 / 删除 |
-| `GET /api/articles/{id}/download` | 下载附件 |
-| `GET/POST /api/categories` | 分类列表 / 创建 |
-| `PUT/DELETE /api/categories/{id}` | 分类更新 / 删除 |
-| `GET/POST /api/tags` | 标签列表 / 添加 |
-| `PUT /api/tags/rename` | 标签重命名 |
-| `POST /api/tags/remove` | 删除标签 |
-| `GET/POST /api/entities` | 实体列表 / 添加 |
-| `PUT /api/entities/update` | 更新实体 |
-| `DELETE /api/entities/remove` | 删除实体 |
-| `GET/POST /api/entities/{name}/info` | 实体附加信息 |
-| `GET /api/graph` | 知识图谱数据 |
-| `GET /api/stats` | 统计 (文章/分类/标签/实体数) |
-| `POST /api/qa/ask` | RAG 问答 |
-| `POST /api/qa/parse-file` | 为问答解析上传文件 |
-| `POST /api/upload` | 文件上传 |
-| `GET /api/media/{filename}` | 媒体文件直链 |
-| `GET /api/health` | 健康检查 |
+所有 `/api/*` 路由受 mTLS 保护。
+
+| 方法 | 路由 | 说明 |
+|------|------|------|
+| `GET/POST` | `/api/articles` | 文章列表 / 创建 |
+| `GET/PUT/DELETE` | `/api/articles/{id}` | 文章详情 / 更新 / 删除 |
+| `GET` | `/api/articles/{id}/download` | 下载附件 |
+| `GET/POST` | `/api/categories` | 分类列表 / 创建 |
+| `PUT/DELETE` | `/api/categories/{id}` | 分类更新 / 删除 |
+| `GET/POST` | `/api/tags` | 标签列表 / 添加 |
+| `PUT` | `/api/tags/rename` | 标签重命名 |
+| `POST` | `/api/tags/remove` | 删除标签 |
+| `GET/POST` | `/api/entities` | 实体列表 / 添加 |
+| `PUT` | `/api/entities/update` | 更新实体 |
+| `DELETE` | `/api/entities/remove` | 删除实体 |
+| `GET/POST` | `/api/entities/{name}/info` | 实体附加信息 |
+| `PUT/DELETE` | `/api/entities/{name}/info/{id}` | 更新 / 删除附加信息 |
+| `GET` | `/api/graph` | 知识图谱数据 |
+| `GET` | `/api/stats` | 统计 (文章/分类/标签/实体数) |
+| `POST` | `/api/qa/ask` | RAG 问答 |
+| `POST` | `/api/qa/parse-file` | 为问答解析上传文件 |
+| `POST` | `/api/upload` | 文件上传 |
+| `GET` | `/api/media/{filename}` | 媒体文件直链 |
+| `GET` | `/api/auth/status` | 证书认证状态 + 用户信息 (name/id_number/display_name) |
+| `GET` | `/api/auth/login` | 页面导航登录（生产模式，重定向回前端） |
+| `GET` | `/api/health` | 健康检查 |
 
 ---
 
@@ -288,19 +366,14 @@ npm run dev
 ### Article (文章)
 ```
 id, title, content, category_id, tags (JSON数组), entities (JSON对象),
-created_at, updated_at, attachment_path/name/type
+created_at, updated_at, attachment_path/name/type, processing
 ```
 
 ### entities 格式
 ```json
 {
-  "entities": [
-    {"name": "机器学习", "type": "技术"},
-    {"name": "OpenAI", "type": "组织"}
-  ],
-  "relations": [
-    {"source": "OpenAI", "target": "机器学习", "label": "研发"}
-  ]
+  "entities": [{"name": "机器学习", "type": "技术"}],
+  "relations": [{"source": "OpenAI", "target": "机器学习", "label": "研发"}]
 }
 ```
 
@@ -309,14 +382,14 @@ created_at, updated_at, attachment_path/name/type
 id, name, color
 ```
 
-### EntityInfo (实体附加信息)
-```
-id, entity_name, category, content, created_at, updated_at
-```
-
 ### ArticleChunk (文章分块 + 向量)
 ```
 id, article_id, chunk_index, chunk_text, embedding (JSON数组)
+```
+
+### EntityInfo (实体附加信息)
+```
+id, entity_name, category, content, created_at, updated_at
 ```
 
 ---
@@ -324,14 +397,50 @@ id, article_id, chunk_index, chunk_text, embedding (JSON数组)
 ## 架构说明
 
 ### 前后端分离
-- 后端 FastAPI 运行在 `localhost:8000`，提供 REST API
-- 前端 Vite 运行在 `localhost:5173`，开发时通过 Vite proxy 转发 API 请求
-- 生产环境可将前端构建产物放到后端 `/static` 目录下
+- 后端 FastAPI 运行在 `https://localhost:8000`，提供 REST API（始终 HTTPS + mTLS）
+- 开发时前端 Vite 运行在 `https://localhost:5173`，通过自定义代理中间件转发 API 请求到后端（根据 `X-Dev-User` 请求头动态选择客户端证书）
+- 生产环境前端构建产物放到 `backend/static/`，由后端直接提供服务（同源）
+
+### mTLS 证书认证
+- 后端使用 `ssl.CERT_OPTIONAL` + `WWW-Authenticate` 机制：初始连接允许无证书，访问受保护 API 时返回 401 触发浏览器证书选择对话框
+- 证书 CN 格式为 `[姓名] [18位身份证号]`（如 `谢林 320100198601010018`），后端自动解析为 `name` 和 `id_number`
+- **开发模式**：前端显示用户选择页面，Vite 代理中间件根据 `X-Dev-User` 请求头动态选择客户端证书连接后端。用户注册表在 `vite.config.ts` 的 `DEV_USERS` 中配置
+- **生产模式**：浏览器直连后端，页面导航时触发原生证书选择对话框
+- 顶栏右侧显示姓名，hover 显示完整身份证号
+- 证书由自签 CA (`certs/ca.crt`) 签发，客户端 `.p12` 文件导入浏览器即可
+
+### 开发用户注册表
+
+开发模式下的可选用户在 `vite.config.ts` 的 `DEV_USERS` 和 `LoginPage.tsx` 的 `DEV_USERS` 中维护：
+
+```ts
+// vite.config.ts — 代理层（证书路径映射）
+const DEV_USERS = {
+  zh: { agent: readAgent('client_zh.crt', 'client.key'), displayName: '周衡' },
+  xl: { agent: readAgent('client_xl.crt', 'client.key'), displayName: '谢林' },
+};
+
+// LoginPage.tsx — 前端界面（用户选择列表）
+const DEV_USERS = [
+  { key: 'zh', displayName: '周衡' },
+  { key: 'xl', displayName: '谢林' },
+];
+```
+
+添加新用户步骤：
+1. 生成客户端证书放入 `certs/` 目录
+2. 在 `vite.config.ts` 的 `DEV_USERS` 中注册证书路径
+3. 在 `LoginPage.tsx` 的 `DEV_USERS` 中添加界面入口
+4. 将用户证书 CN（格式 `姓名 身份证`）加入 `.env` 的 `ALLOWED_CERT_SUBJECTS`
 
 ### 模型配置分离
 - 四种模型类型独立配置：LLM 文本 / Vision 视觉 / ASR 语音识别 / Embedding 嵌入
-- 每种模型有独立的 API Key、Base URL、Model 名称，回退到 LLM 配置
-- 所有配置统一在 `app/config.py` 中管理，各模块通过 import 引用
+- 每种模型有独立的 API Key、Base URL、Model 名称，未配置自动回退到 LLM 配置
+- 所有配置统一在 `app/config.py` 中管理
+
+### 提示词管理
+- 所有 LLM 提示词集中在 `app/prompts.py`，使用 `{variable}` 占位符
+- 涵盖：标签/实体提取、图片/视频描述、标题生成、问答系统提示
 
 ### LLM 集成
 - 标签/实体提取：共享 `app/llm_extract.py`（60s 超时 + 2 次重试 + JSON 容错解析）
@@ -344,14 +453,21 @@ id, article_id, chunk_index, chunk_text, embedding (JSON数组)
 - `/api/graph` 端点聚合所有文章/分类/实体节点 + 边
 - 30 秒 TTL 缓存避免全表扫描
 - 前端 `useD3ForceGraph` 共享钩子供 `EntityPanel` 和 `KnowledgeGraph` 共用
+- 选中节点仅更新视觉高亮，不重建图谱
 - 实体节点使用类型图标区分（人物/组织/地点/事件/产品/其他）
 
 ### 向量搜索 (RAG)
 - 文章先上传显示，后台 LLM 增强（标题/内容/标签/实体）完成后才计算嵌入
 - 文章按 Markdown 标题分段，每段调用 embedding API 生成向量
-- 增量计算（`asyncio.Lock` 保护 + 记录已处理文章数，跳过已生成向量的文章）
+- 增量计算（`asyncio.Lock` 保护 + 记录已处理文章数）
 - 问答时计算 query 向量与所有 chunk 的余弦相似度
 - LLM 不可用时自动降级为关键词匹配（CJK 双字母组 + 英文单词）
+
+### 文章内搜索
+- 使用 rehype 插件在渲染的 HTML 文本节点中高亮匹配项
+- `useDeferredValue` 延迟搜索防抖，大文章下保持输入流畅
+- IntersectionObserver 自动跟踪当前可见匹配项
+- 底部导航条支持圆点跳转 + ▲▼ 逐项导航
 
 ---
 

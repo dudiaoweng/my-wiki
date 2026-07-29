@@ -12,6 +12,7 @@ from app.dependencies import get_db
 from app.database import SessionLocal
 from app.models import Article, Category, EntityInfo
 from app.schemas import ArticleCreate, ArticleUpdate, ArticleResponse
+from app.auth import get_client_cert, CertInfo
 from app.llm_extract import extract_tags_and_entities
 from app.routes.upload import (
     generate_title,
@@ -332,7 +333,9 @@ async def create_article(
     tags: str = Form(default="[]"),
     files: list[UploadFile] = File(default=[]),
     db: Session = Depends(get_db),
+    cert: CertInfo = Depends(get_client_cert),
 ):
+    user_cn = cert.display_name or ""
     # Parse tags from JSON string (Form data)
     try:
         user_tags: list[str] = json.loads(tags) if isinstance(tags, str) else (tags or [])
@@ -416,6 +419,8 @@ async def create_article(
         attachment_path=attachment_path,
         attachment_name=attachment_name,
         attachment_type=attachment_type,
+        created_by=user_cn or None,
+        updated_by=user_cn or None,
     )
     db.add(article)
     db.commit()
@@ -443,8 +448,10 @@ async def update_article(
     files: list[UploadFile] = File(default=[]),
     keep_attachments: str = Form(default=""),
     db: Session = Depends(get_db),
+    cert: CertInfo = Depends(get_client_cert),
 ):
     _validate_article_id(article_id)
+    user_cn = cert.display_name or ""
     # Parse keep list — only these existing attachments should be preserved.
     # keep_attachments="" means "not provided" (keep all for backward compat).
     # keep_attachments="[...]" means the frontend explicitly sent the list.
@@ -470,6 +477,9 @@ async def update_article(
     article = db.query(Article).filter(Article.id == article_id).first()
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
+
+    # Track who is making the modification
+    article.updated_by = user_cn or None
 
     # Parse tags
     try:
