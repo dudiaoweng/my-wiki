@@ -22,6 +22,13 @@ function formatDate(iso: string): string {
   return d.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
 }
 
+/** Extract the name portion from a CN like "谢林 320100198601010018". */
+function formatUser(cn: string | null): string {
+  if (!cn) return '';
+  const match = cn.match(/^(.+?)\s+\d{18}$/);
+  return match ? match[1] : cn;
+}
+
 export function ArticleDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -234,7 +241,13 @@ export function ArticleDetail() {
         </h1>
         <div className={styles.meta}>
           <span>📅 创建于 {formatDate(article.created_at)}</span>
+          {article.created_by && (
+            <span title={article.created_by}>👤 {formatUser(article.created_by)}</span>
+          )}
           <span>✏️ 更新于 {formatDate(article.updated_at)}</span>
+          {article.updated_by && (
+            <span title={article.updated_by}>👤 {formatUser(article.updated_by)}</span>
+          )}
           <span>🔖 {entityCount} 个实体</span>
           <span>🔗 {relationCount} 个关系</span>
         </div>

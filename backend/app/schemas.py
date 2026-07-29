@@ -81,6 +81,8 @@ class ArticleResponse(BaseModel):
     category_id: Optional[str]
     tags: list[str]
     entities: Optional[dict] = None  # LLM 提取的实体+关系
+    created_by: Optional[str] = None  # 创建人（证书 CN）
+    updated_by: Optional[str] = None  # 更新人（证书 CN）
     created_at: datetime
     updated_at: datetime
     category: Optional[CategoryResponse] = None

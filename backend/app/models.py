@@ -36,6 +36,8 @@ class Article(Base):
     tags = Column(Text, nullable=False, default="[]")
     entities = Column(Text, nullable=True, default=None)  # LLM 提取的实体+关系 JSON
     processing = Column(Text, nullable=True, default=None)  # "processing" | None(completed)
+    created_by = Column(String(200), nullable=True, default=None)   # CN from client cert
+    updated_by = Column(String(200), nullable=True, default=None)   # CN from client cert
     created_at = Column(DateTime, default=utcnow, nullable=False)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False, index=True)
     attachment_path = Column(String, nullable=True)

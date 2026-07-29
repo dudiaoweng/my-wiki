@@ -34,4 +34,14 @@ QA_TEMPERATURE = float(os.getenv("QA_TEMPERATURE", "0.4"))
 # ── Infrastructure ──
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./knowledge_base.db")
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "./uploads")
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173")
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "https://localhost:5173")
+
+# ── TLS / mTLS ──
+SSL_CERTFILE = os.getenv("SSL_CERTFILE", "certs/server.crt")
+SSL_KEYFILE = os.getenv("SSL_KEYFILE", "certs/server.key")
+SSL_CA_CERTS = os.getenv("SSL_CA_CERTS", "certs/ca.crt")
+ALLOWED_CERT_SUBJECTS = [
+    s.strip()
+    for s in os.getenv("ALLOWED_CERT_SUBJECTS", "").split(",")
+    if s.strip()
+]

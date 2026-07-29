@@ -28,7 +28,7 @@ def init_db():
     Base.metadata.create_all(bind=engine)
     # Add missing columns (SQLite doesn't support ALTER TABLE ADD COLUMN IF NOT EXISTS)
     with engine.connect() as conn:
-        for col in ["entities", "processing"]:
+        for col in ["entities", "processing", "created_by", "updated_by"]:
             try:
                 conn.exec_driver_sql(f"ALTER TABLE articles ADD COLUMN {col} TEXT")
             except Exception:

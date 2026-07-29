@@ -23,6 +23,8 @@ export interface Article {
   category_id: string | null;
   tags: string[];
   entities: ArticleEntities | null;
+  created_by: string | null;
+  updated_by: string | null;
   created_at: string;
   updated_at: string;
   category: Category | null;

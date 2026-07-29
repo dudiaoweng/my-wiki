@@ -3,11 +3,10 @@ import { useApp } from '../../context/AppProvider';
 import styles from './TopBar.module.css';
 
 export function TopBar() {
-  const { toggleSidebar } = useApp();
+  const { toggleSidebar, userName, userIdNumber } = useApp();
 
   return (
     <div className={styles.topbar}>
-      {/* Left: brand */}
       <div className={styles.left}>
         <button className={styles.menuBtn} onClick={toggleSidebar} aria-label="菜单">
           ☰
@@ -18,7 +17,6 @@ export function TopBar() {
         </Link>
       </div>
 
-      {/* Right: tools */}
       <div className={styles.right}>
         <NavLink
           to="/qa"
@@ -29,6 +27,11 @@ export function TopBar() {
         >
           🤖 <span className={styles.toolLabel}>智能问答</span>
         </NavLink>
+        {userName && (
+          <span className={styles.userInfo} title={userIdNumber || undefined}>
+            👤 {userName}
+          </span>
+        )}
       </div>
     </div>
   );

@@ -38,6 +38,11 @@ interface AppContextValue {
   notifyCategoriesChanged: () => void;
 
   searchInputRef: React.RefObject<HTMLInputElement>;
+
+  /** Current authenticated user name (from mTLS cert CN or dev user selection) */
+  userName: string;
+  /** Full ID number from the certificate CN (shown in tooltip) */
+  userIdNumber: string;
 }
 
 const AppContext = createContext<AppContextValue>(null!);
@@ -46,7 +51,13 @@ export function useApp() {
   return useContext(AppContext);
 }
 
-export function AppProvider({ children }: { children: ReactNode }) {
+interface AppProviderProps {
+  children: ReactNode;
+  userName?: string;
+  userIdNumber?: string;
+}
+
+export function AppProvider({ children, userName = '', userIdNumber = '' }: AppProviderProps) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [editorState, setEditorState] = useState<EditorState | null>(null);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
@@ -101,12 +112,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
     closeConfirm,
     executeConfirm,
     searchInputRef,
+    userName,
+    userIdNumber,
   }), [
     sidebarOpen, editorState, uploaderOpen, articleVersion,
     categoriesVersion,
     confirmState, toggleSidebar, closeSidebar, openEditor,
     closeEditor, openUploader, closeUploader, notifyArticleSaved,
     notifyCategoriesChanged, requestConfirm, closeConfirm, executeConfirm, searchInputRef,
+    userName, userIdNumber,
   ]);
 
   return (

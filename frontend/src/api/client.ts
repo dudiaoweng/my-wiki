@@ -3,6 +3,7 @@ import type { Category, CategoryCreate } from '../types/category';
 import type { Stats } from '../types/stats';
 import type { GraphData } from '../types/graph';
 import type { QARequest, QAResponse, FileParseResult, FileStatusResult } from '../types/qa';
+import { getDevUserHeader } from './auth';
 
 export interface EntityInfoItem {
   id: string;
@@ -25,21 +26,41 @@ class ApiError extends Error {
   }
 }
 
+/** Inject X-Dev-User header so the Vite proxy picks the right client cert (dev mode). */
+function mergeHeaders(extra?: HeadersInit): Headers {
+  const headers = new Headers(extra);
+  const user = getDevUserHeader();
+  if (user) headers.set('X-Dev-User', user);
+  return headers;
+}
+
+/** Handle API error responses — extract detail, dispatch auth:forbidden on 403. */
+async function handleError(res: Response): Promise<never> {
+  if (res.status === 403) {
+    window.dispatchEvent(new CustomEvent('auth:forbidden'));
+  }
+  const body = await res.json().catch(() => ({ detail: res.statusText }));
+  let detail = body.detail ?? res.statusText;
+  if (Array.isArray(detail)) {
+    detail = detail.map((d: { msg?: string }) => d.msg ?? JSON.stringify(d)).join('; ');
+  }
+  throw new ApiError(res.status, detail);
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const { headers: customHeaders, ...restOpts } = options ?? {};
+  const headers = mergeHeaders(customHeaders);
+  if (!headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+
   const res = await fetch(`${BASE}${path}`, {
     ...restOpts,
-    headers: { 'Content-Type': 'application/json', ...customHeaders },
+    headers,
   });
 
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ detail: res.statusText }));
-    let detail = body.detail ?? res.statusText;
-    // FastAPI validation errors return detail as an array of { loc, msg }
-    if (Array.isArray(detail)) {
-      detail = detail.map((d: { msg?: string }) => d.msg ?? JSON.stringify(d)).join('; ');
-    }
-    throw new ApiError(res.status, detail);
+    return handleError(res);
   }
 
   if (res.status === 204) return undefined as T;
@@ -75,6 +96,7 @@ export const api = {
 
     const res = await fetch(`${BASE}/articles`, {
       method: 'POST',
+      headers: mergeHeaders(),
       body: formData,
     });
 
@@ -104,6 +126,7 @@ export const api = {
 
     const res = await fetch(`${BASE}/articles/${id}`, {
       method: 'PUT',
+      headers: mergeHeaders(),
       body: formData,
     });
 
@@ -243,6 +266,7 @@ export const api = {
     try {
       const res = await fetch(`${BASE}/qa/parse-file`, {
         method: 'POST',
+        headers: mergeHeaders(),
         body: formData,
         signal: controller.signal,
       });
@@ -273,6 +297,7 @@ export const api = {
 
     const res = await fetch(`${BASE}/upload`, {
       method: 'POST',
+      headers: mergeHeaders(),
       body: formData,
     });
 
