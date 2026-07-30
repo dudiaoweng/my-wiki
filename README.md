@@ -8,6 +8,8 @@
 
 ### 📝 文章管理
 - 创建 / 编辑 / 删除文章，Markdown 编写
+- 记录创建人和更新人（从 mTLS 证书 CN 提取姓名+身份证号）
+- 仅更新过的文章显示更新时间/更新人
 - 文件上传自动解析（文本 / Word / Excel / PPT / PDF / 图片 / 音视频）
 - 分类管理（颜色标签，含文章保护）
 - 标签系统（手动 + AI 自动提取）
@@ -15,9 +17,9 @@
 
 ### 🔒 证书认证 (mTLS)
 - 双向 TLS 客户端证书验证，无需密码
-- 证书 CN 格式为 `[姓名] [18位身份证号]`，后端自动解析提取
+- 证书 CN 格式为 `[姓名] [18位身份证号]`，后端自动解析为 name/id_number
 - **开发模式**：前端显示用户选择页，Vite 代理根据选择动态切换客户端证书
-- **生产模式**：浏览器出示客户端证书即可登录
+- **生产模式**：双端口架构 — 8000 展示登录页（Hero + 证书登录按钮），点击后跳转 8443 触发证书选择框，登录后刷新不掉线
 - 顶栏右侧显示姓名，hover 显示完整身份证号
 
 ### 🔍 文章内搜索
@@ -68,7 +70,7 @@
 | **文件解析** | python-docx / openpyxl / python-pptx / PyPDF2 / OpenCV |
 | **音频处理** | wave / audioop / ffmpeg |
 | **AI 接口** | OpenAI 兼容 API（智谱 GLM / GPT 系列等） |
-| **认证** | mTLS 双向 TLS（ssl.CERT_OPTIONAL + WWW-Authenticate） |
+| **认证** | mTLS 双向 TLS（8000: CERT_NONE 登录页 / 8443: CERT_REQUIRED 应用） |
 
 ---
 
@@ -226,7 +228,9 @@ ALLOWED_CERT_SUBJECTS=/C=CN/ST=32/L=00/O=11/OU=00/CN=zhouheng 320923197608270018
 
 ### 3. 导入客户端证书
 
-开发和生产模式都需要浏览器出示客户端证书。双击 `certs/client_zh.p12`（或 `client_xl.p12`），密码 `123456`，导入到"当前用户"→"个人"存储。
+生产模式下浏览器需要出示客户端证书（8443 端口 `CERT_REQUIRED`）。双击 `certs/client_zh.p12`（或 `client_xl.p12`），密码 `123456`，导入到"当前用户"→"个人"存储。
+
+开发模式无需导入 — Vite 代理直接使用 `certs/` 目录下的证书文件连接后端。
 
 ### 4. 启动
 
@@ -336,11 +340,11 @@ cd backend && .venv\Scripts\python run.py  # 启动双端口服务
 
 ## API 概览
 
-所有 `/api/*` 路由受 mTLS 保护。
+除 `/api/stats` 外，所有 `/api/*` 路由受 mTLS 保护。
 
 | 方法 | 路由 | 说明 |
 |------|------|------|
-| `GET/POST` | `/api/articles` | 文章列表 / 创建 |
+| `GET/POST` | `/api/articles` | 文章列表 / 创建（含 created_by/updated_by） |
 | `GET/PUT/DELETE` | `/api/articles/{id}` | 文章详情 / 更新 / 删除 |
 | `GET` | `/api/articles/{id}/download` | 下载附件 |
 | `GET/POST` | `/api/categories` | 分类列表 / 创建 |
@@ -354,7 +358,7 @@ cd backend && .venv\Scripts\python run.py  # 启动双端口服务
 | `GET/POST` | `/api/entities/{name}/info` | 实体附加信息 |
 | `PUT/DELETE` | `/api/entities/{name}/info/{id}` | 更新 / 删除附加信息 |
 | `GET` | `/api/graph` | 知识图谱数据 |
-| `GET` | `/api/stats` | 统计 (文章/分类/标签/实体数) |
+| `GET` | `/api/stats` | 统计（公开端点，登录页 Hero 使用） |
 | `POST` | `/api/qa/ask` | RAG 问答 |
 | `POST` | `/api/qa/parse-file` | 为问答解析上传文件 |
 | `POST` | `/api/upload` | 文件上传 |
@@ -370,7 +374,8 @@ cd backend && .venv\Scripts\python run.py  # 启动双端口服务
 ### Article (文章)
 ```
 id, title, content, category_id, tags (JSON数组), entities (JSON对象),
-created_at, updated_at, attachment_path/name/type, processing
+created_by, updated_by, created_at, updated_at,
+attachment_path/name/type, processing
 ```
 
 ### entities 格式
@@ -401,9 +406,8 @@ id, entity_name, category, content, created_at, updated_at
 ## 架构说明
 
 ### 前后端分离
-- 后端 FastAPI 运行在 `https://localhost:8000`，提供 REST API（始终 HTTPS + mTLS）
-- 开发时前端 Vite 运行在 `https://localhost:5173`，通过自定义代理中间件转发 API 请求到后端（根据 `X-Dev-User` 请求头动态选择客户端证书）
-- 生产环境前端构建产物放到 `backend/static/`，由后端直接提供服务（同源）
+- **开发模式**：后端 `https://localhost:8000`（CERT_OPTIONAL），前端 Vite `https://localhost:5173`，通过自定义代理中间件转发 API 请求，根据 `X-Dev-User` 请求头动态选择客户端证书
+- **生产模式**：双端口 — 8000（CERT_NONE）展示登录页（Hero + 证书登录按钮），8443（CERT_REQUIRED）提供全功能应用。前端构建产物放到 `backend/static/`，由两个端口共同服务
 
 ### mTLS 证书认证
 - 证书 CN 格式为 `[姓名] [18位身份证号]`（如 `谢林 320100198601010018`），后端自动解析为 `name` 和 `id_number`
@@ -435,6 +439,13 @@ const DEV_USERS = [
 2. 在 `vite.config.ts` 的 `DEV_USERS` 中注册证书路径
 3. 在 `LoginPage.tsx` 的 `DEV_USERS` 中添加界面入口
 4. 将用户证书 CN（格式 `姓名 身份证`）加入 `.env` 的 `ALLOWED_CERT_SUBJECTS`
+
+### 文章作者追踪
+- 文章创建时自动记录 `created_by`（创建人 CN）和 `updated_by`（更新人 CN）
+- 更新文章时仅更新 `updated_by`，`created_by` 保持不变
+- 前端仅显示姓名部分（从 `姓名 身份证` 格式中提取），hover 显示完整 CN
+- 若文章未更新过（`created_at === updated_at`），不显示更新时间和更新人
+- 日期精确到分钟，格式：`2026年7月30日 15:23`
 
 ### 模型配置分离
 - 四种模型类型独立配置：LLM 文本 / Vision 视觉 / ASR 语音识别 / Embedding 嵌入
