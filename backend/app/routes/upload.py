@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.dependencies import get_db
 from app.models import Article
 from app.schemas import ArticleResponse
+from app.auth import get_client_cert, CertInfo
 from app.config import (
     LLM_API_KEY, LLM_API_BASE, LLM_MODEL,
     VISION_API_KEY, VISION_API_BASE, VISION_MODEL,
@@ -567,7 +568,9 @@ async def upload_file(
     file: UploadFile = File(...),
     category_id: str | None = Form(default=None),
     db: Session = Depends(get_db),
+    cert: CertInfo = Depends(get_client_cert),
 ):
+    user_cn = cert.display_name or ""
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided")
 
@@ -639,6 +642,8 @@ async def upload_file(
         attachment_path=str(safe_name),
         attachment_name=file.filename,
         attachment_type=file.content_type or "",
+        created_by=user_cn or None,
+        updated_by=user_cn or None,
     )
     db.add(article)
     db.commit()

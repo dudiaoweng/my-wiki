@@ -247,13 +247,17 @@ npm run dev
 
 > Vite 代理根据前端的 `X-Dev-User` 请求头动态选择客户端证书。用户注册表在 `vite.config.ts` 的 `DEV_USERS` 中配置，添加新用户只需放入证书文件并更新注册表。
 
-**生产模式**（后端直接提供前端，单端口）：
+**生产模式**（双端口，登录页不弹证书框）：
 
 ```bash
 cd frontend && npm run build          # 构建前端 → backend/static/
-cd backend && .venv\Scripts\python run.py  # 启动 (HTTPS + mTLS)
-# 访问 https://localhost:8000 → 浏览器弹出证书选择框
+cd backend && .venv\Scripts\python run.py  # 启动双端口服务
+# 访问 https://localhost:8000 → 登录页面 → 点击"证书登录" → 选择证书 → 进入系统
 ```
+
+> 生产模式使用双端口架构：
+> - **8000**（`CERT_NONE`）：仅展示登录页，永不会触发浏览器证书选择框
+> - **8443**（`CERT_REQUIRED`）：全功能应用，所有 API 调用需 mTLS 验证
 
 ### 5. 访问
 
@@ -264,9 +268,9 @@ cd backend && .venv\Scripts\python run.py  # 启动 (HTTPS + mTLS)
 2. 进入知识库，顶栏右侧显示姓名，hover 显示完整身份证号
 
 **生产模式**：
-1. 首次访问浏览器提示"不安全" → 点击"高级 → 继续访问"
-2. 浏览器弹出证书选择框 → 选择对应证书 → 确认
-3. 进入知识库，顶栏右侧显示姓名，hover 显示完整身份证号
+1. 访问 `https://localhost:8000` → 显示登录页面（不会弹证书框）
+2. 点击「证书登录」→ 页面跳转到 8443 端口 → 浏览器弹出证书选择框
+3. 选择对应证书 → 确认 → 进入知识库
 
 ---
 
@@ -402,10 +406,9 @@ id, entity_name, category, content, created_at, updated_at
 - 生产环境前端构建产物放到 `backend/static/`，由后端直接提供服务（同源）
 
 ### mTLS 证书认证
-- 后端使用 `ssl.CERT_OPTIONAL` + `WWW-Authenticate` 机制：初始连接允许无证书，访问受保护 API 时返回 401 触发浏览器证书选择对话框
 - 证书 CN 格式为 `[姓名] [18位身份证号]`（如 `谢林 320100198601010018`），后端自动解析为 `name` 和 `id_number`
-- **开发模式**：前端显示用户选择页面，Vite 代理中间件根据 `X-Dev-User` 请求头动态选择客户端证书连接后端。用户注册表在 `vite.config.ts` 的 `DEV_USERS` 中配置
-- **生产模式**：浏览器直连后端，页面导航时触发原生证书选择对话框
+- **开发模式**：前端显示用户选择页面，Vite 代理中间件根据 `X-Dev-User` 请求头动态选择客户端证书连接后端
+- **生产模式**：双端口架构 — 8000（`CERT_NONE`）展示登录页，8443（`CERT_REQUIRED`）提供全功能应用。用户点击登录后跳转到 8443 触发证书选择框
 - 顶栏右侧显示姓名，hover 显示完整身份证号
 - 证书由自签 CA (`certs/ca.crt`) 签发，客户端 `.p12` 文件导入浏览器即可
 

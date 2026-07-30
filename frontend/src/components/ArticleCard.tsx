@@ -42,6 +42,12 @@ function formatDate(iso: string): string {
   return d.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
 }
 
+function formatUser(cn: string | null): string {
+  if (!cn) return '';
+  const match = cn.match(/^(.+?)\s+\d{18}$/);
+  return match ? match[1] : cn;
+}
+
 export function ArticleCard({ article, selected, onSelect, onOpen }: Props) {
   const catColor = article.category?.color ?? 'var(--c-border)';
   const catName = article.category?.name ?? '未分类';
@@ -88,6 +94,9 @@ export function ArticleCard({ article, selected, onSelect, onOpen }: Props) {
             {catName}
           </span>
           <span>{formatDate(article.created_at)}</span>
+          {article.created_by && (
+            <span title={article.created_by}>👤 创建人 {formatUser(article.created_by)}</span>
+          )}
           {article.processing === 'processing' && (
             <span className={styles.processingBadge}>⏳ 解析中…</span>
           )}

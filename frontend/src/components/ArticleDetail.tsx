@@ -19,7 +19,9 @@ import styles from './ArticleDetail.module.css';
 
 function formatDate(iso: string): string {
   const d = new Date(iso);
-  return d.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
+  const date = d.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
+  const time = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  return `${date} ${time}`;
 }
 
 /** Extract the name portion from a CN like "谢林 320100198601010018". */
@@ -242,11 +244,15 @@ export function ArticleDetail() {
         <div className={styles.meta}>
           <span>📅 创建于 {formatDate(article.created_at)}</span>
           {article.created_by && (
-            <span title={article.created_by}>👤 {formatUser(article.created_by)}</span>
+            <span title={article.created_by}>👤 创建人 {formatUser(article.created_by)}</span>
           )}
-          <span>✏️ 更新于 {formatDate(article.updated_at)}</span>
-          {article.updated_by && (
-            <span title={article.updated_by}>👤 {formatUser(article.updated_by)}</span>
+          {article.created_at !== article.updated_at && (
+            <>
+              <span>✏️ 更新于 {formatDate(article.updated_at)}</span>
+              {article.updated_by && (
+                <span title={article.updated_by}>👤 更新人 {formatUser(article.updated_by)}</span>
+              )}
+            </>
           )}
           <span>🔖 {entityCount} 个实体</span>
           <span>🔗 {relationCount} 个关系</span>
