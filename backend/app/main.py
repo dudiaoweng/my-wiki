@@ -1,16 +1,16 @@
 """Personal Knowledge Base — FastAPI application.
 
-Both development and production use the same HTTPS + mTLS setup:
-
-  - Single HTTPS server on port 8000 with mTLS (ssl.CERT_OPTIONAL).
-  - Browser prompts for client certificate on first visit.
-  - User identity is read from the certificate CN — no login page needed.
-
 Development (``python -m app.main``):
-  - Same HTTPS + mTLS as production, with --reload for hot-reload.
+  - Single HTTPS server on port 8000 with mTLS (CERT_OPTIONAL, hot-reload).
+  - Vite proxy handles client cert selection; frontend login page lets users
+    pick an identity.
 
 Production (``python run.py``):
-  - Same HTTPS + mTLS, no reload, with port-cleanup and Windows event-loop fix.
+  - Dual-port setup:
+    * Port 8000 (CERT_NONE)  — login page only, NEVER triggers cert dialog.
+    * Port 8443 (CERT_REQUIRED) — full app with mTLS.
+  - User visits :8000 → clicks "证书登录" → navigates to :8443 →
+    browser certificate dialog → authenticated → redirected to :8443.
 """
 
 import json
@@ -21,7 +21,7 @@ load_dotenv()
 
 import os
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, Depends, APIRouter, Request, Query, status
+from fastapi import FastAPI, HTTPException, Depends, APIRouter, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -167,11 +167,13 @@ api_router.include_router(articles.router)
 api_router.include_router(categories.router)
 api_router.include_router(tags.router)
 api_router.include_router(entities.router)
-api_router.include_router(stats.router)
 api_router.include_router(graph.router)
 api_router.include_router(qa.router)
 api_router.include_router(upload.router)
 app.include_router(api_router)
+
+# Public routes (no cert required — used by login page on port 8000)
+app.include_router(stats.router)
 
 # Uploads
 UPLOAD_DIR = Path(UPLOAD_DIR_STR)
@@ -201,25 +203,19 @@ def auth_status(cert: CertInfo = Depends(get_client_cert)):
 
 
 @app.get("/api/auth/login")
-def auth_login(
-    cert: CertInfo = Depends(get_client_cert),
-    from_: str = Query("", alias="from"),
-):
-    """Login endpoint accessed via browser **page navigation**.
+def auth_login(cert: CertInfo = Depends(get_client_cert)):
+    """Login endpoint — only reachable via port 8443 (CERT_REQUIRED).
 
-    Page navigations trigger the browser's native TLS certificate selection
-    dialog (unlike programmatic ``fetch()`` calls).  After the user selects a
-    certificate and the mTLS handshake succeeds, they are redirected back to
-    the frontend with an ``auth=1`` query parameter.
+    Browser page navigation to this endpoint triggers the native TLS
+    certificate selection dialog.  After successful mTLS the browser is
+    redirected back to the frontend with ``?auth=1``.
     """
     if not cert.authenticated:
-        # No certificate was presented — the browser may prompt on retry
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Client certificate is required",
         )
-    target = from_ or "/"
-    return RedirectResponse(f"{target}?auth=1", status_code=302)
+    return RedirectResponse("/?auth=1", status_code=302)
 
 
 @app.get("/api/health")

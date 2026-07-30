@@ -27,7 +27,15 @@ interface Props {
 
 function formatDate(iso: string): string {
   const d = new Date(iso);
-  return d.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
+  const date = d.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
+  const time = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  return `${date} ${time}`;
+}
+
+function formatUser(cn: string | null): string {
+  if (!cn) return '';
+  const match = cn.match(/^(.+?)\s+\d{18}$/);
+  return match ? match[1] : cn;
 }
 
 export function ArticleDetailInline({ articleId, onBack, prevArticleId, nextArticleId, onNavigate, highlightEntity, onClearHighlight }: Props) {
@@ -213,8 +221,18 @@ export function ArticleDetailInline({ articleId, onBack, prevArticleId, nextArti
       </h1>
 
       <div className={styles.meta}>
-        <span>📅 {formatDate(article.created_at)}</span>
-        <span>✏️ {formatDate(article.updated_at)}</span>
+        <span>📅 创建于 {formatDate(article.created_at)}</span>
+        {article.created_by && (
+          <span title={article.created_by}>👤 创建人 {formatUser(article.created_by)}</span>
+        )}
+        {article.created_at !== article.updated_at && (
+          <>
+            <span>✏️ 更新于 {formatDate(article.updated_at)}</span>
+            {article.updated_by && (
+              <span title={article.updated_by}>👤 更新人 {formatUser(article.updated_by)}</span>
+            )}
+          </>
+        )}
         <span>🔖 {article.entities?.entities?.length ?? 0} 个实体</span>
         <span>🔗 {article.entities?.relations?.length ?? 0} 个关系</span>
       </div>
