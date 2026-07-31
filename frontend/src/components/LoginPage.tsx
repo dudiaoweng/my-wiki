@@ -7,6 +7,8 @@ const isDev = import.meta.env.DEV;
 const DEV_USERS: DevUser[] = [
   { key: 'zh', displayName: '周衡' },
   { key: 'xl', displayName: '谢林' },
+  { key: 'xl2', displayName: '谢林(2)' },
+  { key: 'zsl', displayName: '张胜利' },
 ];
 
 interface Props {

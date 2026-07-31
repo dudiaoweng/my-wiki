@@ -34,6 +34,9 @@ function getFileTypeIcon(filename: string): string {
 }
 
 export function QA() {
+  const { sidebarOpen, closeSidebar, userIdNumber } = useApp();
+  const { showToast } = useToast();
+
   const {
     sessions,
     activeId,
@@ -51,10 +54,7 @@ export function QA() {
     deleteSession,
     askQuestion,
     clearHistory,
-  } = useQA();
-
-  const { sidebarOpen, closeSidebar } = useApp();
-  const { showToast } = useToast();
+  } = useQA(userIdNumber);
 
   const [input, setInput] = useState('');
   const chatEndRef = useRef<HTMLDivElement>(null);

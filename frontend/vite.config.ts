@@ -3,7 +3,6 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import fs from 'fs';
 import https from 'https';
-import http from 'http';
 
 // ─── Cert paths ──────────────────────────────────────
 const certDir = path.resolve(__dirname, '..', 'certs');
@@ -23,12 +22,20 @@ function readAgent(certFile: string, keyFile: string): https.Agent {
 // ─── Dev user registry ───────────────────────────────
 const DEV_USERS: Record<string, { agent: https.Agent; displayName: string }> = {
   zh: {
-    agent: readAgent('client_zh.crt', 'client.key'),
+    agent: readAgent('zhouheng.crt', 'zhouheng.key'),
     displayName: '周衡',
   },
   xl: {
-    agent: readAgent('client_xl.crt', 'client.key'),
+    agent: readAgent('xielin.crt', 'xielin.key'),
     displayName: '谢林',
+  },
+  xl2: {
+    agent: readAgent('xielin2.crt', 'xielin2.key'),
+    displayName: '谢林(2)',
+  },
+  zsl: {
+    agent: readAgent('zhangshengli.crt', 'zhangshengli.key'),
+    displayName: '张胜利',
   },
 };
 const DEFAULT_USER = 'zh';
