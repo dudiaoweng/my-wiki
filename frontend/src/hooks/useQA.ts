@@ -9,21 +9,27 @@ export interface QASession {
   createdAt: number;
 }
 
-const STORAGE_KEY = 'qa_sessions';
-const ACTIVE_KEY = 'qa_active_id';
-const FILE_CTX_KEY = 'qa_file_contexts';
+/** Build user-scoped localStorage keys so each user has independent sessions. */
+function keys(userId: string) {
+  const ns = userId ? `qa_${userId}` : 'qa';
+  return {
+    sessions: `${ns}_sessions`,
+    activeId: `${ns}_active_id`,
+    fileContexts: `${ns}_file_contexts`,
+  };
+}
 
-function loadSessions(): Record<string, QASession> {
+function loadSessions(userId: string): Record<string, QASession> {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(keys(userId).sessions);
     if (raw) return JSON.parse(raw);
   } catch { /* corrupt data — start fresh */ }
   return {};
 }
 
-function loadActiveId(): string | null {
+function loadActiveId(userId: string): string | null {
   try {
-    return localStorage.getItem(ACTIVE_KEY);
+    return localStorage.getItem(keys(userId).activeId);
   } catch { return null; }
 }
 
@@ -35,9 +41,11 @@ function makeTitle(question: string): string {
   return question.slice(0, 30) + (question.length > 30 ? '…' : '');
 }
 
-export function useQA() {
-  const [sessions, setSessions] = useState<Record<string, QASession>>(loadSessions);
-  const [activeId, setActiveId] = useState<string | null>(loadActiveId);
+export function useQA(userId: string = '') {
+  const _keys = keys(userId);
+
+  const [sessions, setSessions] = useState<Record<string, QASession>>(() => loadSessions(userId));
+  const [activeId, setActiveId] = useState<string | null>(() => loadActiveId(userId));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [kbEnabled, setKbEnabled] = useState(true);
@@ -45,19 +53,19 @@ export function useQA() {
   // Persist to localStorage on every change
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
+      localStorage.setItem(_keys.sessions, JSON.stringify(sessions));
     } catch { /* quota exceeded — silently ignore */ }
-  }, [sessions]);
+  }, [sessions, _keys.sessions]);
 
   useEffect(() => {
     try {
       if (activeId) {
-        localStorage.setItem(ACTIVE_KEY, activeId);
+        localStorage.setItem(_keys.activeId, activeId);
       } else {
-        localStorage.removeItem(ACTIVE_KEY);
+        localStorage.removeItem(_keys.activeId);
       }
     } catch { /* ignore */ }
-  }, [activeId]);
+  }, [activeId, _keys.activeId]);
 
   const activeSession = activeId && sessions[activeId] ? sessions[activeId] : undefined;
   const messages = activeSession?.messages ?? [];
@@ -65,7 +73,7 @@ export function useQA() {
   // ── File contexts (per session, persist to localStorage) ──
   const [fileContexts, setFileContexts] = useState<Record<string, FileContext[]>>(() => {
     try {
-      const raw = localStorage.getItem(FILE_CTX_KEY);
+      const raw = localStorage.getItem(_keys.fileContexts);
       if (!raw) return {};
       const data = JSON.parse(raw);
       // Purge entries without file_id (legacy data before async processing)
@@ -79,7 +87,7 @@ export function useQA() {
         }
       }
       if (changed) {
-        try { localStorage.setItem(FILE_CTX_KEY, JSON.stringify(data)); } catch {}
+        try { localStorage.setItem(_keys.fileContexts, JSON.stringify(data)); } catch {}
       }
       return data;
     } catch { return {}; }
@@ -108,7 +116,7 @@ export function useQA() {
         const idx = list.findIndex(fc => fc.file_id === fileId);
         if (idx >= 0) list[idx] = { ...list[idx], content: '[文件处理超时，请重试]', status: 'error' };
         const updated = { ...prev, [sessionId]: list };
-        try { localStorage.setItem(FILE_CTX_KEY, JSON.stringify(updated)); } catch {}
+        try { localStorage.setItem(_keys.fileContexts, JSON.stringify(updated)); } catch {}
         return updated;
       });
       return;
@@ -127,7 +135,7 @@ export function useQA() {
               list[idx] = { ...list[idx], content: status.content!, content_type: status.content_type, is_image: status.is_image, status: 'done', media_url: status.media_url, thumb_url: status.thumb_url };
             }
             const updated = { ...prev, [sessionId]: list };
-            try { localStorage.setItem(FILE_CTX_KEY, JSON.stringify(updated)); } catch {}
+            try { localStorage.setItem(_keys.fileContexts, JSON.stringify(updated)); } catch {}
             return updated;
           });
           return;
@@ -141,7 +149,7 @@ export function useQA() {
               list[idx] = { ...list[idx], content: `[文件解析失败: ${status.error}]`, status: 'error' };
             }
             const updated = { ...prev, [sessionId]: list };
-            try { localStorage.setItem(FILE_CTX_KEY, JSON.stringify(updated)); } catch {}
+            try { localStorage.setItem(_keys.fileContexts, JSON.stringify(updated)); } catch {}
             return updated;
           });
           return;
@@ -177,7 +185,7 @@ export function useQA() {
         media_url: result.media_url,
       };
       const updated = { ...prev, [sessionId]: [...(prev[sessionId] ?? []), fc] };
-      try { localStorage.setItem(FILE_CTX_KEY, JSON.stringify(updated)); } catch {}
+      try { localStorage.setItem(_keys.fileContexts, JSON.stringify(updated)); } catch {}
       return updated;
     });
 
@@ -192,7 +200,7 @@ export function useQA() {
       list.splice(index, 1);
       const updated = { ...prev, [activeId]: list };
       try {
-        localStorage.setItem(FILE_CTX_KEY, JSON.stringify(updated));
+        localStorage.setItem(_keys.fileContexts, JSON.stringify(updated));
       } catch { /* quota exceeded */ }
       return updated;
     });
@@ -203,7 +211,7 @@ export function useQA() {
     setFileContexts((prev) => {
       const updated = { ...prev, [activeId]: [] };
       try {
-        localStorage.setItem(FILE_CTX_KEY, JSON.stringify(updated));
+        localStorage.setItem(_keys.fileContexts, JSON.stringify(updated));
       } catch { /* quota exceeded */ }
       return updated;
     });
@@ -246,7 +254,7 @@ export function useQA() {
       // Clean up file contexts for the deleted session
       setFileContexts((prev) => {
         const { [id]: _, ...rest } = prev;
-        localStorage.setItem(FILE_CTX_KEY, JSON.stringify(rest));
+        localStorage.setItem(_keys.fileContexts, JSON.stringify(rest));
         return rest;
       });
     },

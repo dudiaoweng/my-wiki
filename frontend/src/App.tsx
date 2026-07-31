@@ -112,9 +112,19 @@ export default function App() {
 
   if (authState === 'login') {
     return (
-      <div style={{ width: '100%', minHeight: '100vh', background: 'var(--c-page)', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-        <Hero />
-        <LoginPage onLogin={handleLogin} />
+      <div style={{
+        position: 'fixed', inset: 0,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        background: 'var(--c-page)', overflow: 'auto',
+      }}>
+        <div style={{
+          display: 'flex',
+          flexDirection: isDev ? 'row' : 'column',
+          alignItems: 'center', gap: isDev ? 48 : 0,
+        }}>
+          <Hero />
+          <LoginPage onLogin={handleLogin} />
+        </div>
       </div>
     );
   }
