@@ -8,7 +8,7 @@ import { getDevUserHeader } from './auth';
 export interface EntityInfoItem {
   id: string;
   entity_name: string;
-  category: string;
+  name: string;
   content: string;
   created_at: string;
   updated_at: string;
@@ -229,13 +229,13 @@ export const api = {
   getEntityInfos(entityName: string) {
     return request<EntityInfoItem[]>(`/entities/${encodeURIComponent(entityName)}/info`);
   },
-  createEntityInfo(entityName: string, category: string, content: string) {
+  createEntityInfo(entityName: string, name: string, content: string) {
     return request<EntityInfoItem>(`/entities/${encodeURIComponent(entityName)}/info`, {
       method: 'POST',
-      body: JSON.stringify({ category, content }),
+      body: JSON.stringify({ name, content }),
     });
   },
-  updateEntityInfo(entityName: string, infoId: string, data: { category?: string; content?: string }) {
+  updateEntityInfo(entityName: string, infoId: string, data: { name?: string; content?: string }) {
     return request<EntityInfoItem>(`/entities/${encodeURIComponent(entityName)}/info/${infoId}`, {
       method: 'PUT',
       body: JSON.stringify(data),

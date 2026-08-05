@@ -40,13 +40,15 @@ export interface UseD3ForceGraphOptions {
   /** Map of entity name → type (for rendering entity icons) */
   entityTypeMap: Map<string, string>;
   /** Called when a node is clicked */
-  onNodeClick?: (nodeId: string, nodeType: string, label: string, ctrlKey: boolean) => void;
+  onNodeClick?: (nodeId: string, nodeType: string, label: string, ctrlKey: boolean, clientX?: number, clientY?: number) => void;
   /** Set of selected node IDs for visual highlighting */
   selectedNodeIds?: Set<string> | null;
   /** Whether to include arrow markers on edges */
   showArrows?: boolean;
   /** Initial scale for zoom */
   initialScale?: number;
+  /** Map of entity name → additional info entries (for tooltip display) */
+  entityInfoMap?: Map<string, { name: string; content: string }[]>;
   /** Whether the graph container is currently visible (DOM mounted).
    *  When false, the effect skips rendering and waits for it to become true. */
   enabled?: boolean;
@@ -66,6 +68,7 @@ export function useD3ForceGraph(
   const {
     graph,
     entityTypeMap,
+    entityInfoMap,
     onNodeClick,
     selectedNodeIds,
     showArrows = true,
@@ -76,6 +79,9 @@ export function useD3ForceGraph(
   // Keep refs so D3 event handlers always read the latest value without re-creating the graph
   const selectedRef = useRef(selectedNodeIds);
   selectedRef.current = selectedNodeIds;
+
+  const entityInfoMapRef = useRef(entityInfoMap);
+  entityInfoMapRef.current = entityInfoMap;
 
   const onNodeClickRef = useRef(onNodeClick);
   onNodeClickRef.current = onNodeClick;
@@ -185,14 +191,31 @@ export function useD3ForceGraph(
 
     // Drag
     const dragBehavior = d3.drag<SVGGElement, SimNode>()
-      .on('start', (_event, d) => {
+      .on('start', function (_event, d) {
         if (!_event.active) simulation.alphaTarget(0.3).restart();
         d.fx = d.x; d.fy = d.y;
+        // Highlight entity nodes during drag
+        if (d.type === 'entity') {
+          d3.select(this).select('circle')
+            .attr('fill', 'var(--c-accent)')
+            .attr('stroke', 'var(--c-accent)')
+            .attr('stroke-width', 2.5)
+            .style('filter', 'drop-shadow(0 0 8px var(--c-accent))');
+        }
       })
       .on('drag', (event, d) => { d.fx = event.x; d.fy = event.y; })
-      .on('end', (_event, d) => {
+      .on('end', function (_event, d) {
         if (!_event.active) simulation.alphaTarget(0);
-        d.fx = null; d.fy = null;
+        // Restore entity node style based on current selection state
+        if (d.type === 'entity') {
+          const sel = selectedRef.current?.has(d.id) ?? false;
+          d3.select(this).select('circle')
+            .attr('fill', sel ? 'var(--c-accent)' : '#E8DEF8')
+            .attr('stroke', sel ? 'var(--c-accent)' : '#8B6BAE')
+            .attr('stroke-width', sel ? 2 : 1.2)
+            .style('filter', sel ? 'drop-shadow(0 0 4px var(--c-accent))' : 'none');
+        }
+        // Keep fx/fy at the final drag position so the node stays where the user dropped it
       });
     nodeGroup.call(dragBehavior as any);
 
@@ -203,8 +226,21 @@ export function useD3ForceGraph(
     nodeGroup
       .on('mouseenter', function (event, d) {
         const rect = container.getBoundingClientRect();
+        let tooltipHtml = buildTooltipHtml(d.type, d.label);
+        // Append entity additional info for entity nodes
+        if (d.type === 'entity') {
+          const infos = entityInfoMapRef.current?.get(d.label);
+          if (infos && infos.length > 0) {
+            tooltipHtml += '<div style="margin-top:5px;padding-top:5px;border-top:1px solid rgba(255,255,255,0.2);font-size:11px;opacity:0.9;max-height:120px;overflow-y:auto">';
+            for (const info of infos.slice(0, 8)) {
+              tooltipHtml += `<div style="margin:2px 0">• <b>${esc(info.name)}</b>: ${esc(info.content)}</div>`;
+            }
+            if (infos.length > 8) tooltipHtml += `<div style="opacity:0.6">…还有 ${infos.length - 8} 条</div>`;
+            tooltipHtml += '</div>';
+          }
+        }
         showTooltip(
-          buildTooltipHtml(d.type, d.label),
+          tooltipHtml,
           event.clientX - rect.left,
           event.clientY - rect.top,
         );
@@ -215,7 +251,8 @@ export function useD3ForceGraph(
         d3.select(this).select('rect,circle').attr('filter', null);
       })
       .on('click', (event, d) => {
-        onNodeClickRef.current?.(d.id, d.type, d.label, event.ctrlKey || event.metaKey);
+        event.stopPropagation();
+        onNodeClickRef.current?.(d.id, d.type, d.label, event.ctrlKey || event.metaKey, event.clientX, event.clientY);
       });
 
     // ── Article nodes: rounded rects ──
