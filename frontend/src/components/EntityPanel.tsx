@@ -5,6 +5,7 @@ import { useApp } from '../context/AppProvider';
 import { useGraphData } from '../hooks/useGraphData';
 import { useD3ForceGraph } from '../hooks/useD3ForceGraph';
 import { entityIcon, ENTITY_TYPE_OPTIONS } from '../utils/entityIcons';
+import { EntityGraphPopover } from './EntityGraphPopover';
 import type { Article } from '../types/article';
 import styles from './EntityPanel.module.css';
 
@@ -45,9 +46,19 @@ export function EntityPanel({
   const [adding, setAdding] = useState(false);
   const [newEntityName, setNewEntityName] = useState('');
   const [newEntityType, setNewEntityType] = useState('人物');
+  const [editingEntityName, setEditingEntityName] = useState<string | null>(null);
+  const [editEntityName, setEditEntityName] = useState('');
+  const [editEntityType, setEditEntityType] = useState('人物');
   const [entitySearch, setEntitySearch] = useState('');
+  const [graphPopover, setGraphPopover] = useState<{
+    entityName: string;
+    entityType: string;
+    x: number;
+    y: number;
+  } | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const editNameInputRef = useRef<HTMLInputElement>(null);
 
   // Filter entities by search query
   const filteredEntities = useMemo(() => {
@@ -72,18 +83,51 @@ export function EntityPanel({
     }
   };
 
+  // ── Entity edit/delete handlers ──
+  const handleStartEdit = (entity: EntityInfo) => {
+    setEditingEntityName(entity.name);
+    setEditEntityName(entity.name);
+    setEditEntityType(entity.type || '其他');
+  };
+
+  const handleSaveEdit = async () => {
+    const name = editEntityName.trim();
+    if (!name || !editingEntityName) return;
+    try {
+      await api.updateEntity(editingEntityName, name !== editingEntityName ? name : undefined, editEntityType);
+      showToast(`实体「${editingEntityName}」已更新`, 'success');
+      setEditingEntityName(null);
+      refetchGraph();
+      onRefresh?.();
+    } catch {
+      showToast('更新失败', 'error');
+    }
+  };
+
+  const handleDeleteEntity = (entityName: string) => {
+    requestConfirm('删除实体', `确定要删除实体「${entityName}」吗？这将从所有文章中移除该实体。`, async () => {
+      try {
+        await api.removeEntity(entityName);
+        showToast(`实体「${entityName}」已删除`, 'success');
+        refetchGraph();
+        onRefresh?.();
+      } catch {
+        showToast('删除失败', 'error');
+      }
+    });
+  };
+
   // ── Entity info panel state (附加信息) ──
   const [selectedEntityName, setSelectedEntityName] = useState<string | null>(null);
   const [entityInfos, setEntityInfos] = useState<EntityInfoItem[]>([]);
   const [loadingInfos, setLoadingInfos] = useState(false);
   const [addingInfo, setAddingInfo] = useState(false);
-  const [newInfoCategory, setNewInfoCategory] = useState('');
+  const [newInfoName, setNewInfoName] = useState('');
   const [newInfoContent, setNewInfoContent] = useState('');
   const [editingInfoId, setEditingInfoId] = useState<string | null>(null);
-  const [editInfoCategory, setEditInfoCategory] = useState('');
+  const [editInfoName, setEditInfoName] = useState('');
   const [editInfoContent, setEditInfoContent] = useState('');
-  const newInfoCatRef = useRef<HTMLInputElement>(null);
-  const newInfoContentRef = useRef<HTMLTextAreaElement>(null);
+  const newInfoNameRef = useRef<HTMLInputElement>(null);
 
   // Load infos when entity is selected
   const loadEntityInfos = useCallback(async (entityName: string) => {
@@ -126,11 +170,11 @@ export function EntityPanel({
 
   // Info CRUD handlers
   const handleAddInfo = async () => {
-    if (!selectedEntityName || !newInfoCategory.trim() || !newInfoContent.trim()) return;
+    if (!selectedEntityName || !newInfoName.trim() || !newInfoContent.trim()) return;
     try {
-      await api.createEntityInfo(selectedEntityName, newInfoCategory.trim(), newInfoContent.trim());
+      await api.createEntityInfo(selectedEntityName, newInfoName.trim(), newInfoContent.trim());
       showToast('附加信息已添加', 'success');
-      setNewInfoCategory('');
+      setNewInfoName('');
       setNewInfoContent('');
       setAddingInfo(false);
       await refreshInfos();
@@ -140,10 +184,10 @@ export function EntityPanel({
   };
 
   const handleUpdateInfo = async (infoId: string) => {
-    if (!selectedEntityName || !editInfoCategory.trim() || !editInfoContent.trim()) return;
+    if (!selectedEntityName || !editInfoName.trim() || !editInfoContent.trim()) return;
     try {
       await api.updateEntityInfo(selectedEntityName, infoId, {
-        category: editInfoCategory.trim(),
+        name: editInfoName.trim(),
         content: editInfoContent.trim(),
       });
       showToast('附加信息已更新', 'success');
@@ -154,9 +198,9 @@ export function EntityPanel({
     }
   };
 
-  const handleDeleteInfo = (infoId: string, category: string) => {
+  const handleDeleteInfo = (infoId: string, infoName: string) => {
     if (!selectedEntityName) return;
-    requestConfirm('删除附加信息', `确定要删除「${category}」吗？`, async () => {
+    requestConfirm('删除附加信息', `确定要删除「${infoName}」吗？`, async () => {
       try {
         await api.deleteEntityInfo(selectedEntityName, infoId);
         showToast('附加信息已删除', 'success');
@@ -175,9 +219,15 @@ export function EntityPanel({
     }
   }, [entities, selectedEntityName]);
 
+  // Close graph popover when switching to list mode
+  useEffect(() => {
+    if (mode === 'list') setGraphPopover(null);
+  }, [mode]);
+
   // Auto-focus inputs
   useEffect(() => { if (adding) inputRef.current?.focus(); }, [adding]);
-  useEffect(() => { if (addingInfo) newInfoCatRef.current?.focus(); }, [addingInfo]);
+  useEffect(() => { if (editingEntityName) editNameInputRef.current?.focus(); }, [editingEntityName]);
+  useEffect(() => { if (addingInfo) newInfoNameRef.current?.focus(); }, [addingInfo]);
 
   // Entity name → type map for graph icons
   const entityTypeMap = useMemo(() => {
@@ -240,16 +290,141 @@ export function EntityPanel({
     };
   }, [graphData, selectedArticleIds, articles]);
 
+  // Merge popover entity into selected node IDs for visual highlighting
+  const mergedSelectedNodeIds = useMemo(() => {
+    const base = new Set(selectedGraphNodeIds ?? []);
+    if (graphPopover) {
+      base.add(`entity:${graphPopover.entityName}`);
+    }
+    return base;
+  }, [selectedGraphNodeIds, graphPopover]);
+
+  // ── Entity info cache for tooltip display ──
+  const entityInfoMapRef = useRef<Map<string, { name: string; content: string }[]>>(new Map());
+
+  // Pre-fetch entity infos for entity nodes visible in the graph
+  useEffect(() => {
+    if (mode !== 'graph' || !filteredGraph) return;
+    const entityNodes = filteredGraph.nodes.filter((n) => n.type === 'entity');
+    const cache = entityInfoMapRef.current;
+
+    let cancelled = false;
+    const fetchMissing = async () => {
+      for (const node of entityNodes) {
+        if (cancelled) break;
+        if (!cache.has(node.label)) {
+          try {
+            const infos = await api.getEntityInfos(node.label);
+            if (!cancelled) {
+              cache.set(node.label, infos.map((i) => ({ name: i.name, content: i.content })));
+            }
+          } catch {
+            // Ignore fetch errors; tooltip will just show basic info
+          }
+        }
+      }
+    };
+    fetchMissing();
+    return () => { cancelled = true; };
+  }, [filteredGraph, mode]);
+
   // ── D3 graph via shared hook ──
   useD3ForceGraph(graphContainerRef, graphSvgRef, graphTooltipRef, 'inline', {
     graph: filteredGraph,
     entityTypeMap,
-    onNodeClick: (id, type, label, ctrl) => onGraphNodeClick?.(id, type, label, ctrl),
-    selectedNodeIds: selectedGraphNodeIds,
+    entityInfoMap: entityInfoMapRef.current,
+    onNodeClick: (id, type, label, ctrl, clientX, clientY) => {
+      // Entity node click without Ctrl → show popover
+      if (type === 'entity' && !ctrl && clientX !== undefined && clientY !== undefined) {
+        const rect = graphContainerRef.current?.getBoundingClientRect();
+        if (rect) {
+          setGraphPopover({
+            entityName: label,
+            entityType: entityTypeMap.get(label) || '其他',
+            x: clientX - rect.left,
+            y: clientY - rect.top,
+          });
+        }
+        return;
+      }
+      // Ctrl+click or non-entity node → propagate to parent
+      setGraphPopover(null);
+      onGraphNodeClick?.(id, type, label, ctrl);
+    },
+    selectedNodeIds: mergedSelectedNodeIds,
     showArrows: true,
     initialScale: 1.0,
     enabled: mode === 'graph',
   });
+
+  // ── Export graph as PNG ──
+  const handleExportGraph = useCallback(async () => {
+    const svgEl = graphSvgRef.current;
+    if (!svgEl) return;
+
+    // 1. Deep clone the SVG
+    const clone = svgEl.cloneNode(true) as SVGSVGElement;
+
+    // 2. Resolve CSS custom properties from the document
+    const bodyStyle = getComputedStyle(document.body);
+    const varNames = [
+      '--c-border', '--c-text-muted', '--c-accent', '--c-text',
+      '--c-text-soft', '--c-page', '--c-card', '--c-surface',
+      '--c-accent-wash', '--c-danger', '--c-danger-wash',
+      '--font-body', '--font-display',
+    ];
+    let css = '';
+    for (const v of varNames) {
+      const val = bodyStyle.getPropertyValue(v).trim();
+      if (val) css += `  ${v}: ${val};\n`;
+    }
+    const style = document.createElementNS('http://www.w3.org/2000/svg', 'style');
+    style.textContent = `:root {\n${css}}`;
+    clone.insertBefore(style, clone.firstChild);
+
+    // 3. Set explicit dimensions and background
+    const rect = svgEl.getBoundingClientRect();
+    const w = Math.ceil(rect.width);
+    const h = Math.ceil(rect.height);
+    clone.setAttribute('width', String(w));
+    clone.setAttribute('height', String(h));
+    const bgColor = bodyStyle.getPropertyValue('--c-page').trim() || '#f5f5f5';
+    clone.style.backgroundColor = bgColor;
+
+    // 4. Serialize to data URL
+    const serializer = new XMLSerializer();
+    const svgString = serializer.serializeToString(clone);
+    const svgDataUrl = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgString);
+
+    // 5. Draw on canvas at 2x resolution, then download PNG
+    const img = new Image();
+    img.onload = () => {
+      const scale = 2;
+      const canvas = document.createElement('canvas');
+      canvas.width = w * scale;
+      canvas.height = h * scale;
+      const ctx = canvas.getContext('2d')!;
+      ctx.scale(scale, scale);
+      ctx.fillStyle = bgColor;
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
+
+      canvas.toBlob((blob) => {
+        if (!blob) return;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `知识图谱_${new Date().toISOString().slice(0, 10)}.png`;
+        a.click();
+        URL.revokeObjectURL(url);
+        showToast('图谱已导出', 'success');
+      }, 'image/png');
+    };
+    img.onerror = () => {
+      showToast('导出失败', 'error');
+    };
+    img.src = svgDataUrl;
+  }, [showToast]);
 
 
   // ── Render ──
@@ -338,17 +513,57 @@ export function EntityPanel({
           <div className={styles.list}>
             {filteredEntities.map((ent) => (
               <div key={ent.name}>
-                <div className={`${styles.item} ${selectedEntityName === ent.name ? styles.itemSelected : ''}`}>
-                  <button
-                    className={styles.itemClickArea}
-                    onClick={(e) => handleEntitySelect(ent.name, e.ctrlKey || e.metaKey)}
-                    title={selectedEntityName === ent.name ? '点击取消选择' : '点击查看附加信息'}
-                  >
-                    <span style={{ fontSize: 14, flexShrink: 0 }} title={ent.type}>{entityIcon(ent.type)}</span>
-                    <span className={styles.tagName} style={{ color: '#7D5DA9' }}>{ent.name}</span>
-                  </button>
-                  <span className={styles.tagCount}>{ent.count}</span>
-                </div>
+                {editingEntityName === ent.name ? (
+                  /* ── Edit mode ── */
+                  <div className={styles.editRow} style={{ marginBottom: 2 }}>
+                    <select
+                      className={styles.editInput}
+                      value={editEntityType}
+                      onChange={(e) => setEditEntityType(e.target.value)}
+                      style={{ flex: '0 0 80px', cursor: 'pointer', minWidth: 0 }}
+                    >
+                      {ENTITY_TYPE_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                    <input
+                      ref={editNameInputRef}
+                      className={styles.editInput}
+                      value={editEntityName}
+                      onChange={(e) => setEditEntityName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleSaveEdit();
+                        if (e.key === 'Escape') setEditingEntityName(null);
+                      }}
+                      style={{ flex: 1, minWidth: 0 }}
+                    />
+                    <button className={`${styles.editBtn} ${styles.editBtnSave}`} onClick={handleSaveEdit}>✓</button>
+                    <button className={`${styles.editBtn} ${styles.editBtnCancel}`} onClick={() => setEditingEntityName(null)}>✕</button>
+                  </div>
+                ) : (
+                  /* ── Read-only mode ── */
+                  <div className={`${styles.item} ${selectedEntityName === ent.name ? styles.itemSelected : ''}`}>
+                    <button
+                      className={styles.itemClickArea}
+                      onClick={(e) => handleEntitySelect(ent.name, e.ctrlKey || e.metaKey)}
+                      title={selectedEntityName === ent.name ? '点击取消选择' : '点击查看附加信息'}
+                    >
+                      <span style={{ fontSize: 14, flexShrink: 0 }} title={ent.type}>{entityIcon(ent.type)}</span>
+                      <span className={styles.tagName} style={{ color: '#7D5DA9' }}>{ent.name}</span>
+                    </button>
+                    <button
+                      className={styles.itemAction}
+                      onClick={(e) => { e.stopPropagation(); handleStartEdit(ent); }}
+                      title="编辑实体"
+                    >✎</button>
+                    <button
+                      className={`${styles.itemAction} ${styles.itemActionDanger}`}
+                      onClick={(e) => { e.stopPropagation(); handleDeleteEntity(ent.name); }}
+                      title="删除实体"
+                    >✕</button>
+                    <span className={styles.tagCount}>{ent.count}</span>
+                  </div>
+                )}
 
                 {/* ── Additional Info Panel ── */}
                 {selectedEntityName === ent.name && (
@@ -364,13 +579,13 @@ export function EntityPanel({
                               <div className={styles.infoEditRow}>
                                 <input
                                   className={styles.infoEditCat}
-                                  value={editInfoCategory}
-                                  onChange={(e) => setEditInfoCategory(e.target.value)}
+                                  value={editInfoName}
+                                  onChange={(e) => setEditInfoName(e.target.value)}
                                   onKeyDown={(e) => {
                                     if (e.key === 'Enter') handleUpdateInfo(info.id);
                                     if (e.key === 'Escape') setEditingInfoId(null);
                                   }}
-                                  placeholder="类别"
+                                  placeholder="名称"
                                 />
                                 <input
                                   className={styles.infoEditContent}
@@ -388,20 +603,20 @@ export function EntityPanel({
                             ) : (
                               /* ── Read-only mode (single line) ── */
                               <div className={styles.infoReadRow}>
-                                <span className={styles.infoCat}>{info.category}</span>
+                                <span className={styles.infoCat}>{info.name}</span>
                                 <span className={styles.infoContent}>{info.content}</span>
                                 <button
                                   className={styles.itemAction}
                                   onClick={() => {
                                     setEditingInfoId(info.id);
-                                    setEditInfoCategory(info.category);
+                                    setEditInfoName(info.name);
                                     setEditInfoContent(info.content);
                                   }}
                                   title="编辑"
                                 >✎</button>
                                 <button
                                   className={`${styles.itemAction} ${styles.itemActionDanger}`}
-                                  onClick={() => handleDeleteInfo(info.id, info.category)}
+                                  onClick={() => handleDeleteInfo(info.id, info.name)}
                                   title="删除"
                                 >✕</button>
                               </div>
@@ -418,15 +633,15 @@ export function EntityPanel({
                     {addingInfo ? (
                       <div className={styles.infoEditRow}>
                         <input
-                          ref={newInfoCatRef}
+                          ref={newInfoNameRef}
                           className={styles.infoEditCat}
-                          value={newInfoCategory}
-                          onChange={(e) => setNewInfoCategory(e.target.value)}
+                          value={newInfoName}
+                          onChange={(e) => setNewInfoName(e.target.value)}
                           onKeyDown={(e) => {
                             if (e.key === 'Enter') handleAddInfo();
-                            if (e.key === 'Escape') { setAddingInfo(false); setNewInfoCategory(''); setNewInfoContent(''); }
+                            if (e.key === 'Escape') { setAddingInfo(false); setNewInfoName(''); setNewInfoContent(''); }
                           }}
-                          placeholder="类别"
+                          placeholder="名称"
                         />
                         <input
                           className={styles.infoEditContent}
@@ -434,12 +649,12 @@ export function EntityPanel({
                           onChange={(e) => setNewInfoContent(e.target.value)}
                           onKeyDown={(e) => {
                             if (e.key === 'Enter') handleAddInfo();
-                            if (e.key === 'Escape') { setAddingInfo(false); setNewInfoCategory(''); setNewInfoContent(''); }
+                            if (e.key === 'Escape') { setAddingInfo(false); setNewInfoName(''); setNewInfoContent(''); }
                           }}
                           placeholder="内容"
                         />
                         <button className={`${styles.editBtn} ${styles.editBtnSave}`} onClick={handleAddInfo}>✓</button>
-                        <button className={`${styles.editBtn} ${styles.editBtnCancel}`} onClick={() => { setAddingInfo(false); setNewInfoCategory(''); setNewInfoContent(''); }}>✕</button>
+                        <button className={`${styles.editBtn} ${styles.editBtnCancel}`} onClick={() => { setAddingInfo(false); setNewInfoName(''); setNewInfoContent(''); }}>✕</button>
                       </div>
                     ) : (
                       <button className={styles.infoAddBtn} onClick={() => setAddingInfo(true)}>
@@ -461,7 +676,7 @@ export function EntityPanel({
       ) : (
         <>
           {/* Legend */}
-          <div style={{ display: 'flex', gap: 12, padding: '6px 16px', flexShrink: 0, fontSize: 11, color: 'var(--c-text-soft)' }}>
+          <div style={{ display: 'flex', gap: 12, padding: '6px 16px', flexShrink: 0, fontSize: 11, color: 'var(--c-text-soft)', alignItems: 'center' }}>
             <span>◫ 文章</span>
             <span>● 分类</span>
             <span>◆ 实体</span>
@@ -470,8 +685,25 @@ export function EntityPanel({
                 {filteredGraph.edges.length} 关联
               </span>
             )}
+            <button
+              onClick={handleExportGraph}
+              disabled={!filteredGraph || filteredGraph.nodes.length === 0}
+              title="导出为 PNG 图片"
+              style={{
+                padding: '2px 10px',
+                border: '1px solid var(--c-border)',
+                borderRadius: 'var(--radius-sm)',
+                background: 'var(--c-card)',
+                fontSize: 11,
+                color: 'var(--c-text-soft)',
+                cursor: 'pointer',
+                fontFamily: 'var(--font-body)',
+                whiteSpace: 'nowrap',
+                opacity: filteredGraph && filteredGraph.nodes.length > 0 ? 1 : 0.35,
+              }}
+            >📥 导出</button>
           </div>
-          <div className={styles.graphContainer} ref={graphContainerRef}>
+          <div className={styles.graphContainer} ref={graphContainerRef} onClick={() => setGraphPopover(null)}>
             {graphLoading ? (
               <div className={styles.graphEmpty}>加载图谱数据…</div>
             ) : !filteredGraph || filteredGraph.nodes.length === 0 ? (
@@ -482,6 +714,17 @@ export function EntityPanel({
               <>
                 <svg ref={graphSvgRef} className={styles.graphSvg} />
                 <div ref={graphTooltipRef} />
+                {graphPopover && (
+                  <EntityGraphPopover
+                    entityName={graphPopover.entityName}
+                    entityType={graphPopover.entityType}
+                    x={graphPopover.x}
+                    y={graphPopover.y}
+                    containerRef={graphContainerRef}
+                    onClose={() => setGraphPopover(null)}
+                    onRefresh={() => { refetchGraph(); onRefresh?.(); }}
+                  />
+                )}
               </>
             )}
           </div>

@@ -50,19 +50,19 @@ class EntityRemoveRequest(BaseModel):
 # ── Entity Info schemas ──
 
 class EntityInfoCreate(BaseModel):
-    category: str = ""
+    name: str = ""
     content: str = ""
 
 
 class EntityInfoUpdate(BaseModel):
-    category: Optional[str] = None
+    name: Optional[str] = None
     content: Optional[str] = None
 
 
 class EntityInfoResponse(BaseModel):
     id: str
     entity_name: str
-    category: str
+    name: str
     content: str
     created_at: str
     updated_at: str
@@ -343,7 +343,7 @@ def _sync_entity_info_to_chunks(entity_name: str, db: Session) -> list:
     # Build current info tag lines
     info_lines = []
     for info in infos:
-        info_lines.append(f"[实体信息: {entity_name} | {info.category}: {info.content}]")
+        info_lines.append(f"[实体信息: {entity_name} | {info.name}: {info.content}]")
 
     # Remove old info lines and add current ones
     info_prefix = f"[实体信息: {entity_name} |"
@@ -381,7 +381,7 @@ def list_entity_infos(entity_name: str, db: Session = Depends(get_db)):
         EntityInfoResponse(
             id=info.id,
             entity_name=info.entity_name,
-            category=info.category,
+            name=info.name,
             content=info.content,
             created_at=info.created_at.isoformat() if info.created_at else "",
             updated_at=info.updated_at.isoformat() if info.updated_at else "",
@@ -395,7 +395,7 @@ async def create_entity_info(entity_name: str, body: EntityInfoCreate, db: Sessi
     """Create a new additional info entry for an entity."""
     info = EntityInfo(
         entity_name=entity_name,
-        category=body.category.strip(),
+        name=body.name.strip(),
         content=body.content.strip(),
     )
     db.add(info)
@@ -410,7 +410,7 @@ async def create_entity_info(entity_name: str, body: EntityInfoCreate, db: Sessi
     return EntityInfoResponse(
         id=info.id,
         entity_name=info.entity_name,
-        category=info.category,
+        name=info.name,
         content=info.content,
         created_at=info.created_at.isoformat() if info.created_at else "",
         updated_at=info.updated_at.isoformat() if info.updated_at else "",
@@ -426,8 +426,8 @@ async def update_entity_info(entity_name: str, info_id: str, body: EntityInfoUpd
     ).first()
     if not info:
         raise HTTPException(status_code=404, detail="Info entry not found")
-    if body.category is not None:
-        info.category = body.category.strip()
+    if body.name is not None:
+        info.name = body.name.strip()
     if body.content is not None:
         info.content = body.content.strip()
     db.commit()
@@ -441,7 +441,7 @@ async def update_entity_info(entity_name: str, info_id: str, body: EntityInfoUpd
     return EntityInfoResponse(
         id=info.id,
         entity_name=info.entity_name,
-        category=info.category,
+        name=info.name,
         content=info.content,
         created_at=info.created_at.isoformat() if info.created_at else "",
         updated_at=info.updated_at.isoformat() if info.updated_at else "",

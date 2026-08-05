@@ -72,10 +72,10 @@ class EntityInfo(Base):
 
     id = Column(String, primary_key=True, default=generate_uuid)
     entity_name = Column(String(200), nullable=False, index=True)  # which entity this info belongs to
-    category = Column(String(100), nullable=False, default="")     # 类别
-    content = Column(Text, nullable=False, default="")             # 内容
+    name = Column(String(100), nullable=False, default="")          # 名称
+    content = Column(Text, nullable=False, default="")              # 内容
     created_at = Column(DateTime, default=utcnow, nullable=False)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
     def __repr__(self):
-        return f"<EntityInfo {self.entity_name} [{self.category}]>"
+        return f"<EntityInfo {self.entity_name} [{self.name}]>"
