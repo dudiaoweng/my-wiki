@@ -3,6 +3,7 @@ import type { Category, CategoryCreate } from '../types/category';
 import type { Stats } from '../types/stats';
 import type { GraphData } from '../types/graph';
 import type { QARequest, QAResponse, FileParseResult, FileStatusResult } from '../types/qa';
+import type { Comment } from '../types/comment';
 import { getDevUserHeader } from './auth';
 
 export interface EntityInfoItem {
@@ -287,6 +288,62 @@ export const api = {
       throw new ApiError(res.status, body.detail ?? res.statusText);
     }
     return res.json();
+  },
+
+  // ── Comments ──
+  getComments(articleId: string) {
+    return request<Comment[]>(`/articles/${articleId}/comments`);
+  },
+
+  async createComment(articleId: string, content: string, files?: File[]): Promise<Comment> {
+    const formData = new FormData();
+    formData.append('content', content);
+    if (files) {
+      for (const f of files) formData.append('files', f);
+    }
+    const res = await fetch(`${BASE}/articles/${articleId}/comments`, {
+      method: 'POST',
+      headers: mergeHeaders(),
+      body: formData,
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ detail: res.statusText }));
+      let detail = body.detail ?? res.statusText;
+      if (Array.isArray(detail)) {
+        detail = detail.map((d: { msg?: string }) => d.msg ?? JSON.stringify(d)).join('; ');
+      }
+      throw new ApiError(res.status, detail);
+    }
+    return res.json();
+  },
+
+  async updateComment(articleId: string, commentId: string, content: string, files?: File[], keepAttachments?: string[]): Promise<Comment> {
+    const formData = new FormData();
+    formData.append('content', content);
+    if (keepAttachments !== undefined) {
+      formData.append('keep_attachments', JSON.stringify(keepAttachments));
+    }
+    if (files) {
+      for (const f of files) formData.append('files', f);
+    }
+    const res = await fetch(`${BASE}/articles/${articleId}/comments/${commentId}`, {
+      method: 'PUT',
+      headers: mergeHeaders(),
+      body: formData,
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ detail: res.statusText }));
+      let detail = body.detail ?? res.statusText;
+      if (Array.isArray(detail)) {
+        detail = detail.map((d: { msg?: string }) => d.msg ?? JSON.stringify(d)).join('; ');
+      }
+      throw new ApiError(res.status, detail);
+    }
+    return res.json();
+  },
+
+  deleteComment(articleId: string, commentId: string) {
+    return request<void>(`/articles/${articleId}/comments/${commentId}`, { method: 'DELETE' });
   },
 
   // ── Upload ──

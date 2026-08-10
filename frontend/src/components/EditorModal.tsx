@@ -265,7 +265,27 @@ export function EditorModal() {
           </div>
 
           <div className={styles.group}>
-            <label className={styles.label}>附件（选填）</label>
+            <label className={styles.label}>
+              内容{' '}
+              <span className={styles.hint} style={{ fontWeight: 400, textTransform: 'none' }}>
+                支持 Markdown 语法：<code># 标题</code> <code>**粗体**</code> <code>`代码`</code> <code>- 列表</code> <code>&gt; 引用</code>
+              </span>
+            </label>
+            <textarea
+              className={styles.textarea}
+              value={content}
+              onChange={(e) => setContent(e.target.value)}
+              placeholder={'使用 Markdown 编写内容…\n\n# 标题\n**粗体** *斜体* `代码`\n- 列表项'}
+            />
+          </div>
+
+          <div className={styles.group}>
+            <label className={styles.label}>
+              附件（选填）{' '}
+              <span className={styles.hint} style={{ fontWeight: 400, textTransform: 'none' }}>
+                支持文档、图片、音频、视频，保存后自动识别内容
+              </span>
+            </label>
               <input
                 ref={fileInputRef}
                 type="file"
@@ -350,23 +370,7 @@ export function EditorModal() {
                   + 添加
                 </button>
               </div>
-              <span className={styles.hint}>
-                支持文档、图片、音频、视频，保存后自动识别内容
-              </span>
             </div>
-
-          <div className={styles.group}>
-            <label className={styles.label}>内容</label>
-            <textarea
-              className={styles.textarea}
-              value={content}
-              onChange={(e) => setContent(e.target.value)}
-              placeholder={'使用 Markdown 编写内容…\n\n# 标题\n**粗体** *斜体* `代码`\n- 列表项'}
-            />
-            <span className={styles.hint}>
-              支持 Markdown 语法：<code># 标题</code> <code>**粗体**</code> <code>`代码`</code> <code>- 列表</code> <code>&gt; 引用</code>
-            </span>
-          </div>
         </div>
 
         <div className={styles.footer}>

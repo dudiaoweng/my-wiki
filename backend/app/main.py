@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import FileResponse, HTMLResponse, RedirectResponse
 from app.database import init_db, SessionLocal
 from app.models import Category, Article
-from app.routes import articles, categories, tags, entities, stats, graph, qa, upload
+from app.routes import articles, categories, tags, entities, stats, graph, qa, upload, comments
 from app.config import UPLOAD_DIR as UPLOAD_DIR_STR
 from app.auth import verify_client_cert, get_client_cert, CertInfo
 
@@ -170,6 +170,7 @@ api_router.include_router(entities.router)
 api_router.include_router(graph.router)
 api_router.include_router(qa.router)
 api_router.include_router(upload.router)
+api_router.include_router(comments.router)
 app.include_router(api_router)
 
 # Public routes (no cert required — used by login page on port 8000)

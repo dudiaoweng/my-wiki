@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useDeferredValue } from 'react';
+import { useState, useEffect, useMemo, useRef, useDeferredValue } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -8,6 +8,7 @@ import { useArticles } from '../hooks/useArticles';
 import { useApp } from '../context/AppProvider';
 import { useToast } from '../hooks/useToast';
 import { AttachmentGallery, useAttachments } from './AttachmentGallery';
+import { CommentSection } from './CommentSection';
 import { createEntityHighlightPlugin } from '../utils/rehypeEntityHighlight';
 import { createSearchHighlightPlugin } from '../utils/rehypeSearchHighlight';
 import { useEntityOccurrences } from '../hooks/useEntityOccurrences';
@@ -17,6 +18,8 @@ import { SearchNavBar } from './SearchNavBar';
 import type { Article } from '../types/article';
 import styles from './ArticleDetail.module.css';
 
+// ─── Helpers ────────────────────────────────────────
+
 function formatDate(iso: string): string {
   const d = new Date(iso);
   const date = d.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
@@ -24,56 +27,60 @@ function formatDate(iso: string): string {
   return `${date} ${time}`;
 }
 
-/** Extract the name portion from a CN like "谢林 320100198601010018". */
 function formatUser(cn: string | null): string {
   if (!cn) return '';
   const match = cn.match(/^(.+?)\s+\d{18}$/);
   return match ? match[1] : cn;
 }
 
-export function ArticleDetail() {
-  const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
-  const { openEditor, requestConfirm, notifyArticleSaved } = useApp();
-  const { showToast } = useToast();
+// ─── Shared article detail view ─────────────────────
 
+interface ArticleDetailViewProps {
+  articleId: string;
+  onBack: () => void;
+  prevArticleId?: string;
+  nextArticleId?: string;
+  onNavigate?: (id: string) => void;
+  /** Selected entity name (works for both EntityPanel-driven and local state). */
+  selectedEntity?: string | null;
+  /** Called when user selects or clears an entity. */
+  onEntitySelect?: (name: string | null) => void;
+  /** Called when user clicks a tag (page mode navigates to tag filter). */
+  onTagClick?: (tag: string) => void;
+  /** Show edit/delete buttons in top bar instead of at page bottom. */
+  actionsInTopBar?: boolean;
+}
+
+export function ArticleDetailView({
+  articleId, onBack, prevArticleId, nextArticleId, onNavigate,
+  selectedEntity, onEntitySelect, onTagClick, actionsInTopBar,
+}: ArticleDetailViewProps) {
+  const { openEditor, requestConfirm, notifyArticleSaved, articleVersion } = useApp();
+  const { showToast } = useToast();
   const [article, setArticle] = useState<Article | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selectedEntity, setSelectedEntity] = useState<string | null>(null);
-
-  // In-article search state
-  const [searchQuery, setSearchQuery] = useState('');
-  // Defer the expensive highlight re-render so typing stays responsive
-  const deferredSearchQuery = useDeferredValue(searchQuery);
-
-  // Fetch full article list for prev/next navigation
-  const { articles: allArticles } = useArticles();
-  const currentIndex = allArticles.findIndex((a) => a.id === id);
-  const prevId = currentIndex > 0 ? allArticles[currentIndex - 1]?.id : undefined;
-  const nextId = currentIndex >= 0 && currentIndex < allArticles.length - 1
-    ? allArticles[currentIndex + 1]?.id : undefined;
+  const [commentTexts, setCommentTexts] = useState<string[]>([]);
 
   useEffect(() => {
-    if (!id) return;
     setLoading(true);
     setError(null);
-    api
-      .getArticle(id)
+    api.getArticle(articleId)
       .then(setArticle)
       .catch((e) => {
-        setError(e instanceof Error ? e.message : 'Failed to load article');
-        showToast('文章不存在', 'error');
+        const msg = e instanceof Error ? e.message : '加载失败';
+        setError(msg);
+        showToast(msg, 'error');
       })
       .finally(() => setLoading(false));
-  }, [id, showToast]);
+  }, [articleId, showToast]);
 
   // Poll while background recognition is running
   useEffect(() => {
-    if (!id || !article || article.processing !== 'processing') return;
+    if (!article || article.processing !== 'processing') return;
     const timer = setInterval(async () => {
       try {
-        const updated = await api.getArticle(id);
+        const updated = await api.getArticle(articleId);
         setArticle(updated);
         if (updated.processing !== 'processing') {
           clearInterval(timer);
@@ -82,18 +89,40 @@ export function ArticleDetail() {
       } catch { /* keep polling */ }
     }, 5000);
     return () => clearInterval(timer);
-  }, [article, id, notifyArticleSaved]);
+  }, [article, articleId, notifyArticleSaved]);
+
+  // Re-fetch article when articleVersion changes (e.g. after editing in EditorModal)
+  const prevVersionRef = useRef(articleVersion);
+  useEffect(() => {
+    if (prevVersionRef.current !== articleVersion) {
+      prevVersionRef.current = articleVersion;
+      api.getArticle(articleId).then(setArticle).catch(() => {});
+    }
+  }, [articleVersion, articleId]);
 
   // Must be called before any early returns (Rules of Hooks)
   const { mediaItems, cleanContent } = useAttachments(article?.content ?? '', article?.attachment_name);
 
-  // Entity highlighting
+  const entityToHighlight = selectedEntity ?? null;
+
+  const [searchQuery, setSearchQuery] = useState('');
+  const deferredSearchQuery = useDeferredValue(searchQuery);
+
   const highlightPlugin = useMemo(
-    () => createEntityHighlightPlugin(selectedEntity),
-    [selectedEntity],
+    () => createEntityHighlightPlugin(entityToHighlight),
+    [entityToHighlight],
   );
 
-  // Search highlighting — uses deferred value to keep UI responsive while typing
+  const articleEntityOccurrenceCount = useMemo(() => {
+    if (!entityToHighlight || !cleanContent) return 0;
+    const escaped = entityToHighlight.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(escaped, 'gi');
+    let count = 0;
+    regex.lastIndex = 0;
+    while (regex.exec(cleanContent) !== null) count++;
+    return count;
+  }, [cleanContent, entityToHighlight]);
+
   const searchTerm = deferredSearchQuery.trim();
   const searchPlugin = useMemo(
     () => createSearchHighlightPlugin(searchTerm || null),
@@ -104,14 +133,14 @@ export function ArticleDetail() {
     () => [rehypeRaw, highlightPlugin, searchPlugin] as any,
     [highlightPlugin, searchPlugin],
   );
+
   const {
     count: occurrenceCount,
     activeIndex: activeOccurrenceIndex,
     occurrences,
     scrollToOccurrence,
-  } = useEntityOccurrences(cleanContent, selectedEntity);
+  } = useEntityOccurrences(cleanContent, entityToHighlight, commentTexts);
 
-  // In-article search — uses deferred value for DOM-based hook
   const contentLength = useMemo(() => cleanContent.length, [cleanContent]);
   const {
     count: searchCount,
@@ -123,7 +152,6 @@ export function ArticleDetail() {
   const isSearchActive = searchTerm.length > 0;
   const isSearchPending = searchQuery.trim() && searchQuery.trim() !== searchTerm;
 
-  // Memoize Markdown element BEFORE early returns (Rules of Hooks)
   const markdownEl = useMemo(
     () => (
       <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={rehypePlugins}>
@@ -133,68 +161,49 @@ export function ArticleDetail() {
     [cleanContent, rehypePlugins],
   );
 
-  if (loading) {
-    return <div className={styles.loading}>加载中…</div>;
-  }
-
-  if (error || !article) {
-    return (
-      <div className={styles.loading}>
-        <p>{error ?? '文章不存在'}</p>
-        <button className={`${styles.btn} ${styles.btnPrimary}`} style={{ marginTop: 16 }} onClick={() => navigate('/articles')}>
-          返回列表
-        </button>
-      </div>
-    );
-  }
+  if (loading) return <div className={styles.loading}>加载中…</div>;
+  if (error) return <div className={styles.loading}>加载失败：{error}</div>;
+  if (!article) return <div className={styles.loading}>文章不存在</div>;
 
   const catColor = article.category?.color ?? 'var(--c-text-muted)';
   const catName = article.category?.name ?? '未分类';
-  const entityCount = article.entities?.entities?.length ?? 0;
-  const relationCount = article.entities?.relations?.length ?? 0;
 
   const handleDelete = () => {
-    if (!id) return;
-    requestConfirm('确认删除', `确定要删除「${article.title}」吗？此操作不可撤销。`, async () => {
+    requestConfirm('确认删除', `确定要删除「${article.title}」吗？`, async () => {
       try {
-        await api.deleteArticle(id);
+        await api.deleteArticle(articleId);
         showToast('文章已删除', 'success');
         notifyArticleSaved();
-        navigate('/articles');
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : 'Delete failed';
-        showToast(msg, 'error');
+        onBack();
+      } catch {
+        showToast('删除失败', 'error');
       }
     });
-  };
-
-  const handleTagClick = (tag: string) => {
-    navigate(`/articles?tag=${encodeURIComponent(tag)}`);
   };
 
   return (
     <div className={styles.detail}>
       <div className={styles.topBar}>
         <div className={styles.topBarLeft}>
-          <button className={styles.backBtn} onClick={() => navigate('/articles')}>
-            ← 返回列表
-          </button>
-          <div className={styles.navGroup}>
-            <button
-              className={styles.navBtn}
-              disabled={!prevId}
-              onClick={() => prevId && navigate(`/articles/${prevId}`)}
-            >
-              ← 上一篇
-            </button>
-            <button
-              className={styles.navBtn}
-              disabled={!nextId}
-              onClick={() => nextId && navigate(`/articles/${nextId}`)}
-            >
-              下一篇 →
-            </button>
-          </div>
+          <button className={styles.backBtn} onClick={onBack}>← 返回列表</button>
+          {onNavigate && (
+            <div className={styles.navGroup}>
+              <button
+                className={styles.navBtn}
+                disabled={!prevArticleId}
+                onClick={() => prevArticleId && onNavigate(prevArticleId)}
+              >
+                ← 上一篇
+              </button>
+              <button
+                className={styles.navBtn}
+                disabled={!nextArticleId}
+                onClick={() => nextArticleId && onNavigate(nextArticleId)}
+              >
+                下一篇 →
+              </button>
+            </div>
+          )}
         </div>
         <div className={styles.topBarRight}>
           <div className={styles.searchWrap}>
@@ -228,52 +237,52 @@ export function ArticleDetail() {
           {isSearchActive && !isSearchPending && searchCount === 0 && (
             <span className={styles.searchNoResults}>无匹配</span>
           )}
+          {actionsInTopBar && (
+            <div className={styles.actions}>
+              <button className={styles.btn} onClick={() => openEditor(article.id)}>✏️ 编辑</button>
+              <button className={`${styles.btn} ${styles.btnDanger}`} onClick={handleDelete}>🗑 删除</button>
+            </div>
+          )}
         </div>
       </div>
 
-      <div className={styles.header}>
-        <div className={styles.categoryLabel} style={{ color: catColor }}>
-          {catName}
-        </div>
-        <h1 className={styles.title}>
-          {article.title}
-          {article.processing === 'processing' && (
-            <span className={styles.processingBadge}>⏳ 解析中…</span>
-          )}
-        </h1>
-        <div className={styles.meta}>
-          <span>📅 创建于 {formatDate(article.created_at)}</span>
-          {article.created_by && (
-            <span title={article.created_by}>👤 创建人 {formatUser(article.created_by)}</span>
-          )}
-          {article.created_at !== article.updated_at && (
-            <>
-              <span>✏️ 更新于 {formatDate(article.updated_at)}</span>
-              {article.updated_by && (
-                <span title={article.updated_by}>👤 更新人 {formatUser(article.updated_by)}</span>
-              )}
-            </>
-          )}
-          <span>🔖 {entityCount} 个实体</span>
-          <span>🔗 {relationCount} 个关系</span>
-        </div>
-        {article.tags.length > 0 && (
-          <div className={styles.tags}>
-            {article.tags.map((t) => (
-              <button
-                key={t}
-                className={styles.tag}
-                onClick={() => handleTagClick(t)}
-                title={`查看所有标记为「${t}」的文章`}
-              >
-                {t}
-              </button>
-            ))}
-          </div>
+      <div className={styles.categoryLabel} style={{ color: catColor }}>{catName}</div>
+      <h1 className={styles.title}>
+        {article.title}
+        {article.processing === 'processing' && (
+          <span className={styles.processingBadge}>⏳ 解析中…</span>
         )}
+      </h1>
+
+      <div className={styles.meta}>
+        <span>📅 创建于 {formatDate(article.created_at)}</span>
+        {article.created_by && (
+          <span title={article.created_by}>👤 创建人 {formatUser(article.created_by)}</span>
+        )}
+        {article.created_at !== article.updated_at && (
+          <>
+            <span>✏️ 更新于 {formatDate(article.updated_at)}</span>
+            {article.updated_by && (
+              <span title={article.updated_by}>👤 更新人 {formatUser(article.updated_by)}</span>
+            )}
+          </>
+        )}
+        <span>🔖 {article.entities?.entities?.length ?? 0} 个实体</span>
+        <span>🔗 {article.entities?.relations?.length ?? 0} 个关系</span>
       </div>
 
-      <AttachmentGallery items={mediaItems} articleId={id} />
+      {article.tags.length > 0 && (
+        <div className={styles.tags}>
+          {article.tags.map((t) => (
+            onTagClick ? (
+              <button key={t} className={styles.tag} onClick={() => onTagClick(t)}
+                title={`查看所有标记为「${t}」的文章`}>{t}</button>
+            ) : (
+              <span key={t} className={styles.tag}>{t}</span>
+            )
+          ))}
+        </div>
+      )}
 
       <div className={`${styles.content} markdown-content`} id="article-content">
         {markdownEl}
@@ -288,31 +297,73 @@ export function ArticleDetail() {
             onClose={() => setSearchQuery('')}
           />
         )}
-
-        {selectedEntity && occurrenceCount > 0 && (
-          <EntityOccurrenceBar
-            entityName={selectedEntity}
-            entityType={article.entities?.entities?.find((e) => e.name === selectedEntity)?.type}
-            totalCount={occurrenceCount}
-            activeIndex={activeOccurrenceIndex}
-            occurrences={occurrences}
-            onNavigate={scrollToOccurrence}
-            onClose={() => setSelectedEntity(null)}
-          />
-        )}
       </div>
 
-      <div className={styles.actions}>
-        <button
-          className={`${styles.btn} ${styles.btnPrimary}`}
-          onClick={() => openEditor(article.id)}
-        >
-          ✏️ 编辑
-        </button>
-        <button className={`${styles.btn} ${styles.btnDanger}`} onClick={handleDelete}>
-          🗑 删除
-        </button>
-      </div>
+      <AttachmentGallery items={mediaItems} articleId={articleId} />
+
+      <CommentSection
+        articleId={articleId}
+        selectedEntity={entityToHighlight}
+        entityOccurrenceOffset={articleEntityOccurrenceCount}
+        onCommentTextsChange={setCommentTexts}
+      />
+
+      {!actionsInTopBar && (
+        <div className={styles.actionsBottom}>
+          <button className={styles.btn} onClick={() => openEditor(article.id)}>✏️ 编辑</button>
+          <button className={`${styles.btn} ${styles.btnDanger}`} onClick={handleDelete}>🗑 删除</button>
+        </div>
+      )}
+
+      {entityToHighlight && occurrenceCount > 0 && (
+        <EntityOccurrenceBar
+          entityName={entityToHighlight}
+          entityType={article.entities?.entities?.find((e) => e.name === entityToHighlight)?.type}
+          totalCount={occurrenceCount}
+          activeIndex={activeOccurrenceIndex}
+          occurrences={occurrences}
+          onNavigate={scrollToOccurrence}
+          onClose={() => onEntitySelect?.(null)}
+        />
+      )}
     </div>
   );
 }
+
+// ─── Route wrapper (standalone page: /articles/:id) ──
+
+export function ArticleDetail() {
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const [selectedEntity, setSelectedEntity] = useState<string | null>(null);
+
+  const { articles: allArticles } = useArticles();
+  const currentIndex = allArticles.findIndex((a) => a.id === id);
+  const prevId = currentIndex > 0 ? allArticles[currentIndex - 1]?.id : undefined;
+  const nextId = currentIndex >= 0 && currentIndex < allArticles.length - 1
+    ? allArticles[currentIndex + 1]?.id : undefined;
+
+  if (!id) {
+    return (
+      <div style={{ textAlign: 'center', padding: 60, color: 'var(--c-text-muted)' }}>
+        文章不存在
+      </div>
+    );
+  }
+
+  return (
+    <ArticleDetailView
+      articleId={id}
+      onBack={() => navigate('/articles')}
+      prevArticleId={prevId}
+      nextArticleId={nextId}
+      onNavigate={(nid) => navigate(`/articles/${nid}`)}
+      selectedEntity={selectedEntity}
+      onEntitySelect={(name) => setSelectedEntity(name)}
+      onTagClick={(tag) => navigate(`/articles?tag=${encodeURIComponent(tag)}`)}
+    />
+  );
+}
+
+// Re-export for backward compatibility
+export { ArticleDetailView as ArticleDetailInline };

@@ -5,32 +5,65 @@ export interface Occurrence {
   ratio: number; // 0–1, character position / total text length
 }
 
-export function useEntityOccurrences(content: string, entityName: string | null) {
+/**
+ * Compute entity occurrences across one or more text sources.
+ *
+ * @param content     Primary text (article body).
+ * @param entityName  Entity name to search for, or null.
+ * @param extraTexts  Additional text blocks (e.g. comment contents). Their
+ *                    occurrences are appended after content occurrences, with
+ *                    ratios normalised across the combined total length.
+ */
+export function useEntityOccurrences(
+  content: string,
+  entityName: string | null,
+  extraTexts: string[] = [],
+) {
   const [activeIndex, setActiveIndex] = useState(0);
   const observerRef = useRef<IntersectionObserver | null>(null);
   // Prevent IntersectionObserver from overriding manual navigation during scroll animation
   const isManualScrolling = useRef(false);
   const manualTimer = useRef<ReturnType<typeof setTimeout>>();
 
-  // ── Compute occurrence list from raw text ──
+  // ── Compute occurrence list from all text sources ──
   const occurrences = useMemo<Occurrence[]>(() => {
     if (!entityName || !content) return [];
 
     const escaped = entityName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const regex = new RegExp(escaped, 'gi');
     const results: Occurrence[] = [];
-    const totalLen = content.length;
 
-    regex.lastIndex = 0;
-    let m: RegExpExecArray | null;
+    // Compute total length for ratio normalisation
+    const contentLen = content.length;
+    const extraLens = extraTexts.map((t) => t.length);
+    const totalLen = contentLen + extraLens.reduce((a, b) => a + b, 0);
+
     let idx = 0;
-    while ((m = regex.exec(content)) !== null) {
-      results.push({ index: idx, ratio: totalLen > 0 ? m.index / totalLen : 0 });
-      idx++;
+    let offset = 0; // cumulative character offset across sources
+
+    function scan(text: string, sourceOffset: number) {
+      regex.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = regex.exec(text)) !== null) {
+        results.push({
+          index: idx,
+          ratio: totalLen > 0 ? (sourceOffset + m.index) / totalLen : 0,
+        });
+        idx++;
+      }
+    }
+
+    scan(content, 0);
+    offset = contentLen;
+    for (const t of extraTexts) {
+      if (t) {
+        scan(t, offset);
+        offset += t.length;
+      }
     }
 
     return results;
-  }, [content, entityName]);
+  }, [content, entityName, extraTexts]);
 
   const count = occurrences.length;
 

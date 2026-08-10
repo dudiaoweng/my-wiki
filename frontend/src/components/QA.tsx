@@ -4,7 +4,7 @@ import rehypeRaw from 'rehype-raw';
 import { useQA } from '../hooks/useQA';
 import { useApp } from '../context/AppProvider';
 import { useToast } from '../hooks/useToast';
-import { ArticleDetailInline } from './ArticleDetailInline';
+import { ArticleDetailInline } from './ArticleDetail';
 import { Lightbox } from './Lightbox';
 import type { FileContext } from '../types/qa';
 import styles from './QA.module.css';

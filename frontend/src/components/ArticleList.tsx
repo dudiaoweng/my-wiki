@@ -5,7 +5,7 @@ import { useArticles } from '../hooks/useArticles';
 import { useCategories } from '../hooks/useCategories';
 import { useApp } from '../context/AppProvider';
 import { ArticleCard } from './ArticleCard';
-import { ArticleDetailInline } from './ArticleDetailInline';
+import { ArticleDetailInline } from './ArticleDetail';
 import { EntityPanel, type ViewMode } from './EntityPanel';
 import styles from './ArticleList.module.css';
 
@@ -274,14 +274,15 @@ export function ArticleList() {
             };
             return (
               <ArticleDetailInline
-                key={`${viewedArticleId}-${articleVersion}`}
+                key={viewedArticleId}
                 articleId={viewedArticleId}
                 onBack={handleBack}
                 prevArticleId={prevId}
                 nextArticleId={nextId}
                 onNavigate={handleNavigate}
-                highlightEntity={highlightEntity}
-                onClearHighlight={() => setHighlightEntity(null)}
+                selectedEntity={highlightEntity}
+                onEntitySelect={(name) => setHighlightEntity(name)}
+                actionsInTopBar
               />
             );
           })()

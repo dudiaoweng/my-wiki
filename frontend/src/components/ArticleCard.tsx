@@ -109,6 +109,21 @@ export function ArticleCard({ article, selected, onSelect, onOpen }: Props) {
             </span>
           ))}
         </div>
+        {article.comment_count != null && article.comment_count > 0 && article.latest_comments && article.latest_comments.length > 0 && (
+          <div className={styles.commentSummary}>
+            <div className={styles.commentHeader}>
+              <span className={styles.commentIcon}>💬</span>
+              <span className={styles.commentCount}>{article.comment_count} 条评论</span>
+            </div>
+            {article.latest_comments.map((c) => (
+              <div key={c.id} className={styles.commentLine}>
+                <span className={styles.commentAuthor}>{formatUser(c.created_by)}</span>
+                <span className={styles.commentText}>{c.content}</span>
+                <span className={styles.commentTime}>{formatDate(c.created_at)}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

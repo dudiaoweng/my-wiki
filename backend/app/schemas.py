@@ -121,6 +121,95 @@ class ArticleResponse(BaseModel):
         return None
 
 
+# ─── Comment ───────────────────────────────────────
+
+class CommentCreate(BaseModel):
+    content: str = Field(default="", max_length=2000)
+
+
+class CommentUpdate(BaseModel):
+    content: Optional[str] = Field(default=None, max_length=2000)
+    tags: Optional[list[str]] = None
+
+
+class CommentSummary(BaseModel):
+    id: str
+    content: str
+    created_by: Optional[str] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+    @field_serializer("created_at")
+    @classmethod
+    def serialize_utc(cls, v: datetime) -> str:
+        if v.tzinfo is None:
+            v = v.replace(tzinfo=timezone.utc)
+        return v.isoformat()
+
+
+class CommentResponse(BaseModel):
+    id: str
+    article_id: str
+    content: str
+    tags: list[str]
+    entities: Optional[dict] = None
+    processing: Optional[str] = None
+    attachments: Optional[list[dict]] = None    # [{path, name, type}, ...]
+    attachment_path: Optional[str] = None
+    attachment_name: Optional[str] = None
+    attachment_type: Optional[str] = None
+    created_by: Optional[str] = None
+    updated_by: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def parse_tags(cls, v: object) -> list[str]:
+        if isinstance(v, str):
+            return json.loads(v)
+        if isinstance(v, list):
+            return v
+        return []
+
+    @field_validator("entities", mode="before")
+    @classmethod
+    def parse_entities(cls, v: object) -> Optional[dict]:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return json.loads(v)
+        if isinstance(v, dict):
+            return v
+        return None
+
+    @field_validator("attachments", mode="before")
+    @classmethod
+    def parse_attachments(cls, v: object) -> Optional[list[dict]]:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return json.loads(v)
+        if isinstance(v, list):
+            return v
+        return None
+
+    @field_serializer("created_at", "updated_at")
+    @classmethod
+    def serialize_utc(cls, v: datetime) -> str:
+        if v.tzinfo is None:
+            v = v.replace(tzinfo=timezone.utc)
+        return v.isoformat()
+
+
+class ArticleListItem(ArticleResponse):
+    comment_count: int = 0
+    latest_comments: list[CommentSummary] = []
+
+
 # ─── Stats ──────────────────────────────────────────
 
 class StatsResponse(BaseModel):
