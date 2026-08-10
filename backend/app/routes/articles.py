@@ -10,8 +10,8 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import desc
 from app.dependencies import get_db
 from app.database import SessionLocal
-from app.models import Article, Category, EntityInfo
-from app.schemas import ArticleCreate, ArticleUpdate, ArticleResponse
+from app.models import Article, Category, Comment, EntityInfo
+from app.schemas import ArticleCreate, ArticleUpdate, ArticleResponse, ArticleListItem, CommentSummary
 from app.auth import get_client_cert, CertInfo
 from app.llm_extract import extract_tags_and_entities
 from app.routes.upload import (
@@ -60,7 +60,7 @@ def _extract_and_merge(article: Article, user_tags: list[str], db: Session) -> N
         )
 
 
-@router.get("", response_model=list[ArticleResponse])
+@router.get("", response_model=list[ArticleListItem])
 def list_articles(
     category_id: str | None = Query(default=None, alias="category_id"),
     search: str | None = Query(default=None),
@@ -86,7 +86,54 @@ def list_articles(
         q = q.filter(Article.tags.like(f'%"{tag}"%'))
 
     articles = q.offset(skip).limit(limit).all()
-    return articles
+
+    # Batch-fetch comment counts and latest comments
+    article_ids = [a.id for a in articles]
+    if article_ids:
+        from sqlalchemy import func
+        # Comment counts
+        count_rows = (
+            db.query(Comment.article_id, func.count(Comment.id))
+            .filter(Comment.article_id.in_(article_ids))
+            .group_by(Comment.article_id)
+            .all()
+        )
+        counts = {row[0]: row[1] for row in count_rows}
+
+        # Up to 3 latest comments per article
+        article_comments: dict[str, list[Comment]] = {aid: [] for aid in article_ids}
+        all_comments = (
+            db.query(Comment)
+            .filter(Comment.article_id.in_(article_ids))
+            .order_by(desc(Comment.created_at))
+            .all()
+        )
+        for c in all_comments:
+            if len(article_comments.get(c.article_id, [])) < 3:
+                article_comments.setdefault(c.article_id, []).append(c)
+    else:
+        counts = {}
+        article_comments = {}
+
+    results = []
+    for a in articles:
+        item = ArticleListItem.model_validate(a)
+        item.comment_count = counts.get(a.id, 0)
+        for c in article_comments.get(a.id, []):
+            # Strip HTML tags and markers from comment content for clean card display
+            clean = re.sub(r'<[^>]*>', '', c.content or '')
+            clean = re.sub(r'<!--.*?-->', '', clean)
+            clean = re.sub(r'\s+', ' ', clean).strip()
+            snippet = clean[:60] + "…" if len(clean) > 60 else clean
+            item.latest_comments.append(CommentSummary(
+                id=c.id,
+                content=snippet,
+                created_by=c.created_by,
+                created_at=c.created_at,
+            ))
+        results.append(item)
+
+    return results
 
 
 @router.get("/{article_id}", response_model=ArticleResponse)

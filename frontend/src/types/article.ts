@@ -1,4 +1,5 @@
 import type { Category } from './category';
+import type { CommentSummary } from './comment';
 
 export interface EntityItem {
   name: string;
@@ -31,6 +32,8 @@ export interface Article {
   attachment_name: string | null;
   attachment_type: string | null;
   processing: string | null;
+  comment_count?: number;
+  latest_comments?: CommentSummary[];
 }
 
 export interface ArticleCreate {

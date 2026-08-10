@@ -46,9 +46,34 @@ class Article(Base):
 
     category = relationship("Category", back_populates="articles")
     chunks = relationship("ArticleChunk", back_populates="article", cascade="all, delete-orphan")
+    comments = relationship("Comment", back_populates="article", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<Article {self.title}>"
+
+
+class Comment(Base):
+    __tablename__ = "comments"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    article_id = Column(String, ForeignKey("articles.id", ondelete="CASCADE"), nullable=False, index=True)
+    content = Column(Text, nullable=False, default="")
+    tags = Column(Text, nullable=False, default="[]")         # JSON array — LLM 提取的标签
+    entities = Column(Text, nullable=True, default=None)      # LLM 提取的实体+关系 JSON
+    processing = Column(Text, nullable=True, default=None)    # "processing" | None(completed)
+    attachments = Column(Text, nullable=True, default=None)   # JSON array: [{path, name, type}, ...]
+    attachment_path = Column(String, nullable=True)            # legacy — kept for backward compat
+    attachment_name = Column(String, nullable=True)
+    attachment_type = Column(String, nullable=True)
+    created_by = Column(String(200), nullable=False, default="")  # CN from client cert
+    updated_by = Column(String(200), nullable=False, default="")  # CN from client cert
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    article = relationship("Article", back_populates="comments")
+
+    def __repr__(self):
+        return f"<Comment {self.id[:8]} on {self.article_id[:8]}>"
 
 
 class ArticleChunk(Base):

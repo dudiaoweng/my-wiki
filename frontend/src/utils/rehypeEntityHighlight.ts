@@ -8,8 +8,12 @@ import type { Plugin } from 'unified';
  * - Skips <code>, <pre>, <style>, <script>, <svg> subtrees.
  * - Runs with `gi` flags: case-insensitive for ASCII, exact for CJK.
  * - Returns a no-op plugin when entityName is null/empty.
+ * - `startIndex` offsets the occurrence numbering (for spanning across article + comments).
  */
-export function createEntityHighlightPlugin(entityName: string | null): Plugin {
+export function createEntityHighlightPlugin(
+  entityName: string | null,
+  startIndex: number = 0,
+): Plugin {
   if (!entityName) {
     return function noop() {
       return function transform() {
@@ -23,10 +27,10 @@ export function createEntityHighlightPlugin(entityName: string | null): Plugin {
   const SKIP_TAGS = new Set(['code', 'pre', 'style', 'script', 'svg', 'mark']);
 
   return function entityHighlightAttacher() {
-    let occurrenceIndex = 0;
+    let occurrenceIndex = startIndex;
 
     return function transform(tree: any) {
-      occurrenceIndex = 0;
+      occurrenceIndex = startIndex;
       processChildren(tree.children);
 
       function processChildren(children: any[]): void {

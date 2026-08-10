@@ -33,4 +33,9 @@ def init_db():
                 conn.exec_driver_sql(f"ALTER TABLE articles ADD COLUMN {col} TEXT")
             except Exception:
                 pass  # Column already exists
+        for col in ["attachments"]:
+            try:
+                conn.exec_driver_sql(f"ALTER TABLE comments ADD COLUMN {col} TEXT")
+            except Exception:
+                pass  # Column already exists
         conn.commit()
