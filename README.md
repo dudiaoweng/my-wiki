@@ -44,13 +44,30 @@
 - 缩放 / 拖拽 / 节点点击跳转
 - 选中节点高亮，不重建图谱
 
+### 💬 文章评论
+- 评论创建 / 编辑 / 删除，Markdown 编写
+- 记录评论人（身份证号）和时间，仅评论人可修改/删除
+- 支持文件上传（与文章相同的文件类型），自动解析
+- 评论附件画廊（缩略图 / 灯箱 / 下载，与文章一致）
+- 评论内容纳入智能问答（分块嵌入）
+- 文章卡片显示评论概要（条数 + 最新评论摘要）
+
+### 🔐 权限控制
+- **文章**：仅创建人可编辑/删除（基于身份证号）
+- **评论**：仅评论人可编辑/删除，文章创建人也可删除
+- **实体/附加信息**：记录创建人，仅创建人或文章创建人可操作
+- **分类**：记录创建人/时间，仅创建人可修改/删除
+- 前端按钮根据权限自动显示/隐藏，后端 403 兜底
+
 ### 📊 其他
 - 阅读进度条
 - 键盘快捷键
 - Toast 提示
 - 确认对话框
 - 侧边栏响应式
-- 实体出现位置导航（文章内高亮 + 跳转）
+- 实体出现位置导航（文章 + 评论中高亮 + 跳转）
+- 长文章动态截断（展开全文 / 收起）
+- 编辑表单附件标签移至标题后
 
 ---
 
@@ -91,10 +108,11 @@ my-wiki/
 │   │   ├── llm_extract.py         # 共享 LLM 标签+实体提取
 │   │   ├── utils.py               # 共享工具（ffmpeg 查找等）
 │   │   └── routes/
-│   │       ├── articles.py        # 文章 CRUD + 后台 LLM 增强
-│   │       ├── categories.py      # 分类 CRUD
+│   │       ├── articles.py        # 文章 CRUD + 后台 LLM 增强 + 权限控制
+│   │       ├── categories.py      # 分类 CRUD + 权限控制
+│   │       ├── comments.py        # 评论 CRUD + 文件上传 + LLM 增强
 │   │       ├── tags.py            # 标签 CRUD
-│   │       ├── entities.py        # 实体 CRUD + 附加信息
+│   │       ├── entities.py        # 实体 CRUD + 附加信息 + 权限控制
 │   │       ├── graph.py           # 知识图谱数据
 │   │       ├── stats.py           # 统计信息
 │   │       ├── qa.py              # RAG 问答 (语义搜索 + LLM)
@@ -128,8 +146,8 @@ my-wiki/
 │   │   │   ├── Hero.tsx           # 首页
 │   │   │   ├── ArticleCard.tsx    # 文章卡片
 │   │   │   ├── ArticleList.tsx    # 文章列表 + EntityPanel
-│   │   │   ├── ArticleDetail.tsx  # 文章详情页 (独立路由)
-│   │   │   ├── ArticleDetailInline.tsx # 文章内联查看
+│   │   │   ├── ArticleDetail.tsx  # 文章详情页 + 内联查看（归并）
+│   │   │   ├── CommentSection.tsx # 评论组件（共用）
 │   │   │   ├── EditorModal.tsx    # 文章编辑弹窗
 │   │   │   ├── UploadModal.tsx    # 文件上传弹窗
 │   │   │   ├── EntityPanel.tsx    # 实体面板 (列表 + 知识图谱)
@@ -347,6 +365,8 @@ cd backend && .venv\Scripts\python run.py  # 启动双端口服务
 | `GET/POST` | `/api/articles` | 文章列表 / 创建（含 created_by/updated_by） |
 | `GET/PUT/DELETE` | `/api/articles/{id}` | 文章详情 / 更新 / 删除 |
 | `GET` | `/api/articles/{id}/download` | 下载附件 |
+| `GET/POST` | `/api/articles/{id}/comments` | 评论列表 / 创建 |
+| `PUT/DELETE` | `/api/articles/{id}/comments/{cid}` | 更新 / 删除评论 |
 | `GET/POST` | `/api/categories` | 分类列表 / 创建 |
 | `PUT/DELETE` | `/api/categories/{id}` | 分类更新 / 删除 |
 | `GET/POST` | `/api/tags` | 标签列表 / 添加 |
@@ -388,18 +408,29 @@ attachment_path/name/type, processing
 
 ### Category (分类)
 ```
-id, name, color
+id, name, color, created_by, created_at, updated_at
 ```
+- 记录创建人/时间，仅创建人可修改/删除
+
+### Comment (评论)
+```
+id, article_id, content, tags (JSON), entities (JSON),
+attachments (JSON数组 [{path, name, type}]),
+processing, created_by, updated_by, created_at, updated_at
+```
+- 关联文章，级联删除；支持多附件
 
 ### ArticleChunk (文章分块 + 向量)
 ```
 id, article_id, chunk_index, chunk_text, embedding (JSON数组)
 ```
+- 评论内容以 `comment.{id}.{i}` 索引分块纳入
 
 ### EntityInfo (实体附加信息)
 ```
-id, entity_name, category, content, created_at, updated_at
+id, entity_name, name, content, created_by, created_at, updated_at
 ```
+- 记录创建人，仅创建人可修改/删除
 
 ---
 

@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import desc
 from app.dependencies import get_db
 from app.database import SessionLocal
-from app.models import Article, Category, Comment, EntityInfo
+from app.models import Article, Category, Comment, EntityInfo, utcnow
 from app.schemas import ArticleCreate, ArticleUpdate, ArticleResponse, ArticleListItem, CommentSummary
 from app.auth import get_client_cert, CertInfo
 from app.llm_extract import extract_tags_and_entities
@@ -43,6 +43,18 @@ def _validate_article_id(article_id: str) -> None:
             raise HTTPException(status_code=400, detail="Invalid article ID format")
 
 
+def _annotate_entity_creator(entities: dict | None, creator: str) -> dict | None:
+    """Add created_by and created_at to each entity item in the LLM output."""
+    if not isinstance(entities, dict):
+        return entities
+    now = utcnow().isoformat()
+    for e in entities.get("entities", []):
+        if not e.get("created_by"):
+            e["created_by"] = creator
+            e["created_at"] = now
+    return entities
+
+
 def _extract_and_merge(article: Article, user_tags: list[str], db: Session) -> None:
     """Call LLM to extract tags + entities from article content, then merge with
     user-provided tags and update the article in the database."""
@@ -52,6 +64,7 @@ def _extract_and_merge(article: Article, user_tags: list[str], db: Session) -> N
         merged_tags = list(dict.fromkeys([*user_tags, *llm_tags]))
         article.tags = json.dumps(merged_tags, ensure_ascii=False)
         if isinstance(entities, dict) and entities:
+            entities = _annotate_entity_creator(entities, article.created_by or "")
             article.entities = json.dumps(entities, ensure_ascii=False)
         db.commit()
         logger.info(
@@ -172,6 +185,7 @@ async def _bg_extract(article_id: str, user_tags: list[str], need_title: bool) -
             merged_tags = list(dict.fromkeys([*user_tags, *llm_tags]))
             art.tags = json.dumps(merged_tags, ensure_ascii=False)
             if isinstance(entities, dict) and entities:
+                entities = _annotate_entity_creator(entities, art.created_by or "")
                 art.entities = json.dumps(entities, ensure_ascii=False)
             db2.commit()
             logger.info(
@@ -350,6 +364,7 @@ async def _bg_attachment_enhance(
                 merged = list(dict.fromkeys([*existing_tags, *bg_tags]))
                 art.tags = json.dumps(merged, ensure_ascii=False)
             if isinstance(bg_entities, dict) and bg_entities:
+                bg_entities = _annotate_entity_creator(bg_entities, art.created_by or "")
                 art.entities = json.dumps(bg_entities, ensure_ascii=False)
 
         # Apply enriched content (media descriptions + document parsing)
@@ -467,7 +482,6 @@ async def create_article(
         attachment_name=attachment_name,
         attachment_type=attachment_type,
         created_by=user_cn or None,
-        updated_by=user_cn or None,
     )
     db.add(article)
     db.commit()
@@ -525,8 +539,9 @@ async def update_article(
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
 
-    # Track who is making the modification
-    article.updated_by = user_cn or None
+    # Only the creator can edit
+    if article.created_by and article.created_by != user_cn:
+        raise HTTPException(status_code=403, detail="只有文章创建人可以编辑该文章")
 
     # Parse tags
     try:
@@ -834,11 +849,16 @@ def download_attachment(
 def delete_article(
     article_id: str = PathParam(..., max_length=36),
     db: Session = Depends(get_db),
+    cert: CertInfo = Depends(get_client_cert),
 ):
     _validate_article_id(article_id)
     article = db.query(Article).filter(Article.id == article_id).first()
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
+
+    user_cn = cert.display_name or ""
+    if article.created_by and article.created_by != user_cn:
+        raise HTTPException(status_code=403, detail="只有文章创建人可以删除该文章")
 
     # Collect entity names from this article before deleting
     entity_names: set[str] = set()

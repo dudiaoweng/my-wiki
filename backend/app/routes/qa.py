@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from app.dependencies import get_db
-from app.models import Article, ArticleChunk, EntityInfo
+from app.models import Article, ArticleChunk, Comment, EntityInfo
 from app.config import (
     LLM_API_KEY, LLM_API_BASE, LLM_MODEL,
     VISION_API_KEY, VISION_API_BASE, VISION_MODEL,
@@ -200,7 +200,7 @@ async def ensure_embeddings(db: Session, force: bool = False):
             if force:
                 db.query(ArticleChunk).filter(ArticleChunk.article_id == article.id).delete()
 
-            # Chunk and embed
+            # Chunk and embed article content
             chunks = chunk_article(article.content)
             for i, chunk_text in enumerate(chunks):
                 try:
@@ -213,13 +213,44 @@ async def ensure_embeddings(db: Session, force: bool = False):
                     ))
                 except Exception:
                     logger.warning("Failed to embed chunk %s of article %s", i, article.id, exc_info=True)
-                    # Store chunk without embedding (will be skipped in search)
                     db.add(ArticleChunk(
                         article_id=article.id,
                         chunk_index=str(i),
                         chunk_text=chunk_text,
                         embedding=None,
                     ))
+
+            # Chunk and embed comments
+            comments = db.query(Comment).filter(
+                Comment.article_id == article.id,
+                Comment.content.isnot(None),
+                Comment.content != "",
+            ).all()
+            for c in comments:
+                # Strip HTML tags from comment content for clean embedding
+                clean_comment = re.sub(r'<[^>]*>', '', c.content or '')
+                clean_comment = re.sub(r'<!--.*?-->', '', clean_comment)
+                clean_comment = re.sub(r'\s+', ' ', clean_comment).strip()
+                if not clean_comment:
+                    continue
+                comment_chunks = chunk_article(clean_comment)
+                for i, chunk_text in enumerate(comment_chunks):
+                    idx = f"comment.{c.id[:8]}.{i}"
+                    try:
+                        vec = await get_embedding(chunk_text)
+                        db.add(ArticleChunk(
+                            article_id=article.id,
+                            chunk_index=idx,
+                            chunk_text=f"[评论] {chunk_text}",
+                            embedding=json.dumps(vec),
+                        ))
+                    except Exception:
+                        db.add(ArticleChunk(
+                            article_id=article.id,
+                            chunk_index=idx,
+                            chunk_text=f"[评论] {chunk_text}",
+                            embedding=None,
+                        ))
 
             db.commit()
 
@@ -904,7 +935,7 @@ def _collect_entity_info(
     by_entity: dict[str, list[str]] = {}
     for info in infos:
         by_entity.setdefault(info.entity_name, []).append(
-            f"  - {info.category}: {info.content}"
+            f"  - {info.name}: {info.content}"
         )
 
     lines = ["\n## 实体附加信息（知识图谱）\n"]

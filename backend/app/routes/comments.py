@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from app.dependencies import get_db
 from app.database import SessionLocal
-from app.models import Article, Comment
+from app.models import Article, Comment, utcnow
 from app.schemas import CommentCreate, CommentUpdate, CommentResponse
 from app.auth import get_client_cert, CertInfo
 from app.llm_extract import extract_tags_and_entities
@@ -146,6 +146,44 @@ def _rebuild_article_entities_from_comments(article: Article, db: Session) -> bo
     return True
 
 
+# ─── Embedding helper ────────────────────────────────
+
+async def _embed_comment_content(comment, db) -> None:
+    """Create/update ArticleChunk rows for a comment so it appears in Q&A search."""
+    try:
+        from app.models import ArticleChunk
+        from app.routes.qa import chunk_article, get_embedding
+        import json as _json
+
+        # Delete old chunks for this comment
+        db.query(ArticleChunk).filter(
+            ArticleChunk.chunk_index.like(f"comment.{comment.id[:8]}.%")
+        ).delete()
+
+        clean = re.sub(r'<[^>]*>', '', comment.content or '')
+        clean = re.sub(r'<!--.*?-->', '', clean)
+        clean = re.sub(r'\s+', ' ', clean).strip()
+        if not clean:
+            return
+
+        chunks = chunk_article(clean)
+        for i, chunk_text in enumerate(chunks):
+            idx = f"comment.{comment.id[:8]}.{i}"
+            try:
+                vec = await get_embedding(chunk_text)
+                db.add(ArticleChunk(
+                    article_id=comment.article_id,
+                    chunk_index=idx,
+                    chunk_text=f"[评论] {chunk_text}",
+                    embedding=_json.dumps(vec),
+                ))
+            except Exception:
+                pass
+        db.commit()
+    except Exception:
+        logger.warning("[EMBED_COMMENT] Failed to embed comment %s", comment.id, exc_info=True)
+
+
 # ─── Background task ────────────────────────────────
 
 async def _bg_comment_process(
@@ -232,12 +270,20 @@ async def _bg_comment_process(
             if llm_tags:
                 comment.tags = json.dumps(llm_tags, ensure_ascii=False)
             if isinstance(entities, dict) and entities:
+                # Annotate entity items with comment creator
+                now_str = utcnow().isoformat()
+                for e in entities.get("entities", []):
+                    if not e.get("created_by"):
+                        e["created_by"] = comment.created_by or ""
+                        e["created_at"] = now_str
                 comment.entities = json.dumps(entities, ensure_ascii=False)
                 _merge_entities_into_article(article, entities)
 
             comment.processing = None
             db2.commit()
             invalidate_graph_cache()
+            # Embed comment content for Q&A
+            await _embed_comment_content(comment, db2)
             logger.info(
                 "[BG_COMMENT] comment %s processed: %d tags, %d entities",
                 comment_id, len(llm_tags or []),
@@ -251,6 +297,7 @@ async def _bg_comment_process(
                     comment.content = full_text
                     comment.processing = None
                     db2.commit()
+                    await _embed_comment_content(comment, db2)
     except Exception as e:
         logger.warning(f"[BG_COMMENT] Failed: {e}")
         try:
@@ -598,6 +645,11 @@ def delete_comment(
 
     # Subtract comment's contributions from article entities
     _subtract_comment_from_article(article, comment)
+    # Clean up comment chunks from embedding index
+    from app.models import ArticleChunk
+    db.query(ArticleChunk).filter(
+        ArticleChunk.chunk_index.like(f"comment.{comment.id[:8]}.%")
+    ).delete()
     db.delete(comment)
     db.commit()
 

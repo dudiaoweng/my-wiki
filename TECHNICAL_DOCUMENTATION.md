@@ -1,6 +1,6 @@
 # 知识库系统 — 技术文档
 
-> **版本**: 1.2 | **最后更新**: 2026-07-23 | **作者**: dudiaoweng
+> **版本**: 1.3 | **最后更新**: 2026-08-11 | **作者**: dudiaoweng
 
 ---
 
@@ -27,7 +27,9 @@
 
 **my-wiki** 是一个个人知识库管理系统，支持以下核心功能：
 
-- 📄 **文章管理** — 创建、编辑、删除 Markdown 文章，支持分类和标签
+- 📄 **文章管理** — 创建、编辑、删除 Markdown 文章，支持分类和标签；仅创建人可编辑/删除
+- 💬 **文章评论** — 评论 CRUD，支持多附件、内容纳入智能问答；仅评论人可编辑/删除
+- 🔐 **权限控制** — 基于身份证号的创建人验证，文章/评论/实体/分类均受保护
 - 📤 **文件上传解析** — 支持 .txt / .md / .docx / .xlsx / .pptx / .pdf / 图片 / 音视频，自动通过 LLM 提取标题、实体和关系
 - 🔍 **智能搜索** — 基于向量嵌入 (embedding) 的语义搜索 + 关键词降级搜索
 - 🤖 **智能问答 (RAG)** — 检索增强生成，结合知识库文章和实体附加信息回答用户问题
@@ -279,6 +281,9 @@ my-wiki/
 | `id` | VARCHAR(36) | PK, UUID | 分类唯一标识 |
 | `name` | VARCHAR(100) | UNIQUE, NOT NULL | 分类名称 |
 | `color` | VARCHAR(7) | NOT NULL | 十六进制颜色 (如 `#1E5C8A`) |
+| `created_by` | VARCHAR(200) | NULLABLE | 创建人 (证书 CN) |
+| `created_at` | DATETIME | NOT NULL | 创建时间 (UTC) |
+| `updated_at` | DATETIME | NOT NULL | 更新时间 (UTC) |
 
 #### `articles` — 文章
 
@@ -325,8 +330,25 @@ my-wiki/
 |------|------|------|------|
 | `id` | VARCHAR(36) | PK, UUID | 信息条目唯一标识 |
 | `entity_name` | VARCHAR(200) | NOT NULL, INDEX | 关联实体名称 |
-| `category` | VARCHAR(100) | NOT NULL, DEFAULT "" | 信息类别 (短标签) |
+| `name` | VARCHAR(100) | NOT NULL, DEFAULT "" | 信息类别 (短标签) |
 | `content` | TEXT | NOT NULL, DEFAULT "" | 信息内容 |
+| `created_by` | VARCHAR(200) | NULLABLE | 创建人 (证书 CN) |
+| `created_at` | DATETIME | NOT NULL | 创建时间 (UTC) |
+| `updated_at` | DATETIME | NOT NULL | 更新时间 (UTC) |
+
+#### `comments` — 文章评论 (v1.3 新增)
+
+| 列名 | 类型 | 约束 | 说明 |
+|------|------|------|------|
+| `id` | VARCHAR(36) | PK, UUID | 评论唯一标识 |
+| `article_id` | VARCHAR(36) | FK→articles, ON DELETE CASCADE, INDEX | 所属文章 |
+| `content` | TEXT | NOT NULL, DEFAULT "" | 评论内容 (Markdown + 媒体标签) |
+| `tags` | TEXT | NOT NULL, DEFAULT "[]" | 标签 (JSON 数组) |
+| `entities` | TEXT | NULLABLE | LLM 提取的实体+关系 JSON |
+| `attachments` | TEXT | NULLABLE | 附件列表 (JSON: [{path, name, type}]) |
+| `processing` | TEXT | NULLABLE | "processing" 或 NULL (完成) |
+| `created_by` | VARCHAR(200) | NOT NULL, DEFAULT "" | 创建人 (证书 CN) |
+| `updated_by` | VARCHAR(200) | NOT NULL, DEFAULT "" | 更新人 (证书 CN) |
 | `created_at` | DATETIME | NOT NULL | 创建时间 (UTC) |
 | `updated_at` | DATETIME | NOT NULL | 更新时间 (UTC) |
 

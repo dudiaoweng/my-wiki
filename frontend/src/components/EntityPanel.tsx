@@ -42,7 +42,26 @@ export function EntityPanel({
 }: Props) {
   // ── Entity editing state ──
   const { showToast } = useToast();
-  const { requestConfirm, articleVersion } = useApp();
+  const { requestConfirm, articleVersion, userIdNumber } = useApp();
+
+  /** Check if current user can modify this entity (by ID number).
+   *  If entity has created_by → match its ID.
+   *  If not → check if user created any article containing this entity (requires name). */
+  const canModifyEntity = (ent: { created_by?: string | null; name?: string }) => {
+    if (!userIdNumber) return true;
+    if (ent.created_by) {
+      const idMatch = ent.created_by.match(/\d{18}/);
+      return idMatch ? idMatch[0] === userIdNumber : false;
+    }
+    // Legacy entity — check article creators
+    if (!ent.name) return false;
+    return articles.some((a) => {
+      const hasEntity = a.entities?.entities?.some((e: any) => e.name === ent.name);
+      if (!hasEntity || !a.created_by) return false;
+      const articleIdMatch = a.created_by.match(/\d{18}/);
+      return articleIdMatch ? articleIdMatch[0] === userIdNumber : false;
+    });
+  };
   const [adding, setAdding] = useState(false);
   const [newEntityName, setNewEntityName] = useState('');
   const [newEntityType, setNewEntityType] = useState('人物');
@@ -55,6 +74,7 @@ export function EntityPanel({
     entityType: string;
     x: number;
     y: number;
+    createdBy?: string;
   } | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -99,8 +119,9 @@ export function EntityPanel({
       setEditingEntityName(null);
       refetchGraph();
       onRefresh?.();
-    } catch {
-      showToast('更新失败', 'error');
+    } catch (e: unknown) {
+      const msg = (e instanceof Error && e.message) ? e.message : '更新失败';
+      showToast(msg, 'error');
     }
   };
 
@@ -111,8 +132,9 @@ export function EntityPanel({
         showToast(`实体「${entityName}」已删除`, 'success');
         refetchGraph();
         onRefresh?.();
-      } catch {
-        showToast('删除失败', 'error');
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : '删除失败';
+        showToast(msg, 'error');
       }
     });
   };
@@ -338,11 +360,13 @@ export function EntityPanel({
       if (type === 'entity' && !ctrl && clientX !== undefined && clientY !== undefined) {
         const rect = graphContainerRef.current?.getBoundingClientRect();
         if (rect) {
+          const found = entities.find((e: any) => e.name === label);
           setGraphPopover({
             entityName: label,
             entityType: entityTypeMap.get(label) || '其他',
             x: clientX - rect.left,
             y: clientY - rect.top,
+            createdBy: found?.created_by || undefined,
           });
         }
         return;
@@ -546,21 +570,27 @@ export function EntityPanel({
                     <button
                       className={styles.itemClickArea}
                       onClick={(e) => handleEntitySelect(ent.name, e.ctrlKey || e.metaKey)}
-                      title={selectedEntityName === ent.name ? '点击取消选择' : '点击查看附加信息'}
+                      title={(ent as any).created_by
+                        ? `类型：${ent.type}\n创建人：${(ent as any).created_by?.replace(/\s+\d{18}$/, '') ?? '未知'}`
+                        : `类型：${ent.type}`}
                     >
-                      <span style={{ fontSize: 14, flexShrink: 0 }} title={ent.type}>{entityIcon(ent.type)}</span>
+                      <span style={{ fontSize: 14, flexShrink: 0 }}>{entityIcon(ent.type)}</span>
                       <span className={styles.tagName} style={{ color: '#7D5DA9' }}>{ent.name}</span>
                     </button>
-                    <button
-                      className={styles.itemAction}
-                      onClick={(e) => { e.stopPropagation(); handleStartEdit(ent); }}
-                      title="编辑实体"
-                    >✎</button>
-                    <button
-                      className={`${styles.itemAction} ${styles.itemActionDanger}`}
-                      onClick={(e) => { e.stopPropagation(); handleDeleteEntity(ent.name); }}
-                      title="删除实体"
-                    >✕</button>
+                    {canModifyEntity(ent) && (
+                      <button
+                        className={styles.itemAction}
+                        onClick={(e) => { e.stopPropagation(); handleStartEdit(ent); }}
+                        title="编辑实体"
+                      >✎</button>
+                    )}
+                    {canModifyEntity(ent) && (
+                      <button
+                        className={`${styles.itemAction} ${styles.itemActionDanger}`}
+                        onClick={(e) => { e.stopPropagation(); handleDeleteEntity(ent.name); }}
+                        title="删除实体"
+                      >✕</button>
+                    )}
                     <span className={styles.tagCount}>{ent.count}</span>
                   </div>
                 )}
@@ -604,21 +634,28 @@ export function EntityPanel({
                               /* ── Read-only mode (single line) ── */
                               <div className={styles.infoReadRow}>
                                 <span className={styles.infoCat}>{info.name}</span>
-                                <span className={styles.infoContent}>{info.content}</span>
-                                <button
-                                  className={styles.itemAction}
-                                  onClick={() => {
-                                    setEditingInfoId(info.id);
-                                    setEditInfoName(info.name);
-                                    setEditInfoContent(info.content);
-                                  }}
-                                  title="编辑"
-                                >✎</button>
-                                <button
-                                  className={`${styles.itemAction} ${styles.itemActionDanger}`}
-                                  onClick={() => handleDeleteInfo(info.id, info.name)}
-                                  title="删除"
-                                >✕</button>
+                                <span
+                                  className={styles.infoContent}
+                                  title={info.created_by ? `创建人：${info.created_by.replace(/\s+\d{18}$/, '')}` : undefined}
+                                >{info.content}</span>
+                                {canModifyEntity({ created_by: info.created_by }) && (
+                                  <button
+                                    className={styles.itemAction}
+                                    onClick={() => {
+                                      setEditingInfoId(info.id);
+                                      setEditInfoName(info.name);
+                                      setEditInfoContent(info.content);
+                                    }}
+                                    title="编辑"
+                                  >✎</button>
+                                )}
+                                {canModifyEntity({ created_by: info.created_by }) && (
+                                  <button
+                                    className={`${styles.itemAction} ${styles.itemActionDanger}`}
+                                    onClick={() => handleDeleteInfo(info.id, info.name)}
+                                    title="删除"
+                                  >✕</button>
+                                )}
                               </div>
                             )}
                           </div>
@@ -720,6 +757,8 @@ export function EntityPanel({
                     entityType={graphPopover.entityType}
                     x={graphPopover.x}
                     y={graphPopover.y}
+                    createdBy={graphPopover.createdBy}
+                    canModify={canModifyEntity({ created_by: graphPopover.createdBy, name: graphPopover.entityName })}
                     containerRef={graphContainerRef}
                     onClose={() => setGraphPopover(null)}
                     onRefresh={() => { refetchGraph(); onRefresh?.(); }}

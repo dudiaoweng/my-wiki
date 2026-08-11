@@ -8,8 +8,10 @@ import styles from './EntityPanel.module.css';
 interface Props {
   entityName: string;
   entityType: string;
-  x: number; // relative to graph container
+  x: number;
   y: number;
+  createdBy?: string;
+  canModify: boolean;
   containerRef: React.RefObject<HTMLDivElement | null>;
   onClose: () => void;
   onRefresh: () => void;
@@ -20,6 +22,8 @@ export function EntityGraphPopover({
   entityType,
   x,
   y,
+  createdBy,
+  canModify,
   containerRef,
   onClose,
   onRefresh,
@@ -34,7 +38,7 @@ export function EntityGraphPopover({
     }
   }, [containerRef]);
   const { showToast } = useToast();
-  const { requestConfirm } = useApp();
+  const { requestConfirm, userIdNumber } = useApp();
 
   // ── Entity edit state ──
   const [editing, setEditing] = useState(false);
@@ -83,8 +87,9 @@ export function EntityGraphPopover({
       showToast(`实体已更新`, 'success');
       setEditing(false);
       onRefresh();
-    } catch {
-      showToast('更新失败', 'error');
+    } catch (e: unknown) {
+      const msg = (e instanceof Error && e.message) ? e.message : '更新失败';
+      showToast(msg, 'error');
     }
   };
 
@@ -96,8 +101,9 @@ export function EntityGraphPopover({
         showToast(`实体已删除`, 'success');
         onRefresh();
         onClose();
-      } catch {
-        showToast('删除失败', 'error');
+      } catch (e: unknown) {
+        const msg = (e instanceof Error && e.message) ? e.message : '删除失败';
+        showToast(msg, 'error');
       }
     });
   };
@@ -112,8 +118,9 @@ export function EntityGraphPopover({
       setNewInfoContent('');
       setAddingInfo(false);
       await loadInfos();
-    } catch {
-      showToast('添加失败', 'error');
+    } catch (e: unknown) {
+      const msg = (e instanceof Error && e.message) ? e.message : '添加失败';
+      showToast(msg, 'error');
     }
   };
 
@@ -127,8 +134,9 @@ export function EntityGraphPopover({
       showToast('附加信息已更新', 'success');
       setEditingInfoId(null);
       await loadInfos();
-    } catch {
-      showToast('更新失败', 'error');
+    } catch (e: unknown) {
+      const msg = (e instanceof Error && e.message) ? e.message : '更新失败';
+      showToast(msg, 'error');
     }
   };
 
@@ -138,8 +146,9 @@ export function EntityGraphPopover({
         await api.deleteEntityInfo(entityName, infoId);
         showToast('附加信息已删除', 'success');
         await loadInfos();
-      } catch {
-        showToast('删除失败', 'error');
+      } catch (e: unknown) {
+        const msg = (e instanceof Error && e.message) ? e.message : '删除失败';
+        showToast(msg, 'error');
       }
     });
   };
@@ -176,7 +185,10 @@ export function EntityGraphPopover({
       {/* ── Header: entity name + close ── */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
         <span style={{ fontSize: 16 }} title={entityType}>{entityIcon(entityType)}</span>
-        <strong style={{ flex: 1, fontSize: 14, color: '#7D5DA9', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        <strong
+          style={{ flex: 1, fontSize: 14, color: '#7D5DA9', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+          title={createdBy ? `类型：${entityType}\n创建人：${createdBy.replace(/\s+\d{18}$/, '')}` : `类型：${entityType}`}
+        >
           {entityName}
         </strong>
         <button
@@ -188,31 +200,33 @@ export function EntityGraphPopover({
       </div>
 
       {/* ── Entity actions ── */}
-      <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
-        <button
-          onClick={() => {
-            setEditing(true);
-            setEditName(entityName);
-            setEditType(entityType || '其他');
-          }}
-          style={{
-            flex: 1, padding: '3px 8px', border: '1px solid var(--c-border)',
-            borderRadius: 'var(--radius-sm)', background: 'var(--c-card)',
-            fontSize: 11, cursor: 'pointer', fontFamily: 'var(--font-body)',
-            color: 'var(--c-text-soft)',
-          }}
-          disabled={editing}
-        >✎ 编辑实体</button>
-        <button
-          onClick={handleDeleteEntity}
-          style={{
-            flex: 1, padding: '3px 8px', border: '1px solid var(--c-border)',
-            borderRadius: 'var(--radius-sm)', background: 'var(--c-card)',
-            fontSize: 11, cursor: 'pointer', fontFamily: 'var(--font-body)',
-            color: 'var(--c-danger)',
-          }}
-        >✕ 删除实体</button>
-      </div>
+      {canModify && (
+        <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
+          <button
+            onClick={() => {
+              setEditing(true);
+              setEditName(entityName);
+              setEditType(entityType || '其他');
+            }}
+            style={{
+              flex: 1, padding: '3px 8px', border: '1px solid var(--c-border)',
+              borderRadius: 'var(--radius-sm)', background: 'var(--c-card)',
+              fontSize: 11, cursor: 'pointer', fontFamily: 'var(--font-body)',
+              color: 'var(--c-text-soft)',
+            }}
+            disabled={editing}
+          >✎ 编辑实体</button>
+          <button
+            onClick={handleDeleteEntity}
+            style={{
+              flex: 1, padding: '3px 8px', border: '1px solid var(--c-border)',
+              borderRadius: 'var(--radius-sm)', background: 'var(--c-card)',
+              fontSize: 11, cursor: 'pointer', fontFamily: 'var(--font-body)',
+              color: 'var(--c-danger)',
+            }}
+          >✕ 删除实体</button>
+        </div>
+      )}
 
       {/* ── Entity edit mode ── */}
       {editing && (
@@ -285,21 +299,28 @@ export function EntityGraphPopover({
               ) : (
                 <div className={styles.infoReadRow}>
                   <span className={styles.infoCat}>{info.name}</span>
-                  <span className={styles.infoContent}>{info.content}</span>
-                  <button
-                    className={styles.itemAction}
-                    onClick={() => {
-                      setEditingInfoId(info.id);
-                      setEditInfoName(info.name);
-                      setEditInfoContent(info.content);
-                    }}
-                    title="编辑"
-                  >✎</button>
-                  <button
-                    className={`${styles.itemAction} ${styles.itemActionDanger}`}
-                    onClick={() => handleDeleteInfo(info.id, info.name)}
-                    title="删除"
-                  >✕</button>
+                  <span
+                    className={styles.infoContent}
+                    title={info.created_by ? `创建人：${info.created_by.replace(/\s+\d{18}$/, '')}` : undefined}
+                  >{info.content}</span>
+                  {(!info.created_by || !userIdNumber || (info.created_by.match(/\d{18}/)?.[0] ?? '') === userIdNumber) && (
+                    <button
+                      className={styles.itemAction}
+                      onClick={() => {
+                        setEditingInfoId(info.id);
+                        setEditInfoName(info.name);
+                        setEditInfoContent(info.content);
+                      }}
+                      title="编辑"
+                    >✎</button>
+                  )}
+                  {(!info.created_by || !userIdNumber || (info.created_by.match(/\d{18}/)?.[0] ?? '') === userIdNumber) && (
+                    <button
+                      className={`${styles.itemAction} ${styles.itemActionDanger}`}
+                      onClick={() => handleDeleteInfo(info.id, info.name)}
+                      title="删除"
+                    >✕</button>
+                  )}
                 </div>
               )}
             </div>

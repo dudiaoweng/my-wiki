@@ -1,12 +1,14 @@
 import json
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.dependencies import get_db
 from app.models import Article, ArticleChunk, EntityInfo
+from app.auth import get_client_cert, CertInfo
 import asyncio
 
 logger = logging.getLogger(__name__)
@@ -64,6 +66,7 @@ class EntityInfoResponse(BaseModel):
     entity_name: str
     name: str
     content: str
+    created_by: Optional[str] = None
     created_at: str
     updated_at: str
 
@@ -132,11 +135,14 @@ def list_entities(db: Session = Depends(get_db)):
 
 
 @router.post("", status_code=201)
-async def add_entity(body: EntityAddRequest, db: Session = Depends(get_db)):
+async def add_entity(body: EntityAddRequest, db: Session = Depends(get_db),
+                     cert: CertInfo = Depends(get_client_cert)):
     """Add an entity to specified articles."""
     ent = body.entity
     name = ent.get("name", "").strip()
     etype = ent.get("type", "").strip() or "concept"
+    user_cn = cert.display_name or ""
+    now = datetime.now(timezone.utc).isoformat()
     if not name:
         raise HTTPException(status_code=400, detail="Entity name cannot be empty")
     if not body.article_ids:
@@ -157,11 +163,11 @@ async def add_entity(body: EntityAddRequest, db: Session = Depends(get_db)):
             ent_data = {"entities": [], "relations": []}
         ents = ent_data.get("entities", [])
         if not any(e.get("name") == name for e in ents):
-            ents.append({"name": name, "type": etype})
+            ents.append({"name": name, "type": etype, "created_by": user_cn, "created_at": now})
             ent_data["entities"] = ents
             article.entities = json.dumps(ent_data, ensure_ascii=False)
 
-        # Link entity to all chunks containing the entity name for QA recall
+        # Link entity to chunks for QA recall
         chunks = db.query(ArticleChunk).filter(
             ArticleChunk.article_id == article.id
         ).all()
@@ -172,7 +178,20 @@ async def add_entity(body: EntityAddRequest, db: Session = Depends(get_db)):
                 ch.chunk_text = ch.chunk_text.rstrip() + tag_line
                 matched_chunks.append(ch)
 
-        # Recompute embeddings for matched chunks asynchronously
+        # If no chunk mentions the entity, add tag to the first chunk (or create one)
+        if not matched_chunks:
+            if chunks:
+                chunks[0].chunk_text = chunks[0].chunk_text.rstrip() + tag_line
+                matched_chunks.append(chunks[0])
+            else:
+                # Article has no chunks yet — create one for the entity
+                db.add(ArticleChunk(
+                    article_id=article.id,
+                    chunk_index="entity_tag",
+                    chunk_text=f"[实体标签] {name} ({etype})",
+                    embedding=None,
+                ))
+
         if matched_chunks:
             _schedule_embedding_recompute(matched_chunks)
 
@@ -181,9 +200,11 @@ async def add_entity(body: EntityAddRequest, db: Session = Depends(get_db)):
 
 
 @router.put("/update")
-def update_entity(body: EntityUpdateRequest, db: Session = Depends(get_db)):
-    """Update an entity's name and/or type across all articles."""
+def update_entity(body: EntityUpdateRequest, db: Session = Depends(get_db),
+                  cert: CertInfo = Depends(get_client_cert)):
+    """Update an entity's name and/or type (creator only)."""
     old = body.old_name.strip()
+    user_cn = cert.display_name or ""
     if not old:
         raise HTTPException(status_code=400, detail="Entity name cannot be empty")
 
@@ -203,6 +224,17 @@ def update_entity(body: EntityUpdateRequest, db: Session = Depends(get_db)):
             continue
         ents = ent_data.get("entities", [])
         rels = ent_data.get("relations", [])
+        # Check: user must be entity creator or article creator
+        for e in ents:
+            if e.get("name") == old:
+                creator = e.get("created_by", "") or ""
+                article_creator = article.created_by or ""
+                if (creator and creator != user_cn) and (article_creator and article_creator != user_cn):
+                    raise HTTPException(status_code=403, detail=f"只有创建人可以修改实体「{old}」")
+                # If no creator info, still allow article creator
+                if not creator and article_creator and article_creator != user_cn:
+                    raise HTTPException(status_code=403, detail=f"只有文章创建人可以修改实体「{old}」")
+                break
         changed = False
         for e in ents:
             if e.get("name") == old:
@@ -227,10 +259,12 @@ def update_entity(body: EntityUpdateRequest, db: Session = Depends(get_db)):
 
 
 @router.put("/rename")
-def rename_entity(body: EntityRenameRequest, db: Session = Depends(get_db)):
-    """Rename an entity across all articles."""
+def rename_entity(body: EntityRenameRequest, db: Session = Depends(get_db),
+                  cert: CertInfo = Depends(get_client_cert)):
+    """Rename an entity across all articles (creator only)."""
     old = body.old_name.strip()
     new = body.new_name.strip()
+    user_cn = cert.display_name or ""
     if not old or not new:
         raise HTTPException(status_code=400, detail="Entity names cannot be empty")
 
@@ -245,6 +279,16 @@ def rename_entity(body: EntityRenameRequest, db: Session = Depends(get_db)):
             continue
         ents = ent_data.get("entities", [])
         rels = ent_data.get("relations", [])
+        # Check creator
+        for e in ents:
+            if e.get("name") == old:
+                creator = e.get("created_by", "") or ""
+                article_creator = article.created_by or ""
+                if (creator and creator != user_cn) and (article_creator and article_creator != user_cn):
+                    raise HTTPException(status_code=403, detail=f"只有创建人可以修改实体「{old}」")
+                if not creator and article_creator and article_creator != user_cn:
+                    raise HTTPException(status_code=403, detail=f"只有文章创建人可以修改实体「{old}」")
+                break
         changed = False
         for e in ents:
             if e.get("name") == old:
@@ -266,9 +310,11 @@ def rename_entity(body: EntityRenameRequest, db: Session = Depends(get_db)):
 
 
 @router.delete("/remove", status_code=200)
-def remove_entity(body: EntityRemoveRequest, db: Session = Depends(get_db)):
-    """Remove an entity from specified articles (or all if not specified)."""
+def remove_entity(body: EntityRemoveRequest, db: Session = Depends(get_db),
+                  cert: CertInfo = Depends(get_client_cert)):
+    """Remove an entity from specified articles (creator only)."""
     name = body.entity_name.strip()
+    user_cn = cert.display_name or ""
     if not name:
         raise HTTPException(status_code=400, detail="Entity name cannot be empty")
 
@@ -289,8 +335,16 @@ def remove_entity(body: EntityRemoveRequest, db: Session = Depends(get_db)):
             ent_data: dict = json.loads(article.entities)
         except (json.JSONDecodeError, TypeError):
             continue
-        ents = ent_data.get("entities", [])
-        rels = ent_data.get("relations", [])
+        # Check creator before removing
+        for e in ents:
+            if e.get("name") == name:
+                creator = e.get("created_by", "") or ""
+                article_creator = article.created_by or ""
+                if (creator and creator != user_cn) and (article_creator and article_creator != user_cn):
+                    raise HTTPException(status_code=403, detail=f"只有创建人可以删除实体「{name}」")
+                if not creator and article_creator and article_creator != user_cn:
+                    raise HTTPException(status_code=403, detail=f"只有文章创建人可以删除实体「{name}」")
+                break
         ents = [e for e in ents if e.get("name") != name]
         rels = [r for r in rels if r.get("source") != name and r.get("target") != name]
         ent_data["entities"] = ents
@@ -383,6 +437,7 @@ def list_entity_infos(entity_name: str, db: Session = Depends(get_db)):
             entity_name=info.entity_name,
             name=info.name,
             content=info.content,
+            created_by=info.created_by,
             created_at=info.created_at.isoformat() if info.created_at else "",
             updated_at=info.updated_at.isoformat() if info.updated_at else "",
         )
@@ -391,12 +446,16 @@ def list_entity_infos(entity_name: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{entity_name}/info", response_model=EntityInfoResponse, status_code=201)
-async def create_entity_info(entity_name: str, body: EntityInfoCreate, db: Session = Depends(get_db)):
+async def create_entity_info(entity_name: str, body: EntityInfoCreate,
+                               db: Session = Depends(get_db),
+                               cert: CertInfo = Depends(get_client_cert)):
     """Create a new additional info entry for an entity."""
+    user_cn = cert.display_name or ""
     info = EntityInfo(
         entity_name=entity_name,
         name=body.name.strip(),
         content=body.content.strip(),
+        created_by=user_cn or None,
     )
     db.add(info)
     db.commit()
@@ -412,20 +471,26 @@ async def create_entity_info(entity_name: str, body: EntityInfoCreate, db: Sessi
         entity_name=info.entity_name,
         name=info.name,
         content=info.content,
+        created_by=info.created_by,
         created_at=info.created_at.isoformat() if info.created_at else "",
         updated_at=info.updated_at.isoformat() if info.updated_at else "",
     )
 
 
 @router.put("/{entity_name}/info/{info_id}", response_model=EntityInfoResponse)
-async def update_entity_info(entity_name: str, info_id: str, body: EntityInfoUpdate, db: Session = Depends(get_db)):
-    """Update an additional info entry."""
+async def update_entity_info(entity_name: str, info_id: str, body: EntityInfoUpdate,
+                               db: Session = Depends(get_db),
+                               cert: CertInfo = Depends(get_client_cert)):
+    """Update an additional info entry (creator only)."""
     info = db.query(EntityInfo).filter(
         EntityInfo.id == info_id,
         EntityInfo.entity_name == entity_name,
     ).first()
     if not info:
         raise HTTPException(status_code=404, detail="Info entry not found")
+    user_cn = cert.display_name or ""
+    if info.created_by and info.created_by != user_cn:
+        raise HTTPException(status_code=403, detail="只有创建人可以修改该信息")
     if body.name is not None:
         info.name = body.name.strip()
     if body.content is not None:
@@ -443,20 +508,26 @@ async def update_entity_info(entity_name: str, info_id: str, body: EntityInfoUpd
         entity_name=info.entity_name,
         name=info.name,
         content=info.content,
+        created_by=info.created_by,
         created_at=info.created_at.isoformat() if info.created_at else "",
         updated_at=info.updated_at.isoformat() if info.updated_at else "",
     )
 
 
 @router.delete("/{entity_name}/info/{info_id}", status_code=204)
-async def delete_entity_info(entity_name: str, info_id: str, db: Session = Depends(get_db)):
-    """Delete an additional info entry."""
+async def delete_entity_info(entity_name: str, info_id: str,
+                               db: Session = Depends(get_db),
+                               cert: CertInfo = Depends(get_client_cert)):
+    """Delete an additional info entry (creator only)."""
     info = db.query(EntityInfo).filter(
         EntityInfo.id == info_id,
         EntityInfo.entity_name == entity_name,
     ).first()
     if not info:
         raise HTTPException(status_code=404, detail="Info entry not found")
+    user_cn = cert.display_name or ""
+    if info.created_by and info.created_by != user_cn:
+        raise HTTPException(status_code=403, detail="只有创建人可以删除该信息")
     db.delete(info)
     db.commit()
 

@@ -18,7 +18,7 @@ import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { checkAuthStatus, getStoredDevUser, clearStoredDevUser } from './api/auth';
 
 const ArticleDetail = lazy(() =>
-  import('./components/ArticleDetail').then((m) => ({ default: m.ArticleDetail })),
+  import('./components/ArticleDetailPage').then((m) => ({ default: m.ArticleDetail })),
 );
 
 function KbShortcuts() {
