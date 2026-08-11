@@ -11,6 +11,7 @@ export interface EntityInfoItem {
   entity_name: string;
   name: string;
   content: string;
+  created_by: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -37,13 +38,17 @@ function mergeHeaders(extra?: HeadersInit): Headers {
 
 /** Handle API error responses — extract detail, dispatch auth:forbidden on 403. */
 async function handleError(res: Response): Promise<never> {
-  if (res.status === 403) {
-    window.dispatchEvent(new CustomEvent('auth:forbidden'));
-  }
-  const body = await res.json().catch(() => ({ detail: res.statusText }));
-  let detail = body.detail ?? res.statusText;
+  const body = await res.json().catch(() => null);
+  let detail = body?.detail ?? res.statusText;
   if (Array.isArray(detail)) {
     detail = detail.map((d: { msg?: string }) => d.msg ?? JSON.stringify(d)).join('; ');
+  }
+  if (!detail || (typeof detail === 'string' && !detail.trim())) {
+    detail = `请求失败 (${res.status})`;
+  }
+  // Only trigger auth redirect for true auth failures, not permission errors
+  if (res.status === 403 && String(detail).includes('Forbidden')) {
+    window.dispatchEvent(new CustomEvent('auth:forbidden'));
   }
   throw new ApiError(res.status, detail);
 }

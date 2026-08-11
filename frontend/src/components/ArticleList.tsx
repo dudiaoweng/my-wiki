@@ -163,6 +163,7 @@ export function ArticleList() {
   const llmEntityList = useMemo(() => {
     const counts = new Map<string, number>();
     const types = new Map<string, Map<string, number>>(); // name -> type -> count
+    const creators = new Map<string, string>(); // name -> first created_by
     for (const a of entityPool) {
       if (!a.entities?.entities) continue;
       for (const e of a.entities.entities) {
@@ -170,6 +171,9 @@ export function ArticleList() {
         if (!types.has(e.name)) types.set(e.name, new Map());
         const tmap = types.get(e.name)!;
         tmap.set(e.type, (tmap.get(e.type) ?? 0) + 1);
+        if (!creators.has(e.name) && (e as any).created_by) {
+          creators.set(e.name, (e as any).created_by);
+        }
       }
     }
     return Array.from(counts.entries())
@@ -182,7 +186,7 @@ export function ArticleList() {
             if (c > bestCount) { bestType = t; bestCount = c; }
           }
         }
-        return { name, count, type: bestType };
+        return { name, count, type: bestType, created_by: creators.get(name) };
       })
       .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
   }, [entityPool]);

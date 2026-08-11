@@ -19,6 +19,9 @@ class Category(Base):
     id = Column(String, primary_key=True, default=generate_uuid)
     name = Column(String(100), nullable=False, unique=True)
     color = Column(String(7), nullable=False)
+    created_by = Column(String(200), nullable=True, default=None)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
     articles = relationship("Article", back_populates="category", cascade="save-update")
 
@@ -99,6 +102,7 @@ class EntityInfo(Base):
     entity_name = Column(String(200), nullable=False, index=True)  # which entity this info belongs to
     name = Column(String(100), nullable=False, default="")          # 名称
     content = Column(Text, nullable=False, default="")              # 内容
+    created_by = Column(String(200), nullable=True, default=None)   # CN from client cert
     created_at = Column(DateTime, default=utcnow, nullable=False)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 

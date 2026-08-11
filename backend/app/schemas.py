@@ -26,8 +26,20 @@ class CategoryResponse(BaseModel):
     id: str
     name: str
     color: str
+    created_by: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
+
+    @field_serializer("created_at", "updated_at")
+    @classmethod
+    def serialize_utc(cls, v: Optional[datetime]) -> str:
+        if v is None:
+            return ""
+        if v.tzinfo is None:
+            v = v.replace(tzinfo=timezone.utc)
+        return v.isoformat()
 
 
 # ─── Article ────────────────────────────────────────

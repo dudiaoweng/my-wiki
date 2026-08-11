@@ -12,7 +12,7 @@ const CATEGORY_COLORS = [
 ];
 
 export function Sidebar() {
-  const { sidebarOpen, closeSidebar, openEditor, openUploader, articleVersion, requestConfirm } = useApp();
+  const { sidebarOpen, closeSidebar, openEditor, openUploader, articleVersion, requestConfirm, userIdNumber } = useApp();
   const { categories, createCategory, updateCategory, deleteCategory } = useCategories();
   const { articles, refetch } = useArticles();
   const { showToast } = useToast();
@@ -43,6 +43,12 @@ export function Sidebar() {
 
   const getCount = (categoryId: string) =>
     articles.filter((a) => a.category_id === categoryId).length;
+
+  const canModify = (cat: { created_by?: string | null }) => {
+    if (!cat.created_by || !userIdNumber) return true;
+    const idMatch = cat.created_by.match(/\d{18}/);
+    return idMatch ? idMatch[0] === userIdNumber : false;
+  };
 
   // ── Create ──
   const handleCreate = async () => {
@@ -131,16 +137,16 @@ export function Sidebar() {
               <button
                 className={styles.headerActionBtn}
                 onClick={handleEditActive}
-                disabled={!activeCategory}
-                title={activeCategory ? `编辑「${activeCategory.name}」` : '请先选择分类'}
+                disabled={!activeCategory || !canModify(activeCategory)}
+                title={activeCategory ? (canModify(activeCategory) ? `编辑「${activeCategory.name}」` : '只有创建人可以编辑') : '请先选择分类'}
               >
                 ✎
               </button>
               <button
                 className={`${styles.headerActionBtn} ${styles.headerActionDanger}`}
                 onClick={handleDeleteActive}
-                disabled={!activeCategory}
-                title={activeCategory ? `删除「${activeCategory.name}」` : '请先选择分类'}
+                disabled={!activeCategory || !canModify(activeCategory)}
+                title={activeCategory ? (canModify(activeCategory) ? `删除「${activeCategory.name}」` : '只有创建人可以删除') : '请先选择分类'}
               >
                 ✕
               </button>
@@ -223,6 +229,12 @@ export function Sidebar() {
                 >
                   <span className={styles.dot} style={{ background: cat.color }} />
                   <span className={styles.catName}>{cat.name}</span>
+                  {cat.created_by && (
+                    <span
+                      className={styles.catCreator}
+                      title={`创建人：${cat.created_by.replace(/\s+\d{18}$/, '')}${cat.created_at ? '\n创建时间：' + new Date(cat.created_at).toLocaleString('zh-CN') : ''}${cat.updated_at && cat.updated_at !== cat.created_at ? '\n更新时间：' + new Date(cat.updated_at).toLocaleString('zh-CN') : ''}`}
+                    >👤</span>
+                  )}
                   <span className={styles.count}>{getCount(cat.id)}</span>
                 </NavLink>
               )}

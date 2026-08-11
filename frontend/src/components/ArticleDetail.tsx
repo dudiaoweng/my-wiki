@@ -1,10 +1,8 @@
 import { useState, useEffect, useMemo, useRef, useDeferredValue } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import { api } from '../api/client';
-import { useArticles } from '../hooks/useArticles';
 import { useApp } from '../context/AppProvider';
 import { useToast } from '../hooks/useToast';
 import { AttachmentGallery, useAttachments } from './AttachmentGallery';
@@ -55,12 +53,13 @@ export function ArticleDetailView({
   articleId, onBack, prevArticleId, nextArticleId, onNavigate,
   selectedEntity, onEntitySelect, onTagClick, actionsInTopBar,
 }: ArticleDetailViewProps) {
-  const { openEditor, requestConfirm, notifyArticleSaved, articleVersion } = useApp();
+  const { openEditor, requestConfirm, notifyArticleSaved, articleVersion, userIdNumber } = useApp();
   const { showToast } = useToast();
   const [article, setArticle] = useState<Article | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [commentTexts, setCommentTexts] = useState<string[]>([]);
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     setLoading(true);
@@ -102,6 +101,9 @@ export function ArticleDetailView({
 
   // Must be called before any early returns (Rules of Hooks)
   const { mediaItems, cleanContent } = useAttachments(article?.content ?? '', article?.attachment_name);
+
+  const MAX_PREVIEW_CHARS = 3000;
+  const isLong = cleanContent.length > MAX_PREVIEW_CHARS;
 
   const entityToHighlight = selectedEntity ?? null;
 
@@ -152,13 +154,20 @@ export function ArticleDetailView({
   const isSearchActive = searchTerm.length > 0;
   const isSearchPending = searchQuery.trim() && searchQuery.trim() !== searchTerm;
 
+  const displayContent = useMemo(() => {
+    if (isLong && !expanded) {
+      return cleanContent.slice(0, MAX_PREVIEW_CHARS) + '\n\n...';
+    }
+    return cleanContent;
+  }, [cleanContent, isLong, expanded]);
+
   const markdownEl = useMemo(
     () => (
       <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={rehypePlugins}>
-        {cleanContent}
+        {displayContent}
       </Markdown>
     ),
-    [cleanContent, rehypePlugins],
+    [displayContent, rehypePlugins],
   );
 
   if (loading) return <div className={styles.loading}>加载中…</div>;
@@ -167,6 +176,9 @@ export function ArticleDetailView({
 
   const catColor = article.category?.color ?? 'var(--c-text-muted)';
   const catName = article.category?.name ?? '未分类';
+  const isCreator = userIdNumber
+    ? (article.created_by?.match(/\d{18}/)?.[0] ?? '') === userIdNumber
+    : false;
 
   const handleDelete = () => {
     requestConfirm('确认删除', `确定要删除「${article.title}」吗？`, async () => {
@@ -185,7 +197,9 @@ export function ArticleDetailView({
     <div className={styles.detail}>
       <div className={styles.topBar}>
         <div className={styles.topBarLeft}>
-          <button className={styles.backBtn} onClick={onBack}>← 返回列表</button>
+          {actionsInTopBar && (
+            <button className={styles.backBtn} onClick={onBack}>← 返回列表</button>
+          )}
           {onNavigate && (
             <div className={styles.navGroup}>
               <button
@@ -237,7 +251,7 @@ export function ArticleDetailView({
           {isSearchActive && !isSearchPending && searchCount === 0 && (
             <span className={styles.searchNoResults}>无匹配</span>
           )}
-          {actionsInTopBar && (
+          {isCreator && (
             <div className={styles.actions}>
               <button className={styles.btn} onClick={() => openEditor(article.id)}>✏️ 编辑</button>
               <button className={`${styles.btn} ${styles.btnDanger}`} onClick={handleDelete}>🗑 删除</button>
@@ -255,17 +269,12 @@ export function ArticleDetailView({
       </h1>
 
       <div className={styles.meta}>
-        <span>📅 创建于 {formatDate(article.created_at)}</span>
         {article.created_by && (
           <span title={article.created_by}>👤 创建人 {formatUser(article.created_by)}</span>
         )}
+        <span>📅 创建于 {formatDate(article.created_at)}</span>
         {article.created_at !== article.updated_at && (
-          <>
-            <span>✏️ 更新于 {formatDate(article.updated_at)}</span>
-            {article.updated_by && (
-              <span title={article.updated_by}>👤 更新人 {formatUser(article.updated_by)}</span>
-            )}
-          </>
+          <span>✏️ 更新于 {formatDate(article.updated_at)}</span>
         )}
         <span>🔖 {article.entities?.entities?.length ?? 0} 个实体</span>
         <span>🔗 {article.entities?.relations?.length ?? 0} 个关系</span>
@@ -286,6 +295,17 @@ export function ArticleDetailView({
 
       <div className={`${styles.content} markdown-content`} id="article-content">
         {markdownEl}
+
+        {isLong && (
+          <div style={{ textAlign: 'center', margin: '12px 0' }}>
+            <button
+              className={styles.btn}
+              onClick={() => setExpanded((v) => !v)}
+            >
+              {expanded ? '收起' : `展开全文（共 ${Math.ceil(cleanContent.length / 1000)}k 字）`}
+            </button>
+          </div>
+        )}
 
         {isSearchActive && searchCount > 0 && (
           <SearchNavBar
@@ -308,13 +328,6 @@ export function ArticleDetailView({
         onCommentTextsChange={setCommentTexts}
       />
 
-      {!actionsInTopBar && (
-        <div className={styles.actionsBottom}>
-          <button className={styles.btn} onClick={() => openEditor(article.id)}>✏️ 编辑</button>
-          <button className={`${styles.btn} ${styles.btnDanger}`} onClick={handleDelete}>🗑 删除</button>
-        </div>
-      )}
-
       {entityToHighlight && occurrenceCount > 0 && (
         <EntityOccurrenceBar
           entityName={entityToHighlight}
@@ -327,41 +340,6 @@ export function ArticleDetailView({
         />
       )}
     </div>
-  );
-}
-
-// ─── Route wrapper (standalone page: /articles/:id) ──
-
-export function ArticleDetail() {
-  const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
-  const [selectedEntity, setSelectedEntity] = useState<string | null>(null);
-
-  const { articles: allArticles } = useArticles();
-  const currentIndex = allArticles.findIndex((a) => a.id === id);
-  const prevId = currentIndex > 0 ? allArticles[currentIndex - 1]?.id : undefined;
-  const nextId = currentIndex >= 0 && currentIndex < allArticles.length - 1
-    ? allArticles[currentIndex + 1]?.id : undefined;
-
-  if (!id) {
-    return (
-      <div style={{ textAlign: 'center', padding: 60, color: 'var(--c-text-muted)' }}>
-        文章不存在
-      </div>
-    );
-  }
-
-  return (
-    <ArticleDetailView
-      articleId={id}
-      onBack={() => navigate('/articles')}
-      prevArticleId={prevId}
-      nextArticleId={nextId}
-      onNavigate={(nid) => navigate(`/articles/${nid}`)}
-      selectedEntity={selectedEntity}
-      onEntitySelect={(name) => setSelectedEntity(name)}
-      onTagClick={(tag) => navigate(`/articles?tag=${encodeURIComponent(tag)}`)}
-    />
   );
 }
 

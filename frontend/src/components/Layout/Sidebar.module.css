@@ -157,6 +157,14 @@
   min-width: 0;
 }
 
+.catCreator {
+  font-size: 11px;
+  flex-shrink: 0;
+  opacity: 0.6;
+  cursor: help;
+  margin-left: 2px;
+}
+
 /* ── Header action buttons (edit / delete active category) ── */
 
 .headerActions {

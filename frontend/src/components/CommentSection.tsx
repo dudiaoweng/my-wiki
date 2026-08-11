@@ -58,10 +58,11 @@ function getFileIcon(filename: string): string {
   return '📎';
 }
 
-/** Check if current user is the comment author */
-function isAuthor(commentCreatedBy: string | null, userName: string): boolean {
-  if (!commentCreatedBy) return false;
-  return formatUser(commentCreatedBy) === userName || commentCreatedBy.includes(userName);
+/** Check if current user is the comment author (by ID number). */
+function isAuthor(commentCreatedBy: string | null, userIdNumber: string): boolean {
+  if (!commentCreatedBy || !userIdNumber) return false;
+  const idMatch = commentCreatedBy.match(/\d{18}/);
+  return idMatch ? idMatch[0] === userIdNumber : false;
 }
 
 /** Strip media HTML tags and markers from content (mirrors useAttachments cleanup). */
@@ -240,7 +241,7 @@ export function CommentSection({
   entityOccurrenceOffset = 0,
   onCommentTextsChange,
 }: Props) {
-  const { userName, requestConfirm, notifyArticleSaved } = useApp();
+  const { userIdNumber, requestConfirm, notifyArticleSaved } = useApp();
   const { showToast } = useToast();
 
   const [comments, setComments] = useState<Comment[]>([]);
@@ -537,7 +538,7 @@ export function CommentSection({
         <div className={styles.list}>
           {comments.map((comment) => {
             const editing = editingId === comment.id;
-            const canModify = isAuthor(comment.created_by, userName);
+            const canModify = isAuthor(comment.created_by, userIdNumber);
 
             return (
               <div key={comment.id} className={styles.item}>

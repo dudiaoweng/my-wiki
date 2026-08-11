@@ -27,10 +27,11 @@ export const esc = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 
 // ── Tooltip helpers ──
-const TYPE_LABELS: Record<string, string> = { article: '文章', category: '分类', entity: '实体' };
+const TYPE_LABELS: Record<string, string> = { article: '文章', category: '分类' };
 
-export function buildTooltipHtml(type: string, label: string): string {
-  return `<strong>${TYPE_LABELS[type] ?? type}</strong><br>${esc(label)}`;
+export function buildTooltipHtml(type: string, label: string, entityType?: string): string {
+  const category = type === 'entity' ? (entityType || '实体') : (TYPE_LABELS[type] ?? type);
+  return `<strong>${category}</strong><br>${esc(label)}`;
 }
 
 // ── Options ──
@@ -226,7 +227,7 @@ export function useD3ForceGraph(
     nodeGroup
       .on('mouseenter', function (event, d) {
         const rect = container.getBoundingClientRect();
-        let tooltipHtml = buildTooltipHtml(d.type, d.label);
+        let tooltipHtml = buildTooltipHtml(d.type, d.label, entityTypeMap.get(d.label));
         // Append entity additional info for entity nodes
         if (d.type === 'entity') {
           const infos = entityInfoMapRef.current?.get(d.label);

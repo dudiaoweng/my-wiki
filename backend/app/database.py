@@ -38,4 +38,14 @@ def init_db():
                 conn.exec_driver_sql(f"ALTER TABLE comments ADD COLUMN {col} TEXT")
             except Exception:
                 pass  # Column already exists
+        for col in ["created_by"]:
+            try:
+                conn.exec_driver_sql(f"ALTER TABLE entity_infos ADD COLUMN {col} TEXT")
+            except Exception:
+                pass  # Column already exists
+        for col in ["created_by", "created_at", "updated_at"]:
+            try:
+                conn.exec_driver_sql(f"ALTER TABLE categories ADD COLUMN {col} TEXT")
+            except Exception:
+                pass  # Column already exists
         conn.commit()

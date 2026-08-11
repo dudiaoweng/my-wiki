@@ -8,7 +8,7 @@ interface EditorState {
 interface ConfirmState {
   title: string;
   message: string;
-  onConfirm: () => void;
+  onConfirm: () => void | Promise<void>;
   confirmLabel?: string;
 }
 
@@ -23,7 +23,7 @@ interface AppContextValue {
   closeEditor: () => void;
 
   confirmState: ConfirmState | null;
-  requestConfirm: (title: string, message: string, onConfirm: () => void, confirmLabel?: string) => void;
+  requestConfirm: (title: string, message: string, onConfirm: () => void | Promise<void>, confirmLabel?: string) => void;
   closeConfirm: () => void;
   executeConfirm: () => void;
 
@@ -76,15 +76,18 @@ export function AppProvider({ children, userName = '', userIdNumber = '' }: AppP
   const openUploader = useCallback(() => setUploaderOpen(true), []);
   const closeUploader = useCallback(() => setUploaderOpen(false), []);
 
-  const requestConfirm = useCallback((title: string, message: string, onConfirm: () => void, confirmLabel?: string) => {
+  const requestConfirm = useCallback((title: string, message: string, onConfirm: () => void | Promise<void>, confirmLabel?: string) => {
     setConfirmState({ title, message, onConfirm, confirmLabel });
   }, []);
   const closeConfirm = useCallback(() => setConfirmState(null), []);
   const confirmRef = useRef<ConfirmState | null>(null);
-  // Keep ref in sync so executeConfirm never reads stale closure
   confirmRef.current = confirmState;
-  const executeConfirm = useCallback(() => {
-    confirmRef.current?.onConfirm();
+  const executeConfirm = useCallback(async () => {
+    try {
+      await confirmRef.current?.onConfirm();
+    } catch {
+      // errors handled by the callback's own catch blocks
+    }
     setConfirmState(null);
   }, []);
 

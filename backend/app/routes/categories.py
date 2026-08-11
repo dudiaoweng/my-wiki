@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from app.dependencies import get_db
 from app.models import Category, Article
 from app.schemas import CategoryCreate, CategoryResponse
+from app.auth import get_client_cert, CertInfo
 import uuid
 
 router = APIRouter(prefix="/api/categories", tags=["categories"])
@@ -25,12 +26,13 @@ def list_categories(db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=CategoryResponse, status_code=201)
-def create_category(body: CategoryCreate, db: Session = Depends(get_db)):
+def create_category(body: CategoryCreate, db: Session = Depends(get_db),
+                    cert: CertInfo = Depends(get_client_cert)):
     existing = db.query(Category).filter(Category.name == body.name).first()
     if existing:
         raise HTTPException(status_code=409, detail="Category with this name already exists")
 
-    category = Category(name=body.name, color=body.color)
+    category = Category(name=body.name, color=body.color, created_by=cert.display_name or None)
     db.add(category)
     db.commit()
     db.refresh(category)
@@ -42,11 +44,15 @@ def update_category(
     body: CategoryCreate,
     category_id: str = Path(..., max_length=36),
     db: Session = Depends(get_db),
+    cert: CertInfo = Depends(get_client_cert),
 ):
     _validate_id(category_id)
     cat = db.query(Category).filter(Category.id == category_id).first()
     if not cat:
         raise HTTPException(status_code=404, detail="Category not found")
+    user_cn = cert.display_name or ""
+    if cat.created_by and cat.created_by != user_cn:
+        raise HTTPException(status_code=403, detail="只有创建人可以修改该分类")
     cat.name = body.name
     cat.color = body.color
     db.commit()
@@ -58,11 +64,15 @@ def update_category(
 def delete_category(
     category_id: str = Path(..., max_length=36),
     db: Session = Depends(get_db),
+    cert: CertInfo = Depends(get_client_cert),
 ):
     _validate_id(category_id)
     cat = db.query(Category).filter(Category.id == category_id).first()
     if not cat:
         raise HTTPException(status_code=404, detail="Category not found")
+    user_cn = cert.display_name or ""
+    if cat.created_by and cat.created_by != user_cn:
+        raise HTTPException(status_code=403, detail="只有创建人可以删除该分类")
 
     # Check if any articles belong to this category
     article_count = db.query(Article).filter(Article.category_id == category_id).count()
