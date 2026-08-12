@@ -177,6 +177,62 @@
   display: none;
 }
 
+/* ── Tag chips ── */
+
+.tagChips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-card);
+  min-height: 40px;
+}
+
+.tagChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  background: var(--c-tag-bg);
+  color: var(--c-tag-text);
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: var(--font-body);
+}
+
+.tagChipRemove {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--c-text-muted);
+  padding: 0;
+  line-height: 1;
+}
+
+.tagChipRemove:hover {
+  color: var(--c-danger);
+}
+
+.tagInput {
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 13px;
+  font-family: var(--font-body);
+  color: var(--c-text);
+  min-width: 80px;
+  padding: 2px 0;
+}
+
+.tagInput::placeholder {
+  color: var(--c-text-muted);
+}
+
 /* ── File chips (multi-file attachment) ── */
 
 .fileChips {

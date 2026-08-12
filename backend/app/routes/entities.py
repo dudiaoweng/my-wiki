@@ -335,6 +335,8 @@ def remove_entity(body: EntityRemoveRequest, db: Session = Depends(get_db),
             ent_data: dict = json.loads(article.entities)
         except (json.JSONDecodeError, TypeError):
             continue
+        ents = ent_data.get("entities", [])
+        rels = ent_data.get("relations", [])
         # Check creator before removing
         for e in ents:
             if e.get("name") == name:

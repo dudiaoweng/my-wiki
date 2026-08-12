@@ -34,7 +34,8 @@ export function EditorModal() {
 
   const [title, setTitle] = useState('');
   const [categoryId, setCategoryId] = useState('');
-  const [tagsStr, setTagsStr] = useState('');
+  const [tags, setTags] = useState<string[]>([]);
+  const [tagInput, setTagInput] = useState('');
   const [content, setContent] = useState('');
   const [attachments, setAttachments] = useState<File[]>([]);
   const [existingAttachments, setExistingAttachments] = useState<{name: string; type: string; thumbUrl?: string}[]>([]);
@@ -62,7 +63,7 @@ export function EditorModal() {
       api.getArticle(editorState.articleId).then((a) => {
         setTitle(a.title);
         setCategoryId(a.category_id ?? '');
-        setTagsStr(a.tags.join(', '));
+        setTags(a.tags || []);
         // Parse existing media attachments from content.
         // Use a Set of unique keys (src/safeName) to dedup same files, while
         // allowing different files with the same original name to all appear.
@@ -154,7 +155,8 @@ export function EditorModal() {
     } else {
       setTitle('');
       setCategoryId(searchParams.get('category') ?? '');
-      setTagsStr('');
+      setTags([]);
+      setTagInput('');
       setContent('');
       originalContentRef.current = '';
     }
@@ -165,11 +167,6 @@ export function EditorModal() {
 
   const handleSave = async () => {
     setSaving(true);
-
-    const tags = tagsStr
-      .split(/[,，]/)
-      .map((t) => t.trim())
-      .filter(Boolean);
 
     try {
       if (isEdit && editorState.articleId) {
@@ -253,15 +250,32 @@ export function EditorModal() {
 
           <div className={styles.group}>
             <label className={styles.label}>
-              标签 <span style={{ fontWeight: 400, textTransform: 'none', color: 'var(--c-text-muted)' }}>（逗号分隔）</span>
+              标签 <span style={{ fontWeight: 400, textTransform: 'none', color: 'var(--c-text-muted)' }}>（回车添加）</span>
             </label>
-            <input
-              type="text"
-              className={styles.input}
-              value={tagsStr}
-              onChange={(e) => setTagsStr(e.target.value)}
-              placeholder="例如: JavaScript, 教程, 前端"
-            />
+            <div className={styles.tagChips}>
+              {tags.map((tag, i) => (
+                <span key={i} className={styles.tagChip}>
+                  {tag}
+                  <button className={styles.tagChipRemove} onClick={() => setTags((prev) => prev.filter((_, j) => j !== i))}>✕</button>
+                </span>
+              ))}
+              <input
+                type="text"
+                className={styles.tagInput}
+                value={tagInput}
+                onChange={(e) => setTagInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const t = tagInput.trim();
+                    if (t && !tags.includes(t)) setTags((prev) => [...prev, t]);
+                    setTagInput('');
+                  }
+                }}
+                placeholder="添加标签…"
+                size={10}
+              />
+            </div>
           </div>
 
           <div className={styles.group}>
