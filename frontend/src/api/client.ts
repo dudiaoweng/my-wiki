@@ -150,6 +150,12 @@ export const api = {
   deleteArticle(id: string) {
     return request<void>(`/articles/${id}`, { method: 'DELETE' });
   },
+  reprocessArticle(id: string) {
+    return request<Article>(`/articles/${id}/reprocess`, { method: 'POST' });
+  },
+  reprocessAttachment(articleId: string, safeName: string) {
+    return request<Article>(`/articles/${articleId}/reprocess/${encodeURIComponent(safeName)}`, { method: 'POST' });
+  },
 
   // ── Categories ──
   getCategories() {

@@ -74,21 +74,22 @@ export function ArticleDetailView({
       .finally(() => setLoading(false));
   }, [articleId, showToast]);
 
-  // Poll while background recognition is running
+  // Poll while background recognition is running ("processing" or "processing:file")
+  const isProcessing = !!article?.processing?.startsWith('processing');
   useEffect(() => {
-    if (!article || article.processing !== 'processing') return;
+    if (!article || !isProcessing) return;
     const timer = setInterval(async () => {
       try {
         const updated = await api.getArticle(articleId);
         setArticle(updated);
-        if (updated.processing !== 'processing') {
+        if (!updated.processing) {
           clearInterval(timer);
           notifyArticleSaved();
         }
       } catch { /* keep polling */ }
     }, 5000);
     return () => clearInterval(timer);
-  }, [article, articleId, notifyArticleSaved]);
+  }, [article, articleId, notifyArticleSaved, isProcessing]);
 
   // Re-fetch article when articleVersion changes (e.g. after editing in EditorModal)
   const prevVersionRef = useRef(articleVersion);
@@ -263,7 +264,7 @@ export function ArticleDetailView({
       <div className={styles.categoryLabel} style={{ color: catColor }}>{catName}</div>
       <h1 className={styles.title}>
         {article.title}
-        {article.processing === 'processing' && (
+        {isProcessing && (
           <span className={styles.processingBadge}>⏳ 解析中…</span>
         )}
       </h1>
@@ -319,7 +320,24 @@ export function ArticleDetailView({
         )}
       </div>
 
-      <AttachmentGallery items={mediaItems} articleId={articleId} />
+      <AttachmentGallery
+        items={mediaItems}
+        articleId={articleId}
+        processing={article.processing}
+        onReprocess={isCreator ? async (item) => {
+          const safeName = item.src.split('/').pop()?.split('?')[0];
+          if (!safeName) return;
+          try {
+            await api.reprocessAttachment(articleId, safeName);
+            showToast(`已开始重新解析「${item.name}」`, 'success');
+            const updated = await api.getArticle(articleId);
+            setArticle(updated);
+          } catch (e: unknown) {
+            const msg = (e instanceof Error && e.message) ? e.message : '重新解析失败';
+            showToast(msg, 'error');
+          }
+        } : undefined}
+      />
 
       <CommentSection
         articleId={articleId}

@@ -550,11 +550,20 @@ async def update_article(
         user_tags = []
     user_tags = list(dict.fromkeys(user_tags))
 
-    content_changed = content != (article.content or "")
+    # Compare against stored content with media tags stripped — the editor
+    # displays clean content, so an unchanged article would otherwise appear changed.
+    stored_clean = re.sub(
+        r'<(?:img|video|audio)\b[^>]*/?>\s*|<\/(?:video|audio)>\s*', '',
+        article.content or "", flags=re.IGNORECASE,
+    )
+    stored_clean = re.sub(r'<!-- doc-attachment: .+? -->\s*', '', stored_clean, flags=re.IGNORECASE)
+    stored_clean = re.sub(r'<div data-attachment="[^"]*"[^>]*>[\s\S]*?</div>\s*', '', stored_clean, flags=re.IGNORECASE)
+    stored_clean = re.sub(r'<!-- attachments-order: .+? -->\s*', '', stored_clean, flags=re.IGNORECASE)
+    content_changed = content.strip() != stored_clean.strip()
 
     # Check if anything actually needs updating
     has_files = any(f and f.filename for f in files)
-    has_content_change = bool(content and content_changed)
+    has_content_change = content_changed
     has_title_change = bool(title.strip() and title.strip() != (article.title or ""))
     has_category_change = bool(category_id and category_id != (article.category_id or ""))
     tags_changed = bool(tags and json.dumps(user_tags, ensure_ascii=False) != (article.tags or "[]"))
@@ -605,7 +614,8 @@ async def update_article(
             all_order = [n.strip() for n in order_match.group(1).split(',')]
 
         # Strip all media tags (including closing) to get text body
-        text_body = content if content else re.sub(
+        # If content was explicitly changed (even to empty), use the new content
+        text_body = content if content_changed else re.sub(
             r'<(?:img|video|audio)\b[^>]*/?>\s*|<\/(?:video|audio)>\s*', '',
             article.content or "", flags=re.IGNORECASE,
         ).strip()
@@ -685,7 +695,7 @@ async def update_article(
         if kept_order:
             parts.append(f'<!-- attachments-order: {", ".join(kept_order)} -->')
         article.content = '\n\n'.join(parts)
-    elif content and content_changed:
+    elif content_changed and content:
         # No keep_attachments filter — preserve ALL old tags (backward compat)
         old_tags = re.findall(
             r'<(?:img|video|audio)\s[^>]*/?>',
@@ -707,6 +717,9 @@ async def update_article(
         if old_order:
             parts.append(old_order[0])
         article.content = '\n\n'.join(parts)
+    elif content_changed and not content:
+        # Content cleared by user — remove everything including media tags
+        article.content = ""
     elif content:
         article.content = content
     # else: no content sent → keep existing article.content
@@ -843,6 +856,104 @@ def download_attachment(
         filename=download_name,
         media_type="application/octet-stream",
     )
+
+
+@router.post("/{article_id}/reprocess", response_model=ArticleResponse)
+async def reprocess_article(
+    article_id: str = PathParam(..., max_length=36),
+    db: Session = Depends(get_db),
+    cert: CertInfo = Depends(get_client_cert),
+):
+    """Manually re-parse all attachments and re-extract tags/entities (creator only)."""
+    _validate_article_id(article_id)
+    article = db.query(Article).filter(Article.id == article_id).first()
+    if not article:
+        raise HTTPException(status_code=404, detail="Article not found")
+
+    user_cn = cert.display_name or ""
+    if article.created_by and article.created_by != user_cn:
+        raise HTTPException(status_code=403, detail="只有文章创建人可以重新解析")
+
+    if article.processing == "processing":
+        raise HTTPException(status_code=409, detail="文章正在解析中，请稍候")
+
+    # Rebuild uploaded_files list from attachment markers in content
+    uploaded_files: list[dict] = []
+    for m in re.finditer(r'<!-- doc-attachment: (.+?) \| (.+?) -->', article.content or "", re.IGNORECASE):
+        safe_name = m.group(2).strip()
+        storage_path = UPLOAD_DIR / safe_name
+        if storage_path.exists():
+            uploaded_files.append({
+                "filename": m.group(1).strip(),
+                "content_type": "",
+                "storage_path": str(storage_path),
+            })
+
+    # Also collect media files from <img>/<video>/<audio> tags
+    for m in re.finditer(r'<(?:img|video|audio)\b[^>]*src="([^"]+)"', article.content or "", re.IGNORECASE):
+        src = m.group(1)
+        fname = src.rsplit("/", 1)[-1].split("?")[0]
+        storage_path = UPLOAD_DIR / fname
+        if storage_path.exists() and fname not in {uf["filename"] for uf in uploaded_files}:
+            uploaded_files.append({
+                "filename": fname,
+                "content_type": "",
+                "storage_path": str(storage_path),
+            })
+
+    article.processing = "processing"
+    db.commit()
+
+    asyncio.create_task(_bg_attachment_enhance(
+        article.id, uploaded_files, need_title=False,
+    ))
+    return article
+
+
+@router.post("/{article_id}/reprocess/{safe_name}", response_model=ArticleResponse)
+async def reprocess_single_attachment(
+    article_id: str = PathParam(..., max_length=36),
+    safe_name: str = PathParam(...),
+    db: Session = Depends(get_db),
+    cert: CertInfo = Depends(get_client_cert),
+):
+    """Manually re-parse a single attachment (creator only)."""
+    _validate_article_id(article_id)
+    article = db.query(Article).filter(Article.id == article_id).first()
+    if not article:
+        raise HTTPException(status_code=404, detail="Article not found")
+
+    user_cn = cert.display_name or ""
+    if article.created_by and article.created_by != user_cn:
+        raise HTTPException(status_code=403, detail="只有文章创建人可以重新解析")
+
+    if article.processing == "processing":
+        raise HTTPException(status_code=409, detail="文章正在解析中，请稍候")
+
+    # Validate safe_name to prevent path traversal
+    if "/" in safe_name or "\\" in safe_name or ".." in safe_name:
+        raise HTTPException(status_code=400, detail="Invalid file name")
+
+    storage_path = UPLOAD_DIR / safe_name
+    if not storage_path.exists():
+        raise HTTPException(status_code=404, detail="Attachment not found")
+
+    # Determine original filename from content markers
+    original_name = safe_name
+    for m in re.finditer(r'<!-- doc-attachment: (.+?) \| (.+?) -->', article.content or "", re.IGNORECASE):
+        if m.group(2).strip() == safe_name:
+            original_name = m.group(1).strip()
+            break
+
+    article.processing = f"processing:{safe_name}"
+    db.commit()
+
+    asyncio.create_task(_bg_attachment_enhance(
+        article.id,
+        [{"filename": original_name, "content_type": "", "storage_path": str(storage_path)}],
+        need_title=False,
+    ))
+    return article
 
 
 @router.delete("/{article_id}", status_code=204)
