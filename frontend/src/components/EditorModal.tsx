@@ -170,15 +170,14 @@ export function EditorModal() {
 
     try {
       if (isEdit && editorState.articleId) {
-        // Only include content if it actually changed (to avoid unnecessary LLM extraction)
-        const updateData: { title: string; content?: string; category_id: string | null; tags: string[] } = {
+        // Always send content — backend compares against stored content to
+        // decide whether LLM re-extraction is needed.
+        const updateData: { title: string; content: string; category_id: string | null; tags: string[] } = {
           title: title.trim(),
+          content,
           category_id: categoryId || null,
           tags,
         };
-        if (content !== originalContentRef.current) {
-          updateData.content = content;
-        }
         await api.updateArticle(
           editorState.articleId, updateData,
           attachments.length > 0 ? attachments : undefined,

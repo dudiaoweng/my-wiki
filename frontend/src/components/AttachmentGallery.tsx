@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useRef, useEffect } from 'react';
 import { Lightbox } from './Lightbox';
 import type { FileContext } from '../types/qa';
 import styles from './AttachmentGallery.module.css';
@@ -171,10 +171,45 @@ function toLightboxFile(item: MediaItem): FileContext {
   };
 }
 
-export function AttachmentGallery({ items, articleId }: { items: MediaItem[]; articleId?: string }) {
+export function AttachmentGallery({
+  items,
+  articleId,
+  onReprocess,
+  processing = false,
+}: {
+  items: MediaItem[];
+  articleId?: string;
+  onReprocess?: (item: MediaItem) => void | Promise<void>;
+  /** Article processing state: null | "processing" | "processing:{safe_name}" */
+  processing?: string | null;
+}) {
   const [lightboxItem, setLightboxItem] = useState<MediaItem | null>(null);
+  const [parsingKeys, setParsingKeys] = useState<Set<string>>(new Set());
+  const prevProcessingRef = useRef(processing);
+
+  // When article processing finishes, clear local parsing state
+  useEffect(() => {
+    if (prevProcessingRef.current && !processing) {
+      setParsingKeys(new Set());
+    }
+    prevProcessingRef.current = processing;
+  }, [processing]);
 
   if (items.length === 0) return null;
+
+  const handleReprocess = async (item: MediaItem) => {
+    const key = item.src.split('/').pop()?.split('?')[0] || item.name;
+    setParsingKeys((prev) => new Set(prev).add(key));
+    try {
+      await onReprocess?.(item);
+    } catch {
+      setParsingKeys((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    }
+  };
 
   return (
     <>
@@ -184,6 +219,12 @@ export function AttachmentGallery({ items, articleId }: { items: MediaItem[]; ar
           const isVideo = item.type === 'video';
           const isAudio = item.type === 'audio';
           const hasSrc = !!item.src;
+          const itemKey = item.src.split('/').pop()?.split('?')[0] || item.name;
+          // Local tracking OR article-level specific file marker (e.g. "processing:file.jpg")
+          const serverParsing = typeof processing === 'string' && processing.startsWith('processing:')
+            ? processing.slice('processing:'.length) === itemKey
+            : false;
+          const isParsing = parsingKeys.has(itemKey) || serverParsing;
           return (
             <div
               key={i}
@@ -205,6 +246,18 @@ export function AttachmentGallery({ items, articleId }: { items: MediaItem[]; ar
                   </span>
                 )}
                 {isVideo && <span className={styles.playOverlay}>▶</span>}
+                {isParsing && (
+                  <span className={styles.parsingOverlay}>解析中…</span>
+                )}
+                {onReprocess && !isParsing && (
+                  <button
+                    className={styles.reprocessBtn}
+                    onClick={(e) => { e.stopPropagation(); handleReprocess(item); }}
+                    title={`重新解析 ${item.name}`}
+                  >
+                    🔄
+                  </button>
+                )}
                 <a
                   href={hasSrc ? `${item.src}?download=1` : `/api/articles/${articleId}/download`}
                   download={item.name}
