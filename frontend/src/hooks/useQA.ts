@@ -68,6 +68,10 @@ export function useQA(userId: string = '') {
   }, [activeId, _keys.activeId]);
 
   const activeSession = activeId && sessions[activeId] ? sessions[activeId] : undefined;
+
+  // Keep a ref so callbacks with empty deps can read the latest sessions.
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
   const messages = activeSession?.messages ?? [];
 
   // ── File contexts (per session, persist to localStorage) ──
@@ -243,11 +247,15 @@ export function useQA(userId: string = '') {
   /** Delete a session */
   const deleteSession = useCallback(
     (id: string) => {
-      let nextActive: string | null = null;
+      // Compute the next active session from the latest state (read via ref),
+      // rather than inside the setSessions updater — the latter relies on React
+      // running the two updaters in a specific order and is fragile.
+      const remaining = Object.values(sessionsRef.current)
+        .filter((s) => s.id !== id)
+        .sort((a, b) => b.createdAt - a.createdAt);
+      const nextActive = remaining.length > 0 ? remaining[0].id : null;
       setSessions((prev) => {
         const { [id]: _, ...rest } = prev;
-        const remaining = Object.values(rest).sort((a, b) => b.createdAt - a.createdAt);
-        nextActive = remaining.length > 0 ? remaining[0].id : null;
         return rest;
       });
       setActiveId((prev) => (prev === id ? nextActive : prev));
@@ -258,7 +266,7 @@ export function useQA(userId: string = '') {
         return rest;
       });
     },
-    []
+    [_keys.fileContexts]
   );
 
   const askQuestion = useCallback(

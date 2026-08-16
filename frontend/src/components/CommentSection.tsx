@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
+import rehypeSanitize from 'rehype-sanitize';
 import { api } from '../api/client';
 import { useApp } from '../context/AppProvider';
 import { useToast } from '../hooks/useToast';
@@ -68,6 +69,10 @@ function isAuthor(commentCreatedBy: string | null, userIdNumber: string): boolea
 /** Strip media HTML tags and markers from content (mirrors useAttachments cleanup). */
 /** Simple text-only strip for edit content preview. */
 
+const IMG_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico', 'tiff', 'tif']);
+const VID_EXTS = new Set(['mp4', 'avi', 'mov', 'mkv', 'webm', 'wmv']);
+const AUD_EXTS = new Set(['mp3', 'wav', 'm4a', 'flac', 'ogg', 'wma']);
+
 /** File chip grid — same visual style as EditorModal's attachment list.
  *  Owns its file input internally for reliable click handling. */
 function FileChipGrid({
@@ -82,9 +87,20 @@ function FileChipGrid({
   onRemoveExisting?: (i: number) => void;
 }) {
   const internalFileRef = useRef<HTMLInputElement>(null);
-  const IMG = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico', 'tiff', 'tif']);
-  const VID = new Set(['mp4', 'avi', 'mov', 'mkv', 'webm', 'wmv']);
-  const AUD = new Set(['mp3', 'wav', 'm4a', 'flac', 'ogg', 'wma']);
+
+  // Cache object URLs per file so re-renders don't create (and leak) new URLs.
+  const fileUrlMap = useMemo(() => {
+    const map = new Map<File, string>();
+    for (const file of files) {
+      const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
+      if (IMG_EXTS.has(ext)) {
+        const url = URL.createObjectURL(file);
+        map.set(file, url);
+        objectUrlsRef.current.push(url);
+      }
+    }
+    return map;
+  }, [files, objectUrlsRef]);
 
   const hasExisting = existingAttachments && existingAttachments.length > 0;
 
@@ -106,9 +122,9 @@ function FileChipGrid({
       {/* Existing attachments */}
       {hasExisting && existingAttachments!.map((ea, i) => {
         const ext = (ea.name.split('.').pop() ?? '').toLowerCase();
-        const isImg = IMG.has(ext);
-        const isVid = VID.has(ext);
-        const isAud = AUD.has(ext);
+        const isImg = IMG_EXTS.has(ext);
+        const isVid = VID_EXTS.has(ext);
+        const isAud = AUD_EXTS.has(ext);
         const thumbSrc = isVid ? `/api/media/${ea.path}.thumb.jpg` : (isImg ? `/api/media/${ea.path}` : null);
         return (
           <div key={`existing-${ea.name}-${i}`} className={`${styles.fileChip} ${styles.fileChipExisting}`}>
@@ -134,12 +150,10 @@ function FileChipGrid({
       {/* New files */}
       {files.map((file, i) => {
         const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
-        const isImage = IMG.has(ext);
-        const isVideo = VID.has(ext);
-        const isAudio = AUD.has(ext);
-        const rawUrl = isImage ? URL.createObjectURL(file) : '';
-        if (rawUrl) objectUrlsRef.current.push(rawUrl);
-        const thumbUrl = rawUrl || undefined;
+        const isImage = IMG_EXTS.has(ext);
+        const isVideo = VID_EXTS.has(ext);
+        const isAudio = AUD_EXTS.has(ext);
+        const thumbUrl = fileUrlMap.get(file);
 
         return (
           <div key={`${file.name}-${i}`} className={styles.fileChip}>
@@ -266,6 +280,14 @@ export function CommentSection({
   const commentsRef = useRef(comments);
   commentsRef.current = comments;
 
+  // Revoke any object URLs still held when the component unmounts
+  useEffect(() => {
+    return () => {
+      objectUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
+      editObjectUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
+    };
+  }, []);
+
   const [showForm, setShowForm] = useState(false);
 
   // ── Entity highlight plugin for comments (with offset from article occurrences) ──
@@ -275,7 +297,7 @@ export function CommentSection({
   );
 
   const commentRehypePlugins = useMemo(
-    () => [rehypeRaw, commentHighlightPlugin] as any,
+    () => [rehypeRaw, rehypeSanitize, commentHighlightPlugin] as any,
     [commentHighlightPlugin],
   );
 

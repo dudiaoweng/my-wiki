@@ -175,7 +175,7 @@ export function AttachmentGallery({
   items,
   articleId,
   onReprocess,
-  processing = false,
+  processing = null,
 }: {
   items: MediaItem[];
   articleId?: string;

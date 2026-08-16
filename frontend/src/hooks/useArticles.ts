@@ -25,8 +25,27 @@ export function useArticles(params?: { category_id?: string; search?: string; ta
   }, [params?.category_id, params?.search, params?.tag, showToast]);
 
   useEffect(() => {
-    fetchArticles();
-  }, [fetchArticles]);
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    (async () => {
+      try {
+        const data = await api.getArticles(params);
+        if (cancelled) return;
+        setArticles(data);
+        setLoading(false);
+      } catch (e: unknown) {
+        if (cancelled) return;
+        const msg = e instanceof Error ? e.message : 'Failed to fetch articles';
+        setError(msg);
+        showToast(msg, 'error');
+        setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [params?.category_id, params?.search, params?.tag, showToast]);
 
   const createArticle = async (data: ArticleCreate): Promise<Article | null> => {
     try {

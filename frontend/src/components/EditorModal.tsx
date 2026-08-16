@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useApp } from '../context/AppProvider';
 import { useToast } from '../hooks/useToast';
@@ -45,6 +45,20 @@ export function EditorModal() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const originalContentRef = useRef('');
   const objectUrlsRef = useRef<string[]>([]);
+
+  // Cache object URLs per file so re-renders don't create (and leak) new URLs.
+  const attachmentUrlMap = useMemo(() => {
+    const map = new Map<File, string>();
+    for (const file of attachments) {
+      const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
+      if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico', 'tiff', 'tif'].includes(ext)) {
+        const url = URL.createObjectURL(file);
+        map.set(file, url);
+        objectUrlsRef.current.push(url);
+      }
+    }
+    return map;
+  }, [attachments, objectUrlsRef]);
 
   // Cleanup object URLs on unmount
   useEffect(() => {
@@ -348,11 +362,7 @@ export function EditorModal() {
                   const isImage = ['jpg','jpeg','png','gif','webp','svg','bmp','ico','tiff','tif'].includes(ext);
                   const isVideo = ['mp4','avi','mov','mkv','webm','wmv'].includes(ext);
                   const isAudio = ['mp3','wav','m4a','flac','ogg','wma'].includes(ext);
-                  const rawUrl = isImage ? URL.createObjectURL(file) : '';
-                  if (rawUrl && !objectUrlsRef.current.includes(rawUrl)) {
-                    objectUrlsRef.current.push(rawUrl);
-                  }
-                  const thumbUrl = rawUrl || undefined;
+                  const thumbUrl = attachmentUrlMap.get(file);
                   return (
                     <div key={`${file.name}-${i}`} className={styles.fileChip}>
                       <div className={styles.fileChipThumb}>
