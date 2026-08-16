@@ -31,7 +31,7 @@ const TYPE_LABELS: Record<string, string> = { article: '文章', category: '分�
 
 export function buildTooltipHtml(type: string, label: string, entityType?: string): string {
   const category = type === 'entity' ? (entityType || '实体') : (TYPE_LABELS[type] ?? type);
-  return `<strong>${category}</strong><br>${esc(label)}`;
+  return `<strong>${esc(category)}</strong><br>${esc(label)}`;
 }
 
 // ── Options ──

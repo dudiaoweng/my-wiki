@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import Markdown from 'react-markdown';
 import rehypeRaw from 'rehype-raw';
+import rehypeSanitize from 'rehype-sanitize';
 import { useQA } from '../hooks/useQA';
 import { useApp } from '../context/AppProvider';
 import { useToast } from '../hooks/useToast';
@@ -200,7 +201,7 @@ export function QA() {
                   )}
                   <div className={`${styles.bubble} markdown-content`}>
                     {isAssistant(msg) ? (
-                      <Markdown rehypePlugins={[rehypeRaw]}>{msg.content}</Markdown>
+                      <Markdown rehypePlugins={[rehypeRaw, rehypeSanitize]}>{msg.content}</Markdown>
                     ) : (
                       msg.content
                     )}

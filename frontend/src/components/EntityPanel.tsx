@@ -13,6 +13,7 @@ interface EntityInfo {
   name: string;
   count: number;
   type?: string;
+  created_by?: string;
 }
 
 export type ViewMode = 'list' | 'graph';

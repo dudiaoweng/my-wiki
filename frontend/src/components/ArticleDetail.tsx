@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef, useDeferredValue } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
+import rehypeSanitize from 'rehype-sanitize';
 import { api } from '../api/client';
 import { useApp } from '../context/AppProvider';
 import { useToast } from '../hooks/useToast';
@@ -62,16 +63,25 @@ export function ArticleDetailView({
   const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
     setLoading(true);
     setError(null);
     api.getArticle(articleId)
-      .then(setArticle)
+      .then((a) => {
+        if (!cancelled) setArticle(a);
+      })
       .catch((e) => {
+        if (cancelled) return;
         const msg = e instanceof Error ? e.message : '加载失败';
         setError(msg);
         showToast(msg, 'error');
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [articleId, showToast]);
 
   // Poll while background recognition is running ("processing" or "processing:file")
@@ -133,7 +143,7 @@ export function ArticleDetailView({
   );
 
   const rehypePlugins = useMemo(
-    () => [rehypeRaw, highlightPlugin, searchPlugin] as any,
+    () => [rehypeRaw, rehypeSanitize, highlightPlugin, searchPlugin] as any,
     [highlightPlugin, searchPlugin],
   );
 
