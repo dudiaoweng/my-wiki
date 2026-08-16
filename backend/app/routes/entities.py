@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.dependencies import get_db
 from app.models import Article, ArticleChunk, EntityInfo
 from app.auth import get_client_cert, CertInfo
+from app.routes.graph import invalidate_graph_cache
 import asyncio
 
 logger = logging.getLogger(__name__)
@@ -156,6 +157,7 @@ async def add_entity(body: EntityAddRequest, db: Session = Depends(get_db),
     if not articles:
         raise HTTPException(status_code=404, detail="Articles not found")
 
+    all_matched_chunks: list = []
     for article in articles:
         try:
             ent_data: dict = json.loads(article.entities)
@@ -192,10 +194,14 @@ async def add_entity(body: EntityAddRequest, db: Session = Depends(get_db),
                     embedding=None,
                 ))
 
-        if matched_chunks:
-            _schedule_embedding_recompute(matched_chunks)
+        all_matched_chunks.extend(matched_chunks)
 
+    # Commit BEFORE scheduling so the recompute task reads the latest chunk
+    # text and the newly-created chunks have their IDs assigned.
     db.commit()
+    if all_matched_chunks:
+        _schedule_embedding_recompute(all_matched_chunks)
+    invalidate_graph_cache()
     return {"name": name, "type": etype, "count": len(articles)}
 
 
@@ -229,7 +235,7 @@ def update_entity(body: EntityUpdateRequest, db: Session = Depends(get_db),
             if e.get("name") == old:
                 creator = e.get("created_by", "") or ""
                 article_creator = article.created_by or ""
-                if (creator and creator != user_cn) and (article_creator and article_creator != user_cn):
+                if creator != user_cn and article_creator != user_cn:
                     raise HTTPException(status_code=403, detail=f"只有创建人可以修改实体「{old}」")
                 # If no creator info, still allow article creator
                 if not creator and article_creator and article_creator != user_cn:
@@ -255,6 +261,7 @@ def update_entity(body: EntityUpdateRequest, db: Session = Depends(get_db),
             count += 1
 
     db.commit()
+    invalidate_graph_cache()
     return {"old": old, "name": new_name, "type": new_type, "count": count}
 
 
@@ -284,7 +291,7 @@ def rename_entity(body: EntityRenameRequest, db: Session = Depends(get_db),
             if e.get("name") == old:
                 creator = e.get("created_by", "") or ""
                 article_creator = article.created_by or ""
-                if (creator and creator != user_cn) and (article_creator and article_creator != user_cn):
+                if creator != user_cn and article_creator != user_cn:
                     raise HTTPException(status_code=403, detail=f"只有创建人可以修改实体「{old}」")
                 if not creator and article_creator and article_creator != user_cn:
                     raise HTTPException(status_code=403, detail=f"只有文章创建人可以修改实体「{old}」")
@@ -305,7 +312,22 @@ def rename_entity(body: EntityRenameRequest, db: Session = Depends(get_db),
             article.entities = json.dumps(ent_data, ensure_ascii=False)
             count += 1
 
+    # Cascade rename to EntityInfo and chunk entity-tag lines
+    db.query(EntityInfo).filter(EntityInfo.entity_name == old).update(
+        {EntityInfo.entity_name: new}, synchronize_session=False,
+    )
+    tag_old = f"[实体: {old}"
+    tag_new = f"[实体: {new}"
+    affected_chunks = []
+    for ch in db.query(ArticleChunk).all():
+        if ch.chunk_text and tag_old in ch.chunk_text:
+            ch.chunk_text = ch.chunk_text.replace(tag_old, tag_new)
+            affected_chunks.append(ch)
+
     db.commit()
+    if affected_chunks:
+        _schedule_embedding_recompute(affected_chunks)
+    invalidate_graph_cache()
     return {"old": old, "new": new, "count": count}
 
 
@@ -342,7 +364,7 @@ def remove_entity(body: EntityRemoveRequest, db: Session = Depends(get_db),
             if e.get("name") == name:
                 creator = e.get("created_by", "") or ""
                 article_creator = article.created_by or ""
-                if (creator and creator != user_cn) and (article_creator and article_creator != user_cn):
+                if creator != user_cn and article_creator != user_cn:
                     raise HTTPException(status_code=403, detail=f"只有创建人可以删除实体「{name}」")
                 if not creator and article_creator and article_creator != user_cn:
                     raise HTTPException(status_code=403, detail=f"只有文章创建人可以删除实体「{name}」")
@@ -357,13 +379,31 @@ def remove_entity(body: EntityRemoveRequest, db: Session = Depends(get_db),
     # Clean up entity tag lines from article chunks
     import re
     chunk_tag_pattern = re.compile(rf'^\[实体:\s*{re.escape(name)}\b.*\]\s*\n?', re.MULTILINE)
+    affected_chunks = []
     for article in articles:
         chunks = db.query(ArticleChunk).filter(ArticleChunk.article_id == article.id).all()
         for chunk in chunks:
             if chunk.chunk_text and f"[实体: {name}" in chunk.chunk_text:
                 chunk.chunk_text = chunk_tag_pattern.sub("", chunk.chunk_text).rstrip()
+                affected_chunks.append(chunk)
+
+    # If the entity no longer exists in any article, drop its EntityInfo records.
+    still_exists = False
+    for article in db.query(Article).filter(Article.entities.isnot(None)).all():
+        try:
+            ent_data = json.loads(article.entities)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if any(e.get("name") == name for e in ent_data.get("entities", [])):
+            still_exists = True
+            break
+    if not still_exists:
+        db.query(EntityInfo).filter(EntityInfo.entity_name == name).delete(synchronize_session=False)
 
     db.commit()
+    if affected_chunks:
+        _schedule_embedding_recompute(affected_chunks)
+    invalidate_graph_cache()
     return {"entity": name, "count": count}
 
 
@@ -491,7 +531,7 @@ async def update_entity_info(entity_name: str, info_id: str, body: EntityInfoUpd
     if not info:
         raise HTTPException(status_code=404, detail="Info entry not found")
     user_cn = cert.display_name or ""
-    if info.created_by and info.created_by != user_cn:
+    if info.created_by != user_cn:
         raise HTTPException(status_code=403, detail="只有创建人可以修改该信息")
     if body.name is not None:
         info.name = body.name.strip()
@@ -528,7 +568,7 @@ async def delete_entity_info(entity_name: str, info_id: str,
     if not info:
         raise HTTPException(status_code=404, detail="Info entry not found")
     user_cn = cert.display_name or ""
-    if info.created_by and info.created_by != user_cn:
+    if info.created_by != user_cn:
         raise HTTPException(status_code=403, detail="只有创建人可以删除该信息")
     db.delete(info)
     db.commit()

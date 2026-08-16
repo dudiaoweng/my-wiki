@@ -94,43 +94,62 @@ def _make_cert_info(cn: str) -> CertInfo:
     )
 
 
+def _cn_allowed(cn: str | None) -> bool:
+    """Check whether a certificate CN is in the configured allowlist.
+
+    Returns True when no allowlist is configured (allow-all); otherwise the
+    CN must match one of the ``ALLOWED_CERT_SUBJECTS`` DN strings.
+    """
+    if not ALLOWED_CERT_SUBJECTS:
+        return True
+    if not cn:
+        return False
+    for subject in ALLOWED_CERT_SUBJECTS:
+        m = re.search(r"CN=([^/]+)", subject)
+        if m and m.group(1).strip() == cn.strip():
+            return True
+    return False
+
+
 # ── Dependencies ──────────────────────────────────────
 
 
 async def verify_client_cert(request: Request) -> None:
     """FastAPI dependency — require a valid client certificate.
 
-    Returns 401 if no certificate was presented, which prompts the
-    browser to re-negotiate the TLS connection with a client cert.
+    Returns 401 if no certificate was presented (prompting the browser to
+    re-negotiate the TLS connection), or if the certificate's CN is not in
+    the ``ALLOWED_CERT_SUBJECTS`` allowlist.
     """
     peercert = _get_peercert(request)
-    if peercert:
-        return  # Certificate present and valid (verified by TLS layer)
-
-    # No certificate — 401 with WWW-Authenticate triggers browser cert dialog
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Client certificate is required",
-    )
+    if not peercert:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Client certificate is required",
+        )
+    cn = _extract_cn_from_peercert(peercert)
+    if not _cn_allowed(cn):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Client certificate is not authorized",
+        )
+    return
 
 
 async def get_client_cert(request: Request) -> CertInfo:
     """FastAPI dependency — return the current authentication state.
 
     Does NOT raise — returns ``authenticated=False`` when no certificate
-    is present, so the frontend can decide what to show.
+    is present (or when its CN is missing / not in the allowlist), so the
+    frontend can decide what to show.
     """
     peercert = _get_peercert(request)
     if peercert:
         cn = _extract_cn_from_peercert(peercert)
-        if cn:
+        if cn and _cn_allowed(cn):
             return _make_cert_info(cn)
-        return CertInfo(
-            authenticated=True,
-            scheme="https",
-            display_name="证书用户",
-            name="证书用户",
-        )
+        # Missing CN or not in allowlist → treat as unauthenticated.
+        return CertInfo()
 
     # No certificate presented yet
     return CertInfo()

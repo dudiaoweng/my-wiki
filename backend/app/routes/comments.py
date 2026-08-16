@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import re
+import html
 import uuid
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query, Path as PathParam, UploadFile, File, Form
@@ -22,6 +23,7 @@ from app.routes.upload import (
     PDF_EXTENSIONS, IMAGE_EXTENSIONS, AUDIO_EXTENSIONS, VIDEO_EXTENSIONS,
 )
 from app.routes.qa import _extract_video_thumbnail
+from app.utils import read_upload_limited, MAX_UPLOAD_BYTES, delete_uploaded_files
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +208,7 @@ async def _bg_comment_process(
         # Step A: Parse uploaded files
         for uf in file_infos:
             ext = Path(uf["filename"]).suffix.lower()
+            escaped_name = html.escape(uf["filename"], quote=True)
             storage_name = Path(uf["storage_path"]).name
             try:
                 if ext in TEXT_EXTENSIONS:
@@ -232,7 +235,7 @@ async def _bg_comment_process(
 
                 if parsed:
                     # Replace placeholder div
-                    placeholder = f'<div data-attachment="{uf["filename"]}"'
+                    placeholder = f'<div data-attachment="{escaped_name}"'
                     idx = full_text.find(placeholder)
                     if idx >= 0:
                         end_idx = full_text.find('</div>', idx)
@@ -378,9 +381,10 @@ async def create_comment(
         if not upload_file.filename:
             continue
         ext = Path(upload_file.filename).suffix.lower()
-        content_bytes = await upload_file.read()
+        content_bytes = await read_upload_limited(upload_file, MAX_UPLOAD_BYTES)
         safe_fname = re.sub(r'[^\w.\-]', '_', upload_file.filename)
         safe_name = f"{uuid.uuid4().hex}_{safe_fname}"
+        escaped_name = html.escape(upload_file.filename, quote=True)
         storage_path = UPLOAD_DIR / safe_name
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         with open(storage_path, "wb") as f:
@@ -406,10 +410,10 @@ async def create_comment(
         try:
             media_src = f"/api/media/{safe_name}"
             if ext in IMAGE_EXTENSIONS:
-                img_tag = f'<img src="{media_src}" alt="{upload_file.filename}" style="max-width:100%;height:auto;display:block;border-radius:4px">'
+                img_tag = f'<img src="{media_src}" alt="{escaped_name}" style="max-width:100%;height:auto;display:block;border-radius:4px">'
                 initial_content = f"{initial_content}\n\n{img_tag}" if initial_content else img_tag
             elif ext in AUDIO_EXTENSIONS:
-                audio_tag = f'<audio controls src="{media_src}" alt="{upload_file.filename}" style="width:100%"></audio>'
+                audio_tag = f'<audio controls src="{media_src}" alt="{escaped_name}" style="width:100%"></audio>'
                 initial_content = f"{initial_content}\n\n{audio_tag}" if initial_content else audio_tag
             elif ext in VIDEO_EXTENSIONS:
                 poster = ""
@@ -419,19 +423,19 @@ async def create_comment(
                         poster = f' poster="/api/media/{thumb_name}"'
                 except Exception:
                     pass
-                video_tag = f'<video controls src="{media_src}"{poster} alt="{upload_file.filename}" style="width:100%"></video>'
+                video_tag = f'<video controls src="{media_src}"{poster} alt="{escaped_name}" style="width:100%"></video>'
                 initial_content = f"{initial_content}\n\n{video_tag}" if initial_content else video_tag
             else:
                 # Document type — placeholder + persistent marker, parsed async
-                doc_placeholder = f'<div data-attachment="{upload_file.filename}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {upload_file.filename}（解析中…）</div>'
-                doc_marker = f'<!-- doc-attachment: {upload_file.filename} | {safe_name} -->'
+                doc_placeholder = f'<div data-attachment="{escaped_name}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {escaped_name}（解析中…）</div>'
+                doc_marker = f'<!-- doc-attachment: {escaped_name} | {safe_name} -->'
                 initial_content = f"{initial_content}\n\n{doc_placeholder}\n{doc_marker}" if initial_content else f"{doc_placeholder}\n{doc_marker}"
         except Exception as e:
             logger.warning(f"File placeholder creation failed for {upload_file.filename}: {e}")
 
     # Track upload order (same as articles)
     if uploaded_files:
-        order_list = ", ".join(uf["filename"] for uf in uploaded_files)
+        order_list = ", ".join(html.escape(uf["filename"], quote=True) for uf in uploaded_files)
         initial_content += f"\n\n<!-- attachments-order: {order_list} -->"
 
     has_files = len(uploaded_files) > 0
@@ -532,9 +536,10 @@ async def update_comment(
         if not upload_file.filename:
             continue
         ext = Path(upload_file.filename).suffix.lower()
-        content_bytes = await upload_file.read()
+        content_bytes = await read_upload_limited(upload_file, MAX_UPLOAD_BYTES)
         safe_fname = re.sub(r'[^\w.\-]', '_', upload_file.filename)
         safe_name = f"{uuid.uuid4().hex}_{safe_fname}"
+        escaped_name = html.escape(upload_file.filename, quote=True)
         storage_path = UPLOAD_DIR / safe_name
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         with open(storage_path, "wb") as f:
@@ -559,10 +564,10 @@ async def update_comment(
         try:
             media_src = f"/api/media/{safe_name}"
             if ext in IMAGE_EXTENSIONS:
-                img_tag = f'<img src="{media_src}" alt="{upload_file.filename}" style="max-width:100%;height:auto;display:block;border-radius:4px">'
+                img_tag = f'<img src="{media_src}" alt="{escaped_name}" style="max-width:100%;height:auto;display:block;border-radius:4px">'
                 comment.content = f"{comment.content}\n\n{img_tag}" if comment.content else img_tag
             elif ext in AUDIO_EXTENSIONS:
-                audio_tag = f'<audio controls src="{media_src}" alt="{upload_file.filename}" style="width:100%"></audio>'
+                audio_tag = f'<audio controls src="{media_src}" alt="{escaped_name}" style="width:100%"></audio>'
                 comment.content = f"{comment.content}\n\n{audio_tag}" if comment.content else audio_tag
             elif ext in VIDEO_EXTENSIONS:
                 poster = ""
@@ -572,18 +577,18 @@ async def update_comment(
                         poster = f' poster="/api/media/{thumb_name}"'
                 except Exception:
                     pass
-                video_tag = f'<video controls src="{media_src}"{poster} alt="{upload_file.filename}" style="width:100%"></video>'
+                video_tag = f'<video controls src="{media_src}"{poster} alt="{escaped_name}" style="width:100%"></video>'
                 comment.content = f"{comment.content}\n\n{video_tag}" if comment.content else video_tag
             else:
-                doc_placeholder = f'<div data-attachment="{upload_file.filename}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {upload_file.filename}（解析中…）</div>'
-                doc_marker = f'<!-- doc-attachment: {upload_file.filename} | {safe_name} -->'
+                doc_placeholder = f'<div data-attachment="{escaped_name}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {escaped_name}（解析中…）</div>'
+                doc_marker = f'<!-- doc-attachment: {escaped_name} | {safe_name} -->'
                 comment.content = f"{comment.content}\n\n{doc_placeholder}\n{doc_marker}" if comment.content else f"{doc_placeholder}\n{doc_marker}"
         except Exception as e:
             logger.warning(f"File placeholder creation failed for {upload_file.filename}: {e}")
 
     # Track upload order if new files were added
     if uploaded_files:
-        order_list = ", ".join(uf["filename"] for uf in uploaded_files)
+        order_list = ", ".join(html.escape(uf["filename"], quote=True) for uf in uploaded_files)
         comment.content += f"\n\n<!-- attachments-order: {order_list} -->"
 
     # Merge attachments (always update — even when all are removed)
@@ -650,8 +655,24 @@ def delete_comment(
     db.query(ArticleChunk).filter(
         ArticleChunk.chunk_index.like(f"comment.{comment.id[:8]}.%")
     ).delete()
+    # Collect attachment files for cleanup
+    attachment_files: set[str] = set()
+    if comment.attachment_path:
+        attachment_files.add(comment.attachment_path)
+    if comment.attachments:
+        try:
+            for a in json.loads(comment.attachments):
+                p = a.get("path", "")
+                if p:
+                    attachment_files.add(p)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    for m in re.finditer(r'<(?:img|video|audio)\b[^>]*src="([^"]+)"', comment.content or "", re.IGNORECASE):
+        attachment_files.add(m.group(1).rsplit("/", 1)[-1].split("?")[0])
+
     db.delete(comment)
     db.commit()
+    delete_uploaded_files(attachment_files)
 
     invalidate_graph_cache()
     return None

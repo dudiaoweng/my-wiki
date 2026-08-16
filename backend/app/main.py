@@ -24,9 +24,9 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Depends, APIRouter, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from starlette.responses import FileResponse, HTMLResponse, RedirectResponse
+from starlette.responses import FileResponse, HTMLResponse, RedirectResponse, JSONResponse
 from app.database import init_db, SessionLocal
-from app.models import Category, Article
+from app.models import Category, Article, Comment
 from app.routes import articles, categories, tags, entities, stats, graph, qa, upload, comments
 from app.config import UPLOAD_DIR as UPLOAD_DIR_STR
 from app.auth import verify_client_cert, get_client_cert, CertInfo
@@ -59,6 +59,34 @@ def _patch_uvicorn_transport():
         pass
 
 _patch_uvicorn_transport()
+
+
+# ─── Media auth middleware ────────────────────────────
+
+class MediaAuthMiddleware:
+    """Require a client certificate for media & upload file serving.
+
+    ``/api/media`` and ``/uploads`` are mounted on the top-level app (not the
+    ``api_router`` protected by ``verify_client_cert``), so without this they
+    would be reachable without a certificate on the production 8000
+    (CERT_NONE) login port.  This is a plain ASGI middleware so it does not
+    buffer large file responses.
+    """
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope.get("path", "").startswith(("/api/media/", "/uploads")):
+            transport = scope.get("_transport")
+            peercert = transport.get_extra_info("peercert") if transport is not None else None
+            if not peercert:
+                response = JSONResponse(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    content={"detail": "Client certificate is required"},
+                )
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
 # ─── Seed data ──────────────────────────────────────
@@ -129,6 +157,7 @@ async def lifespan(app: FastAPI):
     init_db()
     seed_database()
     _cleanup_qa_temp_files()
+    _reset_stale_processing()
     yield
 
 def _cleanup_qa_temp_files():
@@ -145,6 +174,35 @@ def _cleanup_qa_temp_files():
     if cleaned:
         logger.info("Cleaned up %d stale Q&A temp file(s)", cleaned)
 
+
+def _reset_stale_processing():
+    """Reset 'processing' flags left by a previous process killed mid-parse.
+
+    Without this, an article/comment whose background task was interrupted by a
+    process restart would be stuck as 'processing' forever — blocking
+    re-processing (409) and keeping the frontend polling indefinitely.
+    """
+    db = SessionLocal()
+    try:
+        n_articles = db.query(Article).filter(Article.processing.isnot(None)).update(
+            {Article.processing: None}, synchronize_session=False,
+        )
+        n_comments = db.query(Comment).filter(Comment.processing.isnot(None)).update(
+            {Comment.processing: None}, synchronize_session=False,
+        )
+        db.commit()
+        if n_articles or n_comments:
+            logger.info(
+                "Reset stale processing flags: %d article(s), %d comment(s)",
+                n_articles, n_comments,
+            )
+    except Exception as e:
+        db.rollback()
+        logger.warning("Failed to reset stale processing flags: %s", e)
+    finally:
+        db.close()
+
+
 app = FastAPI(
     title="Knowledge Base API",
     description="Personal knowledge base — REST API",
@@ -160,6 +218,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(MediaAuthMiddleware)
 
 # Protected routes (require mTLS client certificate)
 api_router = APIRouter(dependencies=[Depends(verify_client_cert)])
@@ -226,7 +285,7 @@ def health_check():
 @app.get("/api/media/{filename:path}")
 def serve_media(filename: str, download: bool = False):
     file_path = (UPLOAD_DIR / filename).resolve()
-    if not str(file_path).startswith(str(UPLOAD_DIR.resolve())):
+    if not file_path.is_relative_to(UPLOAD_DIR.resolve()):
         raise HTTPException(status_code=403, detail="Forbidden")
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")

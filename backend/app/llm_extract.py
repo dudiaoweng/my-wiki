@@ -29,9 +29,10 @@ def extract_tags_and_entities(text: str, max_chars: int = 2000) -> tuple[list[st
     prompt = EXTRACT_TAGS_ENTITIES.format(text=text[:max_chars])
 
     last_error = None
-    for attempt in (1, 2):
+    raw_response = None
+    for attempt in range(3):  # 3 attempts = 2 retries
         try:
-            with httpx.Client(timeout=120.0) as client:
+            with httpx.Client(timeout=60.0) as client:
                 resp = client.post(
                     f"{LLM_API_BASE.rstrip('/')}/chat/completions",
                     headers={
@@ -46,14 +47,23 @@ def extract_tags_and_entities(text: str, max_chars: int = 2000) -> tuple[list[st
                     },
                 )
                 resp.raise_for_status()
+                data = resp.json()
+            # Extract content safely — guards against a 200 response with an
+            # error body / unexpected shape, which would otherwise bypass retry
+            # handling and leak a raw exception to the caller.
+            choices = data.get("choices") or []
+            if not choices:
+                raise ValueError("LLM returned no choices")
+            raw_response = (choices[0].get("message") or {}).get("content", "") or ""
+            raw_response = raw_response.strip()
+            if not raw_response:
+                raise ValueError("LLM returned empty content")
             break  # success
         except Exception as e:
             last_error = e
-            if attempt == 2:
+            if attempt == 2:  # last attempt
                 logger.warning("LLM extraction failed after retries: %s", e)
                 return [], None
-
-    raw_response = resp.json()["choices"][0]["message"]["content"].strip()
 
     # Strip markdown code fences
     cleaned = re.sub(r'^```(?:json)?\s*\n?', '', raw_response)
