@@ -1,4 +1,5 @@
 import json
+import uuid
 from fastapi import APIRouter, Depends, HTTPException, Body
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -6,6 +7,19 @@ from app.dependencies import get_db
 from app.models import Article
 
 router = APIRouter(prefix="/api/tags", tags=["tags"])
+
+MAX_ARTICLE_IDS = 500  # Keep well under SQLite's ~999 bind variable limit
+
+
+def _validate_aid(aid: str) -> None:
+    """Validate article ID — accepts UUIDs and legacy short IDs (e.g. 'a1')."""
+    if not aid or len(aid) > 36:
+        raise HTTPException(status_code=400, detail=f"Invalid article ID: {aid}")
+    if len(aid) == 36 and '-' in aid:
+        try:
+            uuid.UUID(aid)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid article ID: {aid}")
 
 
 class TagAddRequest(BaseModel):
@@ -44,6 +58,10 @@ def add_tag(body: TagAddRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Tag name cannot be empty")
     if not body.article_ids:
         raise HTTPException(status_code=400, detail="No articles selected")
+    if len(body.article_ids) > MAX_ARTICLE_IDS:
+        raise HTTPException(status_code=400, detail=f"Too many article IDs (max {MAX_ARTICLE_IDS})")
+    for aid in body.article_ids:
+        _validate_aid(aid)
 
     articles = db.query(Article).filter(Article.id.in_(body.article_ids)).all()
     if not articles:
@@ -95,6 +113,10 @@ def remove_tag(body: TagRemoveRequest, db: Session = Depends(get_db)):
 
     query = db.query(Article)
     if body.article_ids:
+        if len(body.article_ids) > MAX_ARTICLE_IDS:
+            raise HTTPException(status_code=400, detail=f"Too many article IDs (max {MAX_ARTICLE_IDS})")
+        for aid in body.article_ids:
+            _validate_aid(aid)
         query = query.filter(Article.id.in_(body.article_ids))
 
     articles = query.all()

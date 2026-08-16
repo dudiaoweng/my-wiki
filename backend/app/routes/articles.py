@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import re
+import html
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query, Path as PathParam, UploadFile, File, Form
 from fastapi.responses import FileResponse
@@ -22,6 +23,7 @@ from app.routes.upload import (
     PDF_EXTENSIONS, IMAGE_EXTENSIONS, AUDIO_EXTENSIONS, VIDEO_EXTENSIONS,
 )
 from app.routes.qa import _extract_video_thumbnail
+from app.utils import read_upload_limited, MAX_UPLOAD_BYTES, delete_uploaded_files
 import uuid
 
 logger = logging.getLogger(__name__)
@@ -232,10 +234,12 @@ def _replace_media_placeholder(full_text: str, storage_name: str, replacement: s
             replacement = ''  # only replace first occurrence
         else:
             new_lines.append(line)
-    # If no placeholder found, prepend — this would create a duplicate!
+    # If no placeholder found, skip the description (do NOT prepend — that would
+    # duplicate the media, since the description embeds its own media tag).
     if replacement:
-        print(f"[BG_ATTACH] WARNING: placeholder not found for storage_name={storage_name!r} in content. Prepending.")
-        new_lines.insert(0, replacement)
+        logger.warning(
+            f"[BG_ATTACH] placeholder not found for storage_name={storage_name!r}; skipping media description"
+        )
     return '\n'.join(new_lines)
 
 
@@ -263,6 +267,7 @@ async def _bg_attachment_enhance(
         # Step A: Parse documents and describe media files
         for uf in uploaded_files:
             ext = Path(uf["filename"]).suffix.lower()
+            escaped_name = html.escape(uf["filename"], quote=True)
             storage_name = Path(uf["storage_path"]).name
 
             # ── Document parsing (async) ──
@@ -283,7 +288,7 @@ async def _bg_attachment_enhance(
                         parsed = ""
                     if parsed:
                         # Replace placeholder div with parsed text
-                        placeholder = f'<div data-attachment="{uf["filename"]}"'
+                        placeholder = f'<div data-attachment="{escaped_name}"'
                         idx = full_text.find(placeholder)
                         if idx >= 0:
                             end_idx = full_text.find('</div>', idx)
@@ -304,7 +309,7 @@ async def _bg_attachment_enhance(
                 elif ext in VIDEO_EXTENSIONS:
                     # Preserve poster and alt from THIS file's placeholder
                     poster_url = ""
-                    alt_name = uf["filename"]
+                    alt_name = escaped_name
                     for line in full_text.split('\n'):
                         if storage_name in line and '<video' in line:
                             pm = re.search(r'poster="([^"]*)"', line, re.IGNORECASE)
@@ -418,9 +423,10 @@ async def create_article(
         if not upload_file.filename:
             continue
         ext = Path(upload_file.filename).suffix.lower()
-        content_bytes = await upload_file.read()
+        content_bytes = await read_upload_limited(upload_file, MAX_UPLOAD_BYTES)
         safe_fname = re.sub(r'[^\w.\-]', '_', upload_file.filename)
         safe_name = f"{uuid.uuid4().hex}_{safe_fname}"
+        escaped_name = html.escape(upload_file.filename, quote=True)
         storage_path = UPLOAD_DIR / safe_name
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         with open(storage_path, "wb") as f:
@@ -442,10 +448,10 @@ async def create_article(
         try:
             media_src = f"/api/media/{safe_name}"
             if ext in IMAGE_EXTENSIONS:
-                img_tag = f'<img src="{media_src}" alt="{upload_file.filename}" style="max-width:100%;height:auto;display:block;border-radius:4px">'
+                img_tag = f'<img src="{media_src}" alt="{escaped_name}" style="max-width:100%;height:auto;display:block;border-radius:4px">'
                 initial_content = f"{initial_content}\n\n{img_tag}" if initial_content else img_tag
             elif ext in AUDIO_EXTENSIONS:
-                audio_tag = f'<audio controls src="{media_src}" alt="{upload_file.filename}" style="width:100%"></audio>'
+                audio_tag = f'<audio controls src="{media_src}" alt="{escaped_name}" style="width:100%"></audio>'
                 initial_content = f"{initial_content}\n\n{audio_tag}" if initial_content else audio_tag
             elif ext in VIDEO_EXTENSIONS:
                 poster = ""
@@ -455,20 +461,20 @@ async def create_article(
                         poster = f' poster="/api/media/{thumb_name}"'
                 except Exception:
                     pass
-                video_tag = f'<video controls src="{media_src}"{poster} alt="{upload_file.filename}" style="width:100%"></video>'
+                video_tag = f'<video controls src="{media_src}"{poster} alt="{escaped_name}" style="width:100%"></video>'
                 initial_content = f"{initial_content}\n\n{video_tag}" if initial_content else video_tag
             else:
                 # Document type — placeholder, parsed async in background
-                doc_placeholder = f'<div data-attachment="{upload_file.filename}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {upload_file.filename}（解析中…）</div>'
+                doc_placeholder = f'<div data-attachment="{escaped_name}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {escaped_name}（解析中…）</div>'
                 # Persistent marker so the frontend can always discover document attachments
-                doc_marker = f'<!-- doc-attachment: {upload_file.filename} | {safe_name} -->'
+                doc_marker = f'<!-- doc-attachment: {escaped_name} | {safe_name} -->'
                 initial_content = f"{initial_content}\n\n{doc_placeholder}\n{doc_marker}" if initial_content else f"{doc_placeholder}\n{doc_marker}"
         except Exception as e:
             logger.warning(f"File parsing failed for {upload_file.filename}: {e}")
 
     # Track upload order for frontend sorting
     if uploaded_files:
-        order_list = ", ".join(uf["filename"] for uf in uploaded_files)
+        order_list = ", ".join(html.escape(uf["filename"], quote=True) for uf in uploaded_files)
         initial_content += f"\n\n<!-- attachments-order: {order_list} -->"
 
     article = Article(
@@ -540,7 +546,7 @@ async def update_article(
         raise HTTPException(status_code=404, detail="Article not found")
 
     # Only the creator can edit
-    if article.created_by and article.created_by != user_cn:
+    if article.created_by != user_cn:
         raise HTTPException(status_code=403, detail="只有文章创建人可以编辑该文章")
 
     # Parse tags
@@ -731,9 +737,10 @@ async def update_article(
             if not upload_file.filename:
                 continue
             ext = Path(upload_file.filename).suffix.lower()
-            content_bytes = await upload_file.read()
+            content_bytes = await read_upload_limited(upload_file, MAX_UPLOAD_BYTES)
             safe_fname = re.sub(r'[^\w.\-]', '_', upload_file.filename)
             safe_name = f"{uuid.uuid4().hex}_{safe_fname}"
+            escaped_name = html.escape(upload_file.filename, quote=True)
             storage_path = UPLOAD_DIR / safe_name
             UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
             with open(storage_path, "wb") as f:
@@ -756,10 +763,10 @@ async def update_article(
                 media_src = f"/api/media/{safe_name}"
                 current = article.content or ""
                 if ext in IMAGE_EXTENSIONS:
-                    img_tag = f'<img src="{media_src}" alt="{upload_file.filename}" style="max-width:100%;height:auto;display:block;border-radius:4px">'
+                    img_tag = f'<img src="{media_src}" alt="{escaped_name}" style="max-width:100%;height:auto;display:block;border-radius:4px">'
                     article.content = f"{current}\n\n{img_tag}" if current else img_tag
                 elif ext in AUDIO_EXTENSIONS:
-                    audio_tag = f'<audio controls src="{media_src}" alt="{upload_file.filename}" style="width:100%"></audio>'
+                    audio_tag = f'<audio controls src="{media_src}" alt="{escaped_name}" style="width:100%"></audio>'
                     article.content = f"{current}\n\n{audio_tag}" if current else audio_tag
                 elif ext in VIDEO_EXTENSIONS:
                     poster = ""
@@ -769,13 +776,13 @@ async def update_article(
                             poster = f' poster="/api/media/{thumb_name}"'
                     except Exception:
                         pass
-                    video_tag = f'<video controls src="{media_src}"{poster} alt="{upload_file.filename}" style="width:100%"></video>'
+                    video_tag = f'<video controls src="{media_src}"{poster} alt="{escaped_name}" style="width:100%"></video>'
                     article.content = f"{current}\n\n{video_tag}" if current else video_tag
                 else:
                     # Document — placeholder, parsed async in background
-                    doc_placeholder = f'<div data-attachment="{upload_file.filename}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {upload_file.filename}（解析中…）</div>'
+                    doc_placeholder = f'<div data-attachment="{escaped_name}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {escaped_name}（解析中…）</div>'
                     # Persistent marker so the frontend can always discover document attachments
-                    doc_marker = f'<!-- doc-attachment: {upload_file.filename} | {safe_name} -->'
+                    doc_marker = f'<!-- doc-attachment: {escaped_name} | {safe_name} -->'
                     article.content = f"{current}\n\n{doc_placeholder}\n{doc_marker}" if current else f"{doc_placeholder}\n{doc_marker}"
             except Exception as e:
                 logger.warning(f"File parsing failed for {upload_file.filename}: {e}")
@@ -801,7 +808,7 @@ async def update_article(
             if article.attachment_name and article.attachment_name not in all_order:
                 # Only add if there's still an attachment (wasn't removed in keep_set processing)
                 all_order.append(article.attachment_name)
-        all_order.extend(uf["filename"] for uf in uploaded_files)
+        all_order.extend(html.escape(uf["filename"], quote=True) for uf in uploaded_files)
         # Remove old order comment(s) and append consolidated one
         article.content = re.sub(
             r'\n*<!-- attachments-order: .+? -->\n*', '\n',
@@ -871,7 +878,7 @@ async def reprocess_article(
         raise HTTPException(status_code=404, detail="Article not found")
 
     user_cn = cert.display_name or ""
-    if article.created_by and article.created_by != user_cn:
+    if article.created_by != user_cn:
         raise HTTPException(status_code=403, detail="只有文章创建人可以重新解析")
 
     if article.processing == "processing":
@@ -881,7 +888,12 @@ async def reprocess_article(
     uploaded_files: list[dict] = []
     for m in re.finditer(r'<!-- doc-attachment: (.+?) \| (.+?) -->', article.content or "", re.IGNORECASE):
         safe_name = m.group(2).strip()
-        storage_path = UPLOAD_DIR / safe_name
+        # Reject path traversal (same guard as reprocess_single_attachment)
+        if "/" in safe_name or "\\" in safe_name or ".." in safe_name:
+            continue
+        storage_path = (UPLOAD_DIR / safe_name).resolve()
+        if not storage_path.is_relative_to(UPLOAD_DIR.resolve()):
+            continue
         if storage_path.exists():
             uploaded_files.append({
                 "filename": m.group(1).strip(),
@@ -893,7 +905,9 @@ async def reprocess_article(
     for m in re.finditer(r'<(?:img|video|audio)\b[^>]*src="([^"]+)"', article.content or "", re.IGNORECASE):
         src = m.group(1)
         fname = src.rsplit("/", 1)[-1].split("?")[0]
-        storage_path = UPLOAD_DIR / fname
+        storage_path = (UPLOAD_DIR / fname).resolve()
+        if not storage_path.is_relative_to(UPLOAD_DIR.resolve()):
+            continue
         if storage_path.exists() and fname not in {uf["filename"] for uf in uploaded_files}:
             uploaded_files.append({
                 "filename": fname,
@@ -924,7 +938,7 @@ async def reprocess_single_attachment(
         raise HTTPException(status_code=404, detail="Article not found")
 
     user_cn = cert.display_name or ""
-    if article.created_by and article.created_by != user_cn:
+    if article.created_by != user_cn:
         raise HTTPException(status_code=403, detail="只有文章创建人可以重新解析")
 
     if article.processing == "processing":
@@ -968,7 +982,7 @@ def delete_article(
         raise HTTPException(status_code=404, detail="Article not found")
 
     user_cn = cert.display_name or ""
-    if article.created_by and article.created_by != user_cn:
+    if article.created_by != user_cn:
         raise HTTPException(status_code=403, detail="只有文章创建人可以删除该文章")
 
     # Collect entity names from this article before deleting
@@ -983,8 +997,31 @@ def delete_article(
         except (json.JSONDecodeError, TypeError):
             pass
 
+    # Collect attachment files (article + its cascade-deleted comments) for cleanup
+    attachment_files: set[str] = set()
+    if article.attachment_path:
+        attachment_files.add(article.attachment_path)
+    for m in re.finditer(r'<!-- doc-attachment: .+? \| (.+?) -->', article.content or ""):
+        attachment_files.add(m.group(1).strip())
+    for m in re.finditer(r'<(?:img|video|audio)\b[^>]*src="([^"]+)"', article.content or "", re.IGNORECASE):
+        attachment_files.add(m.group(1).rsplit("/", 1)[-1].split("?")[0])
+    for comment in article.comments:
+        if comment.attachment_path:
+            attachment_files.add(comment.attachment_path)
+        if comment.attachments:
+            try:
+                for a in json.loads(comment.attachments):
+                    p = a.get("path", "")
+                    if p:
+                        attachment_files.add(p)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        for m in re.finditer(r'<(?:img|video|audio)\b[^>]*src="([^"]+)"', comment.content or "", re.IGNORECASE):
+            attachment_files.add(m.group(1).rsplit("/", 1)[-1].split("?")[0])
+
     db.delete(article)
     db.commit()
+    delete_uploaded_files(attachment_files)
 
     # Clean up entity_infos that no longer appear in any article
     if entity_names:

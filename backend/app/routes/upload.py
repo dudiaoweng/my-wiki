@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import html
 import uuid
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
@@ -17,7 +18,7 @@ from app.config import (
     ASR_API_KEY, ASR_API_BASE, ASR_MODEL,
     UPLOAD_DIR as UPLOAD_DIR_STR,
 )
-from app.utils import find_ffmpeg
+from app.utils import find_ffmpeg, read_upload_limited, MAX_UPLOAD_BYTES
 from app.prompts import IMAGE_DESCRIPTION, VIDEO_DESCRIPTION, GENERATE_TITLE
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
@@ -118,7 +119,7 @@ async def parse_image(file_path: str, original_name: str) -> str:
     import httpx
 
     storage_name = Path(file_path).name
-    img_tag = f'<img src="/api/media/{storage_name}" alt="{original_name}" style="max-width:100%;height:auto;display:block;border-radius:4px">'
+    img_tag = f'<img src="/api/media/{storage_name}" alt="{html.escape(original_name, quote=True)}" style="max-width:100%;height:auto;display:block;border-radius:4px">'
 
     if not VISION_API_KEY:
         return f"{img_tag}\n\n# 图片：{original_name}\n\n> 未配置视觉模型 API，无法自动描述图片内容。请手动添加。"
@@ -581,13 +582,10 @@ async def upload_file(
     file_id = str(uuid.uuid4())
     safe_filename = re.sub(r'[^\w.\-]', '_', Path(file.filename).name)
     safe_name = f"{file_id}_{safe_filename}"
+    escaped_name = html.escape(file.filename, quote=True)
     file_path = UPLOAD_DIR / safe_name
 
-    content_bytes = await file.read()
-
-    # Prevent resource exhaustion: limit to 500MB
-    if len(content_bytes) > 500 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="File too large (max 500MB)")
+    content_bytes = await read_upload_limited(file, MAX_UPLOAD_BYTES)
 
     with open(file_path, "wb") as f:
         f.write(content_bytes)
@@ -610,7 +608,7 @@ async def upload_file(
         elif ext in PDF_EXTENSIONS:
             raw_text = await asyncio.to_thread(parse_pdf, str(file_path))
         elif ext in IMAGE_EXTENSIONS:
-            raw_text = f'<img src="{media_src}" alt="{file.filename}" style="max-width:100%;height:auto;display:block;border-radius:4px">'
+            raw_text = f'<img src="{media_src}" alt="{escaped_name}" style="max-width:100%;height:auto;display:block;border-radius:4px">'
         elif ext in AUDIO_EXTENSIONS:
             raw_text = f'<audio controls src="{media_src}" style="width:100%"></audio>'
         elif ext in VIDEO_EXTENSIONS:
@@ -623,10 +621,10 @@ async def upload_file(
     # 3. Add persistent doc-attachment marker for non-media files (so the frontend
     #    can uniquely identify each file, even when multiple share the same name).
     if is_doc:
-        raw_text += f"\n\n<!-- doc-attachment: {file.filename} | {safe_name} -->"
+        raw_text += f"\n\n<!-- doc-attachment: {escaped_name} | {safe_name} -->"
 
     # 4. Track upload order so later-added attachments preserve correct ordering
-    raw_text += f"\n\n<!-- attachments-order: {file.filename} -->"
+    raw_text += f"\n\n<!-- attachments-order: {escaped_name} -->"
 
     # 5. Use filename (without extension) as initial title; background task will generate a better one
     title = Path(file.filename).stem or file.filename

@@ -4,6 +4,7 @@ from app.dependencies import get_db
 from app.models import Category, Article
 from app.schemas import CategoryCreate, CategoryResponse
 from app.auth import get_client_cert, CertInfo
+from app.routes.graph import invalidate_graph_cache
 import uuid
 
 router = APIRouter(prefix="/api/categories", tags=["categories"])
@@ -36,6 +37,7 @@ def create_category(body: CategoryCreate, db: Session = Depends(get_db),
     db.add(category)
     db.commit()
     db.refresh(category)
+    invalidate_graph_cache()
     return category
 
 
@@ -51,12 +53,18 @@ def update_category(
     if not cat:
         raise HTTPException(status_code=404, detail="Category not found")
     user_cn = cert.display_name or ""
-    if cat.created_by and cat.created_by != user_cn:
+    if cat.created_by != user_cn:
         raise HTTPException(status_code=403, detail="只有创建人可以修改该分类")
+    existing = db.query(Category).filter(
+        Category.name == body.name, Category.id != category_id
+    ).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Category with this name already exists")
     cat.name = body.name
     cat.color = body.color
     db.commit()
     db.refresh(cat)
+    invalidate_graph_cache()
     return cat
 
 
@@ -71,7 +79,7 @@ def delete_category(
     if not cat:
         raise HTTPException(status_code=404, detail="Category not found")
     user_cn = cert.display_name or ""
-    if cat.created_by and cat.created_by != user_cn:
+    if cat.created_by != user_cn:
         raise HTTPException(status_code=403, detail="只有创建人可以删除该分类")
 
     # Check if any articles belong to this category
@@ -84,4 +92,5 @@ def delete_category(
 
     db.delete(cat)
     db.commit()
+    invalidate_graph_cache()
     return None

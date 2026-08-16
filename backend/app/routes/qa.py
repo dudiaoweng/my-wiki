@@ -6,10 +6,11 @@ import os
 import re
 import uuid
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from app.dependencies import get_db
 from app.models import Article, ArticleChunk, Comment, EntityInfo
 from app.config import (
@@ -20,7 +21,7 @@ from app.config import (
     QA_TEMPERATURE,
     UPLOAD_DIR as UPLOAD_DIR_STR,
 )
-from app.utils import find_ffmpeg
+from app.utils import find_ffmpeg, read_upload_limited
 from app.prompts import (
     QA_VIDEO_DESCRIPTION,
     QA_WITH_KB_INTRO,
@@ -48,8 +49,8 @@ UPLOAD_DIR = Path(UPLOAD_DIR_STR)
 # ─── Schemas ───────────────────────────────────────
 
 class QAMessage(BaseModel):
-    role: str
-    content: str
+    role: Literal["user", "assistant"]
+    content: str = Field(max_length=4000)
 
 class FileContext(BaseModel):
     filename: str
@@ -58,7 +59,7 @@ class FileContext(BaseModel):
     is_image: bool = False # True → pass as vision content to LLM
 
 class QARequest(BaseModel):
-    question: str
+    question: str = Field(max_length=2000)
     history: list[QAMessage] = Field(default_factory=list, max_length=50)
     file_contexts: list[FileContext] = Field(default_factory=list, max_length=5)
     kb_enabled: bool = True  # False → skip knowledge base, use LLM directly
@@ -274,7 +275,7 @@ async def semantic_search(db: Session, question: str, top_k: int = 5) -> list[tu
         return fallback_keyword_search(db, question, top_k)
 
     # Compare against all chunks with embeddings
-    chunks = db.query(ArticleChunk).filter(ArticleChunk.embedding.isnot(None)).all()
+    chunks = db.query(ArticleChunk).options(joinedload(ArticleChunk.article)).filter(ArticleChunk.embedding.isnot(None)).all()
     if not chunks:
         return fallback_keyword_search(db, question, top_k)
 
@@ -670,10 +671,7 @@ async def parse_file_for_question(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="No file provided")
 
     ext = Path(file.filename).suffix.lower()
-    content_bytes = await file.read()
-
-    if len(content_bytes) > 50 * 1024 * 1024:  # 50MB for Q&A
-        raise HTTPException(status_code=413, detail="File too large (max 50MB)")
+    content_bytes = await read_upload_limited(file, 50 * 1024 * 1024)
 
     # Always save to disk — background task needs the file
     file_id = uuid.uuid4().hex
