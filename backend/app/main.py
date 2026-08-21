@@ -327,5 +327,6 @@ if __name__ == "__main__":
         ssl_certfile=SSL_CERTFILE,
         ssl_ca_certs=SSL_CA_CERTS,
         ssl_cert_reqs=int(_ssl.CERT_OPTIONAL),
+        ssl_ciphers="DEFAULT:@SECLEVEL=0",  # 兼容 SHA-1 签名的客户端证书
         reload=True,
     )
