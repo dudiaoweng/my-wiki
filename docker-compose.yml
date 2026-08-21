@@ -1,0 +1,33 @@
+services:
+  my-wiki:
+    build: .
+    container_name: my-wiki
+    ports:
+      - "8000:8000"   # 登录页（无需客户端证书）
+      - "8443:8443"   # 应用（mTLS 客户端证书认证）
+    volumes:
+      - wiki-data:/app/data       # SQLite 数据库持久化
+      - wiki-uploads:/app/uploads # 上传文件持久化
+      - ./certs:/app/certs:ro     # 挂载真实证书（覆盖镜像内置证书）
+    environment:
+      # LLM / Vision / ASR / Embedding（从宿主机 .env 读取）
+      - LLM_API_KEY=${LLM_API_KEY:-10475529263742118a57eb14d231ed82.kV6HUGjreSoJrfrz}
+      - LLM_API_BASE=${LLM_API_BASE:-https://open.bigmodel.cn/api/paas/v4}
+      - LLM_MODEL=${LLM_MODEL:-GLM-5.2}
+      - VISION_API_KEY=${VISION_API_KEY:-10475529263742118a57eb14d231ed82.kV6HUGjreSoJrfrz}
+      - VISION_API_BASE=${VISION_API_BASE:-https://open.bigmodel.cn/api/paas/v4}
+      - VISION_MODEL=${VISION_MODEL:-GLM-5V-Turbo}
+      - ASR_API_KEY=${ASR_API_KEY:-10475529263742118a57eb14d231ed82.kV6HUGjreSoJrfrz}
+      - ASR_API_BASE=${ASR_API_BASE:-https://open.bigmodel.cn/api/paas/v4}
+      - ASR_MODEL=${ASR_MODEL:-GLM-ASR-2512}
+      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-10475529263742118a57eb14d231ed82.kV6HUGjreSoJrfrz}
+      - EMBEDDING_API_BASE=${EMBEDDING_API_BASE:-https://open.bigmodel.cn/api/paas/v4}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-embedding-3}
+      - QA_TEMPERATURE=${QA_TEMPERATURE:-0.2}
+      # mTLS 白名单（逗号分隔的 subject DN）
+      - ALLOWED_CERT_SUBJECTS=${ALLOWED_CERT_SUBJECTS:-}
+    restart: unless-stopped
+
+volumes:
+  wiki-data:
+  wiki-uploads:

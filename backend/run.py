@@ -49,10 +49,14 @@ if sys.platform == "win32":
 import uvicorn
 from app.main import app
 
+# 证书路径支持环境变量覆盖（.env / Docker env），默认使用 ../certs
 cert_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "certs"))
-keyfile  = os.path.join(cert_dir, "server.key")
-certfile = os.path.join(cert_dir, "server.crt")
-cafile   = os.path.join(cert_dir, "ca.crt")
+keyfile  = os.environ.get("SSL_KEYFILE",  os.path.join(cert_dir, "server.key"))
+certfile = os.environ.get("SSL_CERTFILE", os.path.join(cert_dir, "server.crt"))
+cafile   = os.environ.get("SSL_CA_CERTS", os.path.join(cert_dir, "ca.crt"))
+
+# 监听地址支持环境变量（本地 127.0.0.1，容器内 0.0.0.0）
+HOST = os.environ.get("HOST", "127.0.0.1")
 
 print(f"Cert dir: {cert_dir}")
 print(f"key  exists: {os.path.isfile(keyfile)}")
@@ -65,20 +69,22 @@ async def main():
     # Port 8000: NO client cert request — login page only
     config_8000 = uvicorn.Config(
         app,
-        host="127.0.0.1", port=8000,
+        host=HOST, port=8000,
         ssl_keyfile=keyfile,
         ssl_certfile=certfile,
         ssl_cert_reqs=int(ssl.CERT_NONE),
+        ssl_ciphers="DEFAULT:@SECLEVEL=0",  # 兼容 SHA-1 签名的客户端证书
         log_level="info",
     )
     # Port 8443: REQUIRED client cert — full application
     config_8443 = uvicorn.Config(
         app,
-        host="127.0.0.1", port=8443,
+        host=HOST, port=8443,
         ssl_keyfile=keyfile,
         ssl_certfile=certfile,
         ssl_ca_certs=cafile,
         ssl_cert_reqs=int(ssl.CERT_REQUIRED),
+        ssl_ciphers="DEFAULT:@SECLEVEL=0",  # 兼容 SHA-1 签名的客户端证书
         log_level="info",
     )
 

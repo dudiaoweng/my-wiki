@@ -1,6 +1,6 @@
 # 知识库系统 — 技术文档
 
-> **版本**: 1.3 | **最后更新**: 2026-08-11 | **作者**: dudiaoweng
+> **版本**: 1.5 | **最后更新**: 2026-08-21 | **作者**: dudiaoweng
 
 ---
 
@@ -948,6 +948,30 @@ def fallback_keyword_search(db, question, top_k=5):
 
 两个区域通过 `flex: 1 1 0%` 等分可用高度。
 
+### 9.5 附件手动重新解析（v1.4）
+
+- 每个附件缩略图左下角 🔄 按钮（hover 显示，仅文章创建人）
+- 单文件解析：`POST /api/articles/{id}/reprocess/{safe_name}`
+- 全量解析：`POST /api/articles/{id}/reprocess`
+- 解析状态追踪：`processing` 字段扩展为 `"processing:{safe_name}"` 格式，精确标识正在解析的附件
+- 前端 AttachmentGallery 根据 processing 字段匹配附件，仅对解析中的附件显示"解析中…"遮罩
+- 文章详情页 5 秒轮询，解析完成后自动刷新并清除遮罩
+
+### 9.6 权限控制体系（v1.3+）
+
+所有创建人判断基于 mTLS 证书 CN 中的 18 位身份证号：
+
+| 资源 | 创建人记录 | 修改权限 | 删除权限 |
+|------|-----------|---------|---------|
+| 文章 | created_by | 仅创建人 | 仅创建人 |
+| 评论 | created_by | 仅评论人 | 评论人或文章创建人 |
+| 实体 | entities JSON 中的 created_by | 实体创建人或文章创建人 | 同左 |
+| 实体附加信息 | EntityInfo.created_by | 仅创建人 | 仅创建人 |
+| 分类 | created_by | 仅创建人 | 仅创建人 |
+
+- 前端通过身份证号比对隐藏非创建人的编辑/删除按钮
+- 后端 403 兜底拦截，错误详情区分权限错误与认证错误（认证 403 触发登录跳转，权限 403 仅弹 toast）
+
 ---
 
 ## 10. 状态管理
@@ -1071,9 +1095,13 @@ interface AppContextValue {
 
 | 类别 | 措施 | 位置 |
 |------|------|------|
+| **mTLS 认证** | 双向 TLS，客户端证书验证（8443 CERT_REQUIRED） | `run.py`, `auth.py` |
+| **应用白名单** | `ALLOWED_CERT_SUBJECTS` 控制允许的证书 CN（空 = 全部允许） | `auth.py`, `config.py` |
+| **资源权限** | 文章/评论/实体/附加信息/分类基于身份证号比对 created_by，仅创建人可修改/删除 | 各路由模块 |
+| **SHA-1 兼容** | `ssl_ciphers="DEFAULT:@SECLEVEL=0"` 接受 SHA-1 签名客户端证书 | `run.py`, `main.py` |
 | **路径穿越** | 文件名净化 + `/api/media/` 端点 `Path.resolve()` 范围校验 | `upload.py`, `main.py` |
 | **文件大小** | 500MB 上传限制 / 50MB 问答文件限制 | `upload.py`, `qa.py` |
-| **XSS** | HTML/SVG 文件强制 `Content-Disposition: attachment`；D3 `innerHTML` 使用 `esc()` 转义 | `main.py`, `useD3ForceGraph.ts` |
+| **XSS** | HTML/SVG 文件强制 `Content-Disposition: attachment`；D3 `innerHTML` 使用 `esc()` 转义；QA 回答经 rehype-sanitize 消毒 | `main.py`, `useD3ForceGraph.ts`, `QA.tsx` |
 | **UUID 校验** | 路径参数通过 `uuid.UUID()` 验证 | `articles.py`, `entities.py` |
 | **SQL 注入** | SQLAlchemy ORM 参数化查询 | 全后端 |
 | **错误泄露** | 错误信息写入文章内容（用户可见）而非静默丢失 | `upload.py` |
@@ -1084,12 +1112,31 @@ interface AppContextValue {
 | **竞态保护** | `ensure_embeddings` 使用 `asyncio.Lock` 防止并发重复计算 | `qa.py` |
 | **闭包内存** | 后台任务不捕获 `content_bytes`，改为从磁盘重新读取 | `upload.py` |
 
-### 12.2 已知安全限制
+### 12.2 三层访问控制模型
 
-- ⚠️ **无身份验证** — 设计用于本地单用户环境
+```
+第一层 TLS（8443 端口）
+  └─ CERT_REQUIRED + CA 验证 → 只有受 ca.crt 签发的证书能完成握手
+      ↓
+第二层 应用白名单（ALLOWED_CERT_SUBJECTS）
+  └─ verify_client_cert 依赖挂在 api_router 上
+  └─ 空列表 = 全部放行；非空 = CN 精确匹配才放行
+  └─ 不匹配 → 401 "Client certificate is not authorized"
+      ↓
+第三层 资源权限（created_by 身份证号比对）
+  └─ 文章：仅创建人可编辑/删除
+  └─ 评论：仅评论人可编辑/删除（文章创建人可删评论）
+  └─ 实体：实体创建人或文章创建人
+  └─ 附加信息：仅创建人
+  └─ 分类：仅创建人
+```
+
+### 12.3 已知安全限制
+
 - ⚠️ **无速率限制** — 需要时可添加 slowapi 中间件
 - ⚠️ **LLM API Key 存储在 `.env`** — 本地部署场景下可接受
 - ⚠️ **SQLite 并发限制** — 生产环境建议迁移至 PostgreSQL
+- ⚠️ **白名单留空时允许所有证书** — Docker compose 默认未设置，需显式配置
 
 ---
 
@@ -1209,43 +1256,42 @@ export CORS_ORIGINS="https://your-domain.com"
 
 ### 14.2 部署方案
 
-**方案 A: Nginx 反向代理 (推荐)**
+**方案 A: Docker Compose (推荐，v1.5)**
 
-```nginx
-server {
-    listen 80;
-    server_name wiki.example.com;
-
-    # 前端静态文件
-    location / {
-        root /path/to/frontend/dist;
-        try_files $uri /index.html;
-    }
-
-    # 后端 API 代理
-    location /api/ {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-}
+```bash
+docker compose up -d --build
+# 8000 登录页 / 8443 mTLS 应用
 ```
 
-**方案 B: FastAPI 直接托管静态文件**
+- 多阶段构建：Node 18 构建前端 → Python 3.11-slim 运行时（ffmpeg + OpenCV headless）
+- 数据持久化：`wiki-data`（SQLite）/ `wiki-uploads`（上传文件）卷
+- 证书：`./certs` 以只读方式挂载，覆盖镜像内置证书
+- 监听地址：容器内 `HOST=0.0.0.0`，双端口 8000/8443
+- `run.py` 支持 `HOST` / `SSL_CERTFILE` / `SSL_KEYFILE` / `SSL_CA_CERTS` 环境变量覆盖
 
-```python
-# main.py 添加
-from fastapi.staticfiles import StaticFiles
-app.mount("/", StaticFiles(directory="../frontend/dist", html=True), name="static")
+**方案 B: 本机双端口运行**
+
+```bash
+cd frontend && npm run build
+cd backend && .venv\Scripts\python run.py
 ```
+
+`run.py` 同时启动 8000（CERT_NONE 登录页）和 8443（CERT_REQUIRED 应用）。
+
+**部署前置条件**：
+
+| 步骤 | 操作 | 用途 |
+|------|------|------|
+| 1 | 导入 `certs/ca.crt` 到浏览器受信任根证书 | 信任服务器证书，否则 TLS 握手中止 |
+| 2 | 导入 `.p12` 客户端证书到个人存储 | 身份认证（密码 123456） |
+| 3 | 配置 `ALLOWED_CERT_SUBJECTS` 白名单 | 空 = 允许所有证书；非空 = CN 精确匹配 |
 
 ### 14.3 注意事项
 
-- 使用 `gunicorn` + `uvicorn.workers.UvicornWorker` 进行多进程部署
 - SQLite 在单进程下工作良好，多进程需考虑 WAL 模式
 - 生产环境建议使用 PostgreSQL + pgvector 替换 SQLite 存储嵌入向量
-- 添加 HTTPS (通过 Nginx + Let's Encrypt)
-- 生产环境建议添加认证层 (JWT / API Key)
+- Docker 容器默认白名单为空（allow-all），需通过环境变量显式配置
+- SHA-1 签名证书需后端 `ssl_ciphers="DEFAULT:@SECLEVEL=0"`（已默认配置），浏览器端支持有限
 
 ---
 

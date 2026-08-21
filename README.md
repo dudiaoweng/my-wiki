@@ -10,10 +10,12 @@
 - 创建 / 编辑 / 删除文章，Markdown 编写
 - 记录创建人和更新人（从 mTLS 证书 CN 提取姓名+身份证号）
 - 仅更新过的文章显示更新时间/更新人
-- 文件上传自动解析（文本 / Word / Excel / PPT / PDF / 图片 / 音视频）
+- 文件上传自动解析（文本 / Word / Excel / PPT / PDF / 图片 / 音视频），500MB 大小限制
 - 分类管理（颜色标签，含文章保护）
-- 标签系统（手动 + AI 自动提取）
+- 标签系统（手动 chips 交互 + AI 自动提取）
 - 附件下载（原始文件保留）
+- 附件手动重新解析（每个附件独立 🔄 按钮，解析中显示遮罩）
+- 附件缩略图（图片/视频 poster + 灯箱预览）
 
 ### 🔒 证书认证 (mTLS)
 - 双向 TLS 客户端证书验证，无需密码
@@ -30,12 +32,12 @@
 
 ### 🤖 AI 能力（需配置 LLM API）
 - **标签提取**：自动从文章内容提取概念标签
-- **实体识别**：提取人物、组织、地点、事件、产品等实体及其关系
+- **实体识别**：仅提取具有具体名称的实体（人物/组织/地点/事件/产品/作品）及其关系，泛化概念归入标签
 - **图片描述**：上传图片自动用视觉模型生成描述
 - **视频分析**：提取关键帧，通过视觉模型生成视频内容描述
 - **音频转写**：自动转写音频为文字（语音识别）
 - **文档摘要**：上传文档自动生成标题
-- **智能问答**：基于知识库的 RAG 问答（语义搜索 + LLM 回答），支持上传图片 / 音频 / 视频作为上下文
+- **智能问答**：基于知识库的 RAG 问答（语义搜索 + LLM 回答），支持上传图片 / 音频 / 视频作为上下文，回答内容经 rehype-sanitize 消毒
 
 ### 🗺️ 知识图谱
 - D3.js 力导向图可视化
@@ -146,7 +148,8 @@ my-wiki/
 │   │   │   ├── Hero.tsx           # 首页
 │   │   │   ├── ArticleCard.tsx    # 文章卡片
 │   │   │   ├── ArticleList.tsx    # 文章列表 + EntityPanel
-│   │   │   ├── ArticleDetail.tsx  # 文章详情页 + 内联查看（归并）
+│   │   │   ├── ArticleDetail.tsx  # 文章详情 + 内联查看（归并）
+│   │   │   ├── ArticleDetailPage.tsx # 独立文章页（懒加载路由包装）
 │   │   │   ├── CommentSection.tsx # 评论组件（共用）
 │   │   │   ├── EditorModal.tsx    # 文章编辑弹窗
 │   │   │   ├── UploadModal.tsx    # 文件上传弹窗
@@ -178,6 +181,9 @@ my-wiki/
 │   ├── client_zh.crt / client_zh.p12  # 周衡的客户端证书
 │   ├── client_xl.crt / client_xl.p12  # 谢林的客户端证书
 │   └── readme.txt                 # 证书生成说明
+├── Dockerfile                     # 多阶段构建（Node 前端 + Python 运行时）
+├── docker-compose.yml             # 容器编排（数据卷 + 环境变量注入）
+├── .dockerignore
 └── README.md
 ```
 
@@ -241,12 +247,50 @@ QA_TEMPERATURE=0.2
 SSL_CERTFILE=../certs/server.crt
 SSL_KEYFILE=../certs/server.key
 SSL_CA_CERTS=../certs/ca.crt
-ALLOWED_CERT_SUBJECTS=/C=CN/ST=32/L=00/O=11/OU=00/CN=zhouheng 320923197608270018
+# 白名单（逗号分隔的 subject DN；留空 = 允许所有证书）
+ALLOWED_CERT_SUBJECTS=/C=CN/ST=32/L=00/O=11/OU=00/CN=周衡 320923197608270018,/C=CN/ST=32/L=00/O=11/OU=00/CN=谢林 320100198001010010
 ```
 
 ### 3. 导入客户端证书
 
-生产模式下浏览器需要出示客户端证书（8443 端口 `CERT_REQUIRED`）。双击 `certs/client_zh.p12`（或 `client_xl.p12`），密码 `123456`，导入到"当前用户"→"个人"存储。
+生产模式（含 Docker）下浏览器需要出示客户端证书（8443 端口 `CERT_REQUIRED`）。
+
+**证书文件**（密码均为 `123456`）：
+
+| 文件 | 用户 | CN |
+|------|------|-----|
+| `certs/zhouheng.p12` | 周衡 | 周衡 320923197608270018 |
+| `certs/xielin.p12` | 谢林 | 谢林 320100198001010010 |
+| `certs/xielin2.p12` | 谢林(2) | 谢林 320200199011010011 |
+| `certs/zhangshengli.p12` | 张胜利 | 张胜利 320301198803210011 |
+
+导入步骤（Windows）：
+
+**第一步：导入 CA 根证书**（信任服务器证书）：
+1. 双击 `certs/ca.crt` → 「安装证书」
+2. 存储位置选择「当前用户」
+3. 证书存储选择「将所有的证书都放入下列存储」→「受信任的根证书颁发机构」
+4. 完成导入
+
+**第二步：导入客户端证书**（用于身份认证）：
+1. 双击 `.p12` 文件 → 输入密码 `123456`
+2. 存储位置选择「当前用户」→「个人」
+3. 完成导入
+
+> ⚠️ 两步缺一不可：
+> - **缺少 CA 根证书** → 浏览器显示"您的连接不是私密连接"（NET::ERR_CERT_AUTHORITY_INVALID），不会弹出客户端证书选择框
+> - **缺少客户端证书** → 浏览器直接显示证书错误页（ERR_BAD_SSL_CLIENT_AUTH_CERT）
+> - 两者都导入后，点击「证书登录」→ 浏览器弹出证书选择框
+
+**浏览器证书选择行为**：
+
+| 匹配的客户端证书数 | 行为 |
+|-------------------|------|
+| 0 个 | 证书错误页（导入 .p12 后重试） |
+| 1 个 | 自动使用，不弹选择框 |
+| 2 个以上 | 弹出选择框供用户选择身份 |
+
+**SHA-1 签名证书兼容**：后端启动时配置 `ssl_ciphers="DEFAULT:@SECLEVEL=0"`，可接受 SHA-1 签名的客户端证书（现代浏览器端仍可能有限制）。
 
 开发模式无需导入 — Vite 代理直接使用 `certs/` 目录下的证书文件连接后端。
 
@@ -276,6 +320,18 @@ cd frontend && npm run build          # 构建前端 → backend/static/
 cd backend && .venv\Scripts\python run.py  # 启动双端口服务
 # 访问 https://localhost:8000 → 登录页面 → 点击"证书登录" → 选择证书 → 进入系统
 ```
+
+**Docker 部署**：
+
+```bash
+docker compose up -d --build
+# 访问 https://localhost:8000（登录页）/ https://localhost:8443（应用）
+```
+
+- 多阶段构建：Node 构建前端 → Python slim 运行时（含 ffmpeg + OpenCV）
+- 数据持久化：`wiki-data`（SQLite）/ `wiki-uploads`（上传文件）卷
+- 环境变量通过 `.env` 注入（LLM 密钥 + ALLOWED_CERT_SUBJECTS 白名单）
+- 证书从 `./certs` 挂载（只读）
 
 > 生产模式使用双端口架构：
 > - **8000**（`CERT_NONE`）：仅展示登录页，永不会触发浏览器证书选择框
@@ -365,6 +421,8 @@ cd backend && .venv\Scripts\python run.py  # 启动双端口服务
 | `GET/POST` | `/api/articles` | 文章列表 / 创建（含 created_by/updated_by） |
 | `GET/PUT/DELETE` | `/api/articles/{id}` | 文章详情 / 更新 / 删除 |
 | `GET` | `/api/articles/{id}/download` | 下载附件 |
+| `POST` | `/api/articles/{id}/reprocess` | 重新解析全部附件 |
+| `POST` | `/api/articles/{id}/reprocess/{safe_name}` | 重新解析单个附件 |
 | `GET/POST` | `/api/articles/{id}/comments` | 评论列表 / 创建 |
 | `PUT/DELETE` | `/api/articles/{id}/comments/{cid}` | 更新 / 删除评论 |
 | `GET/POST` | `/api/categories` | 分类列表 / 创建 |
@@ -446,6 +504,12 @@ id, entity_name, name, content, created_by, created_at, updated_at
 - **生产模式**：双端口架构 — 8000（`CERT_NONE`）展示登录页，8443（`CERT_REQUIRED`）提供全功能应用。用户点击登录后跳转到 8443 触发证书选择框
 - 顶栏右侧显示姓名，hover 显示完整身份证号
 - 证书由自签 CA (`certs/ca.crt`) 签发，客户端 `.p12` 文件导入浏览器即可
+- 后端配置 `ssl_ciphers="DEFAULT:@SECLEVEL=0"` 兼容 SHA-1 签名的客户端证书
+
+### 三层访问控制
+1. **TLS 层**（8443 端口 `CERT_REQUIRED`）：只有受 CA 签发的证书能完成握手
+2. **应用白名单**（`ALLOWED_CERT_SUBJECTS`）：空 = 全部允许；非空 = 仅 CN 精确匹配的证书可访问 `/api/*`
+3. **资源权限**：文章/评论/实体/分类基于 `created_by` 身份证号比对，仅创建人可修改/删除
 
 ### 开发用户注册表
 
