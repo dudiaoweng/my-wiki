@@ -16,9 +16,22 @@ backend/.output.log
 frontend/node_modules
 frontend/dist
 
-# IDE / OS
+# Docker 数据目录（本机绑定挂载，不进构建上下文）
+data/
+uploads/
+
+# 证书产物（vite.config.ts 只需 .crt/.key，p12/jks/csr 等分发文件无需进构建）
+certs/*.p12
+certs/*.jks
+certs/*.csr
+certs/*.srl
+certs/debug.log
+certs/*.conf
+
+# IDE / OS / 工具配置
 .vscode
 .idea
+.claude
 *.log
 Thumbs.db
 .DS_Store

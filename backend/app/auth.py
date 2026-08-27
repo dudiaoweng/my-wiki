@@ -12,6 +12,7 @@ Both development and production use the same mechanism:
 """
 
 import logging
+import os
 import re
 
 from fastapi import HTTPException, Request, status

@@ -20,21 +20,30 @@ function readAgent(certFile: string, keyFile: string): https.Agent {
 }
 
 // ─── Dev user registry ───────────────────────────────
-const DEV_USERS: Record<string, { agent: https.Agent; displayName: string }> = {
+// 证书文件可能不存在（如生产构建环境只保留服务器证书）— 容错跳过
+function readAgentSafe(certFile: string, keyFile: string): https.Agent | null {
+  try {
+    return readAgent(certFile, keyFile);
+  } catch {
+    return null;
+  }
+}
+
+const DEV_USERS: Record<string, { agent: https.Agent | null; displayName: string }> = {
   zh: {
-    agent: readAgent('***REMOVED***.crt', '***REMOVED***.key'),
+    agent: readAgentSafe('***REMOVED***.crt', '***REMOVED***.key'),
     displayName: '***REMOVED***',
   },
   xl: {
-    agent: readAgent('xielin.crt', 'xielin.key'),
+    agent: readAgentSafe('xielin.crt', 'xielin.key'),
     displayName: '谢林',
   },
   xl2: {
-    agent: readAgent('xielin2.crt', 'xielin2.key'),
+    agent: readAgentSafe('xielin2.crt', 'xielin2.key'),
     displayName: '谢林(2)',
   },
   zsl: {
-    agent: readAgent('zhangshengli.crt', 'zhangshengli.key'),
+    agent: readAgentSafe('zhangshengli.crt', 'zhangshengli.key'),
     displayName: '张胜利',
   },
 };
@@ -56,6 +65,11 @@ function mtlsProxyMiddleware(): Plugin {
         // Determine which client cert to use
         const userKey = (req.headers['x-dev-user'] as string || DEFAULT_USER).trim();
         const user = DEV_USERS[userKey] || DEV_USERS[DEFAULT_USER];
+        if (!user.agent) {
+          res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end(`客户端证书文件缺失（${userKey}），请在 certs/ 目录补充对应 .crt/.key 文件`);
+          return;
+        }
 
         // Build forwarding headers — skip HTTP/2 pseudo-headers
         // (:method, :path, …), the internal X-Dev-User marker, and the

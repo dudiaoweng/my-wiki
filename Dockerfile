@@ -35,18 +35,18 @@ COPY backend/run.py ./
 # 前端构建产物
 COPY --from=frontend-build /build/backend/static ./static
 
-# mTLS 证书（生产环境需挂载真实证书，构建时复制便于默认运行）
-COPY certs ./certs
+# 注：certs 不再复制进镜像 — 运行时通过 -v ./certs:/app/certs:ro 挂载
 
 # SQLite 数据 + 上传文件持久化
 VOLUME ["/app/data", "/app/uploads"]
 
+# 默认值 — 实际运行时由 env_file（backend/.env）和 compose environment 覆盖
 ENV DATABASE_URL=sqlite:////app/data/knowledge_base.db \
     UPLOAD_DIR=/app/uploads \
     HOST=0.0.0.0 \
-    SSL_KEYFILE=/app/certs/server.key \
-    SSL_CERTFILE=/app/certs/server.crt \
-    SSL_CA_CERTS=/app/certs/ca.crt \
+    SSL_KEYFILE=/certs/server.key \
+    SSL_CERTFILE=/certs/server.crt \
+    SSL_CA_CERTS=/certs/ca.crt \
     PYTHONUNBUFFERED=1
 
 # 登录页端口 + 应用端口

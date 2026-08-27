@@ -1,6 +1,6 @@
 # 知识库系统 — 技术文档
 
-> **版本**: 1.5 | **最后更新**: 2026-08-21 | **作者**: dudiaoweng
+> **版本**: 1.8 | **最后更新**: 2026-08-27 | **作者**: dudiaoweng
 
 ---
 
@@ -147,12 +147,25 @@ my-wiki/
 |------|------|------|
 | **React** | 18.x | UI 框架 |
 | **TypeScript** | 5.x | 类型安全 |
-| **Vite** | 6.x | 构建工具与开发服务器 |
+| **Vite** | 5.x | 构建工具与开发服务器 |
 | **React Router DOM** | 6.x | 客户端路由 (URL Search 参数驱动状态) |
 | **D3.js** | 7.x | 知识图谱力导向图 |
 | **react-markdown** | — | Markdown 渲染 |
 | **remark-gfm** | — | GitHub Flavored Markdown 支持 |
 | **CSS Modules** | — | 组件级样式隔离 |
+
+#### 浏览器兼容性（Vite 5 构建目标 es2020）
+
+| 浏览器 | 最低版本 |
+|--------|---------|
+| Chrome | 87+ |
+| Edge | 88+ |
+| Firefox | 78+ |
+| Safari | 14+ |
+
+> - Vite 5 默认构建目标为 es2020，Chrome 87+ 即可运行
+> - **SHA-1 客户端证书**：Chrome/Edge 109+ 已移除支持；Firefox / Safari 仍支持。SHA-256 证书不受影响
+> - mTLS 登录需在浏览器中导入 CA 根证书和客户端 `.p12` 证书（见 14.2 部署前置条件）
 
 ### 2.3 外部 LLM 服务
 
@@ -1256,7 +1269,7 @@ export CORS_ORIGINS="https://your-domain.com"
 
 ### 14.2 部署方案
 
-**方案 A: Docker Compose (推荐，v1.5)**
+**方案 A: Docker Compose (推荐，v1.7)**
 
 ```bash
 docker compose up -d --build
@@ -1264,9 +1277,11 @@ docker compose up -d --build
 ```
 
 - 多阶段构建：Node 18 构建前端 → Python 3.11-slim 运行时（ffmpeg + OpenCV headless）
-- 数据持久化：`wiki-data`（SQLite）/ `wiki-uploads`（上传文件）卷
-- 证书：`./certs` 以只读方式挂载，覆盖镜像内置证书
-- 监听地址：容器内 `HOST=0.0.0.0`，双端口 8000/8443
+- 数据持久化：本机目录绑定挂载 — `./data`（SQLite）/ `./uploads`（上传文件）
+- **环境变量**：直接在 `docker-compose.yml` 的 `environment` 区块配置（LLM 密钥 + SSL 绝对路径 + 白名单）
+- **证书**：`./certs:/certs:ro` 只读挂载（镜像不含证书，启动必须提供）；SSL 路径使用容器内绝对路径（`/certs/server.crt` 等）
+- 修改 compose 环境变量后执行 `docker compose up -d` 生效（无需 `--build`；`docker restart` 不生效）
+- 环境变量优先级：compose `environment` > Dockerfile `ENV`
 - `run.py` 支持 `HOST` / `SSL_CERTFILE` / `SSL_KEYFILE` / `SSL_CA_CERTS` 环境变量覆盖
 
 **方案 B: 本机双端口运行**
@@ -1282,9 +1297,15 @@ cd backend && .venv\Scripts\python run.py
 
 | 步骤 | 操作 | 用途 |
 |------|------|------|
-| 1 | 导入 `certs/ca.crt` 到浏览器受信任根证书 | 信任服务器证书，否则 TLS 握手中止 |
+| 1 | 导入 `certs/jsca.crt` 到浏览器受信任根证书 | 信任服务器证书，否则 TLS 握手中止 |
 | 2 | 导入 `.p12` 客户端证书到个人存储 | 身份认证（密码 123456） |
 | 3 | 配置 `ALLOWED_CERT_SUBJECTS` 白名单 | 空 = 允许所有证书；非空 = CN 精确匹配 |
+
+**双向认证信任链**：服务器证书和客户端证书不必由同一 CA 签发。客户端证书可由第三方 CA 签发，只需将其 CA 加入 `SSL_CA_CERTS` 指向的 PEM bundle（多 CA 拼接）：
+
+```bash
+cat jsca.crt third_party_ca.crt > ca_bundle.crt
+```
 
 ### 14.3 注意事项
 
@@ -1327,7 +1348,7 @@ pydantic-settings==2.7.0
   "d3": "^7.9.0",
   "@types/d3": "^7.4.3",
   "typescript": "~5.6.2",
-  "vite": "^6.0.0",
+  "vite": "^5.4.19",
   "@vitejs/plugin-react": "^4.3.4"
 }
 ```

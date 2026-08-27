@@ -81,7 +81,7 @@
 | **ORM** | SQLAlchemy 2.0 + SQLite |
 | **数据校验** | Pydantic v2 |
 | **前端框架** | React 18 + TypeScript |
-| **构建工具** | Vite 6 |
+| **构建工具** | Vite 5 |
 | **路由** | react-router-dom v6 |
 | **可视化** | D3.js v7 |
 | **Markdown** | react-markdown + remark-gfm + rehype-raw |
@@ -196,6 +196,19 @@ my-wiki/
 - Python 3.11+
 - Node.js 18+
 - LLM API Key（可选，推荐智谱 GLM）
+
+### 浏览器要求
+
+| 浏览器 | 最低版本 |
+|--------|---------|
+| Chrome | 87+ |
+| Edge | 88+ |
+| Firefox | 78+ |
+| Safari | 14+ |
+
+> - 构建目标为 Vite 5 默认（es2020），Chrome 87+ 即可运行
+> - **SHA-1 客户端证书**：Chrome/Edge 109+ 不支持，需使用 Firefox / Safari（SHA-256 证书不受影响）
+> - mTLS 登录需导入 CA 根证书和客户端 `.p12` 证书（见下文步骤 3）
 
 ### 1. 安装依赖
 
@@ -329,9 +342,10 @@ docker compose up -d --build
 ```
 
 - 多阶段构建：Node 构建前端 → Python slim 运行时（含 ffmpeg + OpenCV）
-- 数据持久化：`wiki-data`（SQLite）/ `wiki-uploads`（上传文件）卷
-- 环境变量通过 `.env` 注入（LLM 密钥 + ALLOWED_CERT_SUBJECTS 白名单）
-- 证书从 `./certs` 挂载（只读）
+- 数据持久化：本机目录绑定挂载（`./data` SQLite / `./uploads` 上传文件）
+- **环境变量**：直接在 `docker-compose.yml` 的 `environment` 区块配置（LLM 密钥 + SSL 路径 + 白名单）
+- **证书挂载**：`./certs:/certs:ro`（镜像不含证书，启动必须提供）
+- 修改 compose 环境变量后执行 `docker compose up -d` 即可生效（无需重建镜像）
 
 > 生产模式使用双端口架构：
 > - **8000**（`CERT_NONE`）：仅展示登录页，永不会触发浏览器证书选择框
@@ -503,8 +517,24 @@ id, entity_name, name, content, created_by, created_at, updated_at
 - **开发模式**：前端显示用户选择页面，Vite 代理中间件根据 `X-Dev-User` 请求头动态选择客户端证书连接后端
 - **生产模式**：双端口架构 — 8000（`CERT_NONE`）展示登录页，8443（`CERT_REQUIRED`）提供全功能应用。用户点击登录后跳转到 8443 触发证书选择框
 - 顶栏右侧显示姓名，hover 显示完整身份证号
-- 证书由自签 CA (`certs/ca.crt`) 签发，客户端 `.p12` 文件导入浏览器即可
+- 证书由自签 CA (`certs/jsca.crt`，CN=JSCA) 签发，客户端 `.p12` 文件导入浏览器即可
 - 后端配置 `ssl_ciphers="DEFAULT:@SECLEVEL=0"` 兼容 SHA-1 签名的客户端证书
+
+#### 双向认证的信任链（相互独立）
+
+服务器证书和客户端证书**不必由同一 CA 签发**：
+
+| 验证方向 | 信任来源 | 配置位置 |
+|---------|---------|---------|
+| 客户端验证服务器 | 浏览器信任库（导入 `jsca.crt`） | 浏览器证书管理 |
+| 服务端验证客户端 | `SSL_CA_CERTS` 指定的 CA 列表 | `backend/.env` |
+
+支持第三方 CA 签发的客户端证书：将多个 CA 证书拼接为 bundle 后指向即可：
+
+```bash
+cat jsca.crt third_party_ca.crt > ca_bundle.crt
+# .env: SSL_CA_CERTS=../certs/ca_bundle.crt
+```
 
 ### 三层访问控制
 1. **TLS 层**（8443 端口 `CERT_REQUIRED`）：只有受 CA 签发的证书能完成握手
