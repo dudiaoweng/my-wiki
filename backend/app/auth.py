@@ -83,6 +83,39 @@ def _get_peercert(request: Request) -> dict | None:
     return None
 
 
+def _get_cn_from_header_cert(request: Request) -> str | None:
+    """从 nginx 传递的 X-Client-Cert 头解析客户端证书 CN。
+
+    nginx 使用 ``ssl_verify_client optional_no_ca`` 请求但不验证客户端证书，
+    将证书 PEM 通过 X-Client-Cert 头传递给后端。此处用 openssl 子进程解析 CN。
+    nginx 的 $ssl_client_escaped_cert 是 URL 转义格式，需先解码。
+    """
+    pem = request.headers.get("X-Client-Cert", "")
+    if not pem:
+        return None
+    from urllib.parse import unquote
+    pem = unquote(pem)
+    try:
+        import subprocess
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".pem", delete=False) as f:
+            f.write(pem)
+            path = f.name
+        try:
+            r = subprocess.run(
+                ["openssl", "x509", "-in", path, "-noout", "-subject"],
+                capture_output=True, timeout=5,
+            )
+            out = r.stdout.decode("utf-8", errors="replace")
+            m = re.search(r"CN\s*=\s*([^,\n]+)", out)
+            return m.group(1).strip() if m else None
+        finally:
+            os.unlink(path)
+    except Exception:
+        logger.warning("Failed to parse client cert from header", exc_info=True)
+        return None
+
+
 def _make_cert_info(cn: str) -> CertInfo:
     """Build a CertInfo from a CN string, parsing out name / id_number."""
     name, id_number = _parse_cn(cn)
@@ -121,20 +154,36 @@ async def verify_client_cert(request: Request) -> None:
     Returns 401 if no certificate was presented (prompting the browser to
     re-negotiate the TLS connection), or if the certificate's CN is not in
     the ``ALLOWED_CERT_SUBJECTS`` allowlist.
+
+    两种模式：
+    - 直连模式：从 TLS 握手提取 peercert
+    - nginx 反代模式：从 X-Client-Cert 头解析证书 CN
     """
     peercert = _get_peercert(request)
-    if not peercert:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Client certificate is required",
-        )
-    cn = _extract_cn_from_peercert(peercert)
-    if not _cn_allowed(cn):
+    if peercert:
+        cn = _extract_cn_from_peercert(peercert)
+        if cn and _cn_allowed(cn):
+            return
+        if cn and not _cn_allowed(cn):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Client certificate is not authorized",
+            )
+
+    # nginx 反向代理模式
+    header_cn = _get_cn_from_header_cert(request)
+    if header_cn:
+        if _cn_allowed(header_cn):
+            return
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Client certificate is not authorized",
         )
-    return
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Client certificate is required",
+    )
 
 
 async def get_client_cert(request: Request) -> CertInfo:
@@ -151,6 +200,11 @@ async def get_client_cert(request: Request) -> CertInfo:
             return _make_cert_info(cn)
         # Missing CN or not in allowlist → treat as unauthenticated.
         return CertInfo()
+
+    # nginx 反向代理模式：从 X-Client-Cert 头解析身份
+    header_cn = _get_cn_from_header_cert(request)
+    if header_cn and _cn_allowed(header_cn):
+        return _make_cert_info(header_cn)
 
     # No certificate presented yet
     return CertInfo()

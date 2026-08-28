@@ -1,6 +1,6 @@
 # 知识库系统 — 技术文档
 
-> **版本**: 1.8 | **最后更新**: 2026-08-27 | **作者**: dudiaoweng
+> **版本**: 1.9 | **最后更新**: 2026-08-28 | **作者**: dudiaoweng
 
 ---
 
@@ -42,22 +42,27 @@
 ```
 my-wiki/
 ├── backend/                     # Python FastAPI 后端
+│   ├── run.py                   # 生产入口：三端口服务 (8000/8444/8080) + SSL 兼容补丁
 │   ├── .env                     # 环境变量 (LLM API Key 等)
 │   ├── requirements.txt         # Python 依赖
 │   ├── knowledge_base.db        # SQLite 数据库
 │   ├── uploads/                 # 上传文件存储
+│   ├── static/                  # 前端构建产物 (生产模式, vite outDir)
 │   └── app/
-│       ├── main.py              # 入口：FastAPI 应用工厂、路由注册、种子数据
+│       ├── main.py              # FastAPI 应用工厂、路由注册、种子数据、CRL 分发端点
 │       ├── database.py          # SQLAlchemy 引擎、会话、表创建、迁移
 │       ├── dependencies.py      # FastAPI 依赖注入 (get_db)
-│       ├── models.py            # ORM 模型 (Category, Article, ArticleChunk, EntityInfo)
+│       ├── models.py            # ORM 模型 (Category, Article, ArticleChunk, EntityInfo, Comment)
 │       ├── schemas.py           # Pydantic 请求/响应模型
-│       ├── config.py            # 集中化配置：LLM/Vision/ASR/Embedding/QA (环境变量)
+│       ├── config.py            # 集中化配置：LLM/Vision/ASR/Embedding/QA/TLS (环境变量)
+│       ├── auth.py              # mTLS 身份解析：peercert 直连模式 + nginx X-Client-Cert 头模式
+│       ├── prompts.py           # 所有 LLM 提示词模板
 │       ├── llm_extract.py       # 共享 LLM 标签+实体提取 (统一超时/重试/容错)
 │       ├── utils.py             # 共享工具函数 (find_ffmpeg 等)
 │       └── routes/
-│           ├── articles.py      # 文章 CRUD + 分页搜索
+│           ├── articles.py      # 文章 CRUD + 分页搜索 + 附件重解析
 │           ├── categories.py    # 分类 CRUD
+│           ├── comments.py      # 评论 CRUD + 附件上传 + LLM 增强
 │           ├── tags.py          # 标签管理 (添加/重命名/删除)
 │           ├── entities.py      # 实体管理 + 附加信息 CRUD + 嵌入重算
 │           ├── graph.py         # 知识图谱数据构建
@@ -69,11 +74,12 @@ my-wiki/
 ├── frontend/                    # React 18 + TypeScript 前端
 │   ├── index.html               # Vite 入口 HTML
 │   ├── package.json             # NPM 依赖
-│   ├── vite.config.ts           # Vite 配置 (代理 /api → :8000)
+│   ├── vite.config.ts           # Vite 配置 + mTLS 开发代理中间件 (X-Dev-User 动态选证书)
 │   └── src/
 │       ├── main.tsx             # React 入口
-│       ├── App.tsx              # 根组件 (路由 + Provider)
+│       ├── App.tsx              # 根组件 (路由 + Provider + 认证守卫)
 │       ├── api/client.ts        # API 客户端 (类型化 fetch 封装)
+│       ├── api/auth.ts          # mTLS 认证状态检查
 │       ├── context/AppProvider.tsx  # 全局 UI 状态
 │       ├── types/               # TypeScript 类型定义
 │       │   ├── article.ts       # Article, ArticleCreate, ArticleUpdate
@@ -104,8 +110,12 @@ my-wiki/
 │       │   ├── EntityPanel.tsx  # 实体面板 (LLM实体只读列表+知识图谱双模式)
 │       │   ├── KnowledgeGraph.tsx       # 全屏知识图谱页
 │       │   ├── QA.tsx           # 智能问答页
+│       │   ├── CommentSection.tsx       # 评论组件 (共用)
+│       │   ├── AttachmentGallery.tsx    # 附件画廊
 │       │   ├── EditorModal.tsx  # 文章编辑器
 │       │   ├── UploadModal.tsx  # 文件上传器
+│       │   ├── LoginPage.tsx    # 开发模式用户选择页 / 生产模式登录页
+│       │   ├── CertErrorPage.tsx # mTLS 证书错误页
 │       │   ├── ConfirmDialog.tsx # 确认对话框
 │       │   ├── Toast.tsx        # Toast 容器
 │       │   └── ReadingProgress.tsx # 阅读进度条
@@ -114,6 +124,18 @@ my-wiki/
 │           ├── reset.css        # CSS Reset
 │           └── global.css       # 全局样式 + 动画 + 可访问性
 │
+├── certs/                       # PKI 证书 (自建 CA 体系)
+│   ├── ca.key / ca.crt          # 项目自签 CA (CN=JSCA-Root, 10 年有效期)
+│   ├── server.key / server.crt  # 服务器证书 (SAN: localhost/127.0.0.1 + CRL 分发点)
+│   ├── crl.pem                  # CRL 吊销列表 (3650 天有效期)
+│   ├── ca_openssl.cnf           # openssl CA 配置 (签发/吊销共用)
+│   ├── index.txt / ca.srl       # CA 数据库 / 序列号文件
+│   └── *.crt / *.key / *.p12    # 客户端证书 (开发代理 / 浏览器导入)
+├── nginx/                       # nginx 反向代理配置
+│   └── mtls.conf                # 8443 TLS 终止 (optional_no_ca) + 8080 CRL 分发
+├── Dockerfile                   # 多阶段构建 (Node 前端构建 → Python 运行时)
+├── docker-compose.yml           # 双容器编排 (my-wiki + nginx)
+├── .dockerignore
 └── .claude/                     # Claude Code 配置
     ├── agents/code-reviewer.md  # 代码审查 Agent
     └── settings.local.json      # 本地设置
@@ -140,6 +162,8 @@ my-wiki/
 | **python-pptx** | — | PowerPoint 文档解析 |
 | **PyPDF2** | — | PDF 文档解析 |
 | **python-dotenv** | — | 环境变量加载 |
+| **nginx** | 1.25 | 反向代理：mTLS TLS 终止 (`optional_no_ca`) + CRL 分发 |
+| **Docker** | — | 容器化部署 (docker compose 双容器) |
 
 ### 2.2 前端
 
@@ -164,7 +188,9 @@ my-wiki/
 | Safari | 14+ |
 
 > - Vite 5 默认构建目标为 es2020，Chrome 87+ 即可运行
+> - **Object.hasOwn polyfill**：`index.html` 内置 polyfill——react-markdown@9 直接调用 ES2022 的 `Object.hasOwn`（Chrome 93+ 才支持），polyfill 将实际底线拉回 es2020（Chrome 87–92 / Firefox 78–91 / Safari 14–15.3）
 > - **SHA-1 客户端证书**：Chrome/Edge 109+ 已移除支持；Firefox / Safari 仍支持。SHA-256 证书不受影响
+> - **TLS 版本**：nginx 与 `run.py` 均强制 TLS 1.2 + 显式套件列表（`@SECLEVEL=0`），兼容 SHA-1 签名客户端证书
 > - mTLS 登录需在浏览器中导入 CA 根证书和客户端 `.p12` 证书（见 14.2 部署前置条件）
 
 ### 2.3 外部 LLM 服务
@@ -188,58 +214,65 @@ my-wiki/
 ### 3.1 架构图
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                    浏览器 (Browser)                       │
-│  ┌────────────────────────────────────────────────────┐  │
-│  │              React 18 SPA (Vite)                    │  │
-│  │  ┌──────────┐ ┌──────────┐ ┌───────────────────┐  │  │
-│  │  │ AppProvider│ │  Router  │ │ CSS Modules       │  │  │
-│  │  │ (Context) │ │ (react-  │ │ (tokens/reset/    │  │  │
-│  │  │           │ │  router) │ │  global)           │  │  │
-│  │  └──────────┘ └──────────┘ └───────────────────┘  │  │
-│  │  ┌──────────────────────────────────────────────┐  │  │
-│  │  │            Hooks Layer                        │  │  │
-│  │  │  useArticles │ useQA │ useGraphData │ ...     │  │  │
-│  │  └──────────────────────────────────────────────┘  │  │
-│  │  ┌──────────────────────────────────────────────┐  │  │
-│  │  │            API Client (client.ts)             │  │  │
-│  │  │     fetch() + JSON + Error Handling          │  │  │
-│  │  └──────────────────────────────────────────────┘  │  │
-│  └────────────────────────────────────────────────────┘  │
-│                          │  HTTP (localhost:5173 → :8000) │
-└──────────────────────────┼───────────────────────────────┘
-                           │
-┌──────────────────────────┼───────────────────────────────┐
-│                 后端 (Python/FastAPI)                     │
-│                          ▼                                │
-│  ┌────────────────────────────────────────────────────┐  │
-│  │              FastAPI Application                    │  │
-│  │  ┌──────────┐ ┌──────────┐ ┌───────────────────┐  │  │
-│  │  │  CORS    │ │ Lifespan │ │ Static Files      │  │  │
-│  │  │  MW      │ │ (seed)   │ │ (/uploads)        │  │  │
-│  │  └──────────┘ └──────────┘ └───────────────────┘  │  │
-│  │  ┌──────────────────────────────────────────────┐  │  │
-│  │  │           Route Layer (8 routers)             │  │  │
-│  │  │  articles │ categories │ tags │ entities     │  │  │
-│  │  │  graph    │ qa         │ stats │ upload      │  │  │
-│  │  └──────────────────────────────────────────────┘  │  │
-│  │  ┌──────────────────────────────────────────────┐  │  │
-│  │  │           Dependency Injection                │  │  │
-│  │  │              get_db() → Session               │  │  │
-│  │  └──────────────────────────────────────────────┘  │  │
-│  │  ┌──────────────────────────────────────────────┐  │  │
-│  │  │           SQLAlchemy ORM                      │  │  │
-│  │  │  models.py (Category, Article, Chunk, Info)   │  │  │
-│  │  └──────────────────────────────────────────────┘  │  │
-│  └────────────────────────────────────────────────────┘  │
-│                          │                                │
-│                    ┌─────┴─────┐                          │
-│                    ▼           ▼                          │
-│            ┌──────────┐ ┌──────────────┐                 │
-│            │  SQLite  │ │ LLM API      │                 │
-│            │  (.db)   │ │ (智谱/OpenAI) │                 │
-│            └──────────┘ └──────────────┘                 │
-└──────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│                      浏览器 (Browser)                      │
+│  ┌─────────────────────────────────────────────────────┐  │
+│  │               React 18 SPA (Vite 构建产物)           │  │
+│  │  ┌──────────┐ ┌──────────┐ ┌────────────────────┐   │  │
+│  │  │ AppProvider│ │  Router  │ │ CSS Modules        │   │  │
+│  │  │ (Context) │ │ (react-  │ │ (tokens/reset/     │   │  │
+│  │  │           │ │  router) │ │  global)            │   │  │
+│  │  └──────────┘ └──────────┘ └────────────────────┘   │  │
+│  │  ┌──────────────────────────────────────────────┐   │  │
+│  │  │  Hooks Layer + API Client (fetch)            │   │  │
+│  │  └──────────────────────────────────────────────┘   │  │
+│  └─────────────────────────────────────────────────────┘  │
+└───┬──────────────────────┬─────────────────────┬──────────┘
+    │ ① 8000 HTTPS         │ ② 8443 HTTPS + mTLS │ ③ 8080 HTTP
+    │   CERT_NONE          │   optional_no_ca    │   CRL 分发
+    │   (登录页)            │   (应用入口)         │   (吊销检查)
+    ▼                      ▼                     ▼
+┌───────────────────────────────────────────────────────────┐
+│               nginx 反向代理 (nginx:1.25)                  │
+│  ②  TLS 终止 (server.crt) + 请求客户端证书但不验证链        │
+│     证书 PEM → X-Client-Cert 头 (URL 转义) → :8444 HTTP    │
+│  ③  /crl.pem 纯 HTTP 转发 → :8080 HTTP                     │
+└───────────────────────────┬───────────────────────────────┘
+                            │  (仅 ②③ 经 nginx，① 直连后端)
+                            ▼
+┌───────────────────────────────────────────────────────────┐
+│               后端 (Python/FastAPI, run.py)                │
+│  ┌──────────────┐  ┌───────────────────┐  ┌────────────┐  │
+│  │ :8000        │  │ :8444             │  │ :8080      │  │
+│  │ HTTPS 登录页  │  │ 应用 (纯 HTTP)     │  │ CRL 分发   │  │
+│  │ CERT_NONE    │  │ 解析 X-Client-    │  │ GET /crl.pem│ │
+│  │ + 静态 SPA    │  │ Cert 头识别身份    │  │            │  │
+│  └──────────────┘  └───────────────────┘  └────────────┘  │
+│  ┌─────────────────────────────────────────────────────┐  │
+│  │            FastAPI Application                       │  │
+│  │  ┌──────────┐ ┌──────────┐ ┌────────────────────┐   │  │
+│  │  │  CORS    │ │ Lifespan │ │ Static Files       │   │  │
+│  │  │  MW      │ │ (seed)   │ │ (/uploads)         │   │  │
+│  │  └──────────┘ └──────────┘ └────────────────────┘   │  │
+│  │  ┌───────────────────────────────────────────────┐  │  │
+│  │  │        Route Layer (9 routers + auth)         │  │  │
+│  │  │  articles │ categories │ comments │ tags      │  │  │
+│  │  │  entities │ graph │ qa │ stats │ upload       │  │  │
+│  │  └───────────────────────────────────────────────┘  │  │
+│  │  ┌───────────────────────────────────────────────┐  │  │
+│  │  │  Dependency Injection: get_db() → Session     │  │  │
+│  │  └───────────────────────────────────────────────┘  │  │
+│  │  ┌───────────────────────────────────────────────┐  │  │
+│  │  │  SQLAlchemy ORM (models.py)                   │  │  │
+│  │  └───────────────────────────────────────────────┘  │  │
+│  └─────────────────────────────────────────────────────┘  │
+│                    ┌─────────┴─────────┐                  │
+│                    ▼                   ▼                  │
+│            ┌────────────┐      ┌──────────────┐           │
+│            │   SQLite   │      │   LLM API    │           │
+│            │   (.db)    │      │ (智谱/OpenAI) │           │
+│            └────────────┘      └──────────────┘           │
+└───────────────────────────────────────────────────────────┘
 ```
 
 ### 3.2 设计原则
@@ -388,6 +421,12 @@ my-wiki/
 | | | `/{id}` | PUT | 更新文章 |
 | | | `/{id}` | DELETE | 删除文章 |
 | | | `/{id}/download` | GET | 下载附件 |
+| | | `/{id}/reprocess` | POST | 重新解析全部附件 |
+| | | `/{id}/reprocess/{safe_name}` | POST | 重新解析单个附件 |
+| `/api/articles/{article_id}/comments` | `routes/comments.py` | `/` | GET | 评论列表 |
+| | | `/` | POST | 创建评论 (支持附件) |
+| | | `/{comment_id}` | PUT | 更新评论 |
+| | | `/{comment_id}` | DELETE | 删除评论 |
 | `/api/categories` | `routes/categories.py` | `/` | GET | 分类列表 |
 | | | `/` | POST | 创建分类 |
 | | | `/{id}` | PUT | 更新分类 |
@@ -413,6 +452,9 @@ my-wiki/
 | `/api/upload` | `routes/upload.py` | `/` | POST | 文件上传 |
 | `/api` | `main.py` | `/media/{filename}` | GET | 媒体文件直链 |
 | `/api` | `main.py` | `/health` | GET | 健康检查 |
+| `/api/auth` | `main.py` | `/status` | GET | 证书认证状态 + 用户信息 (name/id_number/display_name) |
+| `/api/auth` | `main.py` | `/login` | GET | 登录跳转 (生产模式，重定向回前端) |
+| `/` | `main.py` | `/crl.pem` | GET | CRL 吊销列表分发 (8080 端口) |
 
 ### 5.2 核心 API 详解
 
@@ -915,7 +957,7 @@ def fallback_keyword_search(db, question, top_k=5):
 - 同步解析器在 `asyncio.to_thread()` 中运行 (不阻塞事件循环)
 - 后台闭包不再捕获 `content_bytes`，改为从磁盘重新读取（大文件内存友好）
 
-### 9.3 知识图谱可视化
+### 9.5 知识图谱可视化
 
 使用 D3.js v7 力导向图，通过共享 Hook (`useD3ForceGraph`) 实现代码复用：
 
@@ -939,7 +981,7 @@ def fallback_keyword_search(db, question, top_k=5):
 </marker>
 ```
 
-### 9.4 响应式布局
+### 9.6 响应式布局
 
 | 断点 | 布局 | 侧边栏 | 文章列表 | 实体面板 |
 |------|------|--------|---------|---------|
@@ -961,7 +1003,7 @@ def fallback_keyword_search(db, question, top_k=5):
 
 两个区域通过 `flex: 1 1 0%` 等分可用高度。
 
-### 9.5 附件手动重新解析（v1.4）
+### 9.7 附件手动重新解析（v1.4）
 
 - 每个附件缩略图左下角 🔄 按钮（hover 显示，仅文章创建人）
 - 单文件解析：`POST /api/articles/{id}/reprocess/{safe_name}`
@@ -970,7 +1012,7 @@ def fallback_keyword_search(db, question, top_k=5):
 - 前端 AttachmentGallery 根据 processing 字段匹配附件，仅对解析中的附件显示"解析中…"遮罩
 - 文章详情页 5 秒轮询，解析完成后自动刷新并清除遮罩
 
-### 9.6 权限控制体系（v1.3+）
+### 9.8 权限控制体系（v1.3+）
 
 所有创建人判断基于 mTLS 证书 CN 中的 18 位身份证号：
 
@@ -1108,10 +1150,12 @@ interface AppContextValue {
 
 | 类别 | 措施 | 位置 |
 |------|------|------|
-| **mTLS 认证** | 双向 TLS，客户端证书验证（8443 CERT_REQUIRED） | `run.py`, `auth.py` |
+| **mTLS 认证** | nginx 8443 TLS 终止：`optional_no_ca` 请求客户端证书但不验证链，证书 PEM 经 `X-Client-Cert` 头传递，应用层解析 CN 识别身份 | `nginx/mtls.conf`, `auth.py` |
+| **直连兼容** | 开发模式 uvicorn 单端口 8000 (CERT_OPTIONAL)，`auth.py` 从 TLS peercert 提取 CN（双模式：peercert 直连 / X-Client-Cert 头） | `main.py`, `auth.py` |
+| **证书吊销** | 服务器证书含 CRL 分发点 (`http://localhost:8080/crl.pem`)，后端 `GET /crl.pem` 分发吊销列表 | `main.py`, `run.py` |
 | **应用白名单** | `ALLOWED_CERT_SUBJECTS` 控制允许的证书 CN（空 = 全部允许） | `auth.py`, `config.py` |
 | **资源权限** | 文章/评论/实体/附加信息/分类基于身份证号比对 created_by，仅创建人可修改/删除 | 各路由模块 |
-| **SHA-1 兼容** | `ssl_ciphers="DEFAULT:@SECLEVEL=0"` 接受 SHA-1 签名客户端证书 | `run.py`, `main.py` |
+| **SHA-1 兼容** | `run.py` SSL 兼容补丁：`VERIFY_X509_PARTIAL_CHAIN` + 强制 TLS 1.2 + 显式套件列表 (`@SECLEVEL=0`)；nginx 同样限制 TLS 1.2 + 套件 | `run.py`, `nginx/mtls.conf` |
 | **路径穿越** | 文件名净化 + `/api/media/` 端点 `Path.resolve()` 范围校验 | `upload.py`, `main.py` |
 | **文件大小** | 500MB 上传限制 / 50MB 问答文件限制 | `upload.py`, `qa.py` |
 | **XSS** | HTML/SVG 文件强制 `Content-Disposition: attachment`；D3 `innerHTML` 使用 `esc()` 转义；QA 回答经 rehype-sanitize 消毒 | `main.py`, `useD3ForceGraph.ts`, `QA.tsx` |
@@ -1128,13 +1172,17 @@ interface AppContextValue {
 ### 12.2 三层访问控制模型
 
 ```
-第一层 TLS（8443 端口）
-  └─ CERT_REQUIRED + CA 验证 → 只有受 ca.crt 签发的证书能完成握手
+第一层 TLS（nginx 8443）
+  └─ 服务器出示证书（浏览器验证链）；客户端证书被请求但不验证链
+  └─ optional_no_ca → 支持任意 CA 签发、任意签名算法的客户端证书
+  └─ （含国密 U-Key 证书：浏览器经 Windows 证书库出示）
       ↓
 第二层 应用白名单（ALLOWED_CERT_SUBJECTS）
+  └─ auth.py 解析身份：peercert (直连模式) 或 X-Client-Cert 头 (nginx 反代模式)
   └─ verify_client_cert 依赖挂在 api_router 上
   └─ 空列表 = 全部放行；非空 = CN 精确匹配才放行
   └─ 不匹配 → 401 "Client certificate is not authorized"
+  └─ 未出示证书 → 401 → 浏览器重新协商 → 弹出证书选择框
       ↓
 第三层 资源权限（created_by 身份证号比对）
   └─ 文章：仅创建人可编辑/删除
@@ -1144,8 +1192,22 @@ interface AppContextValue {
   └─ 分类：仅创建人
 ```
 
-### 12.3 已知安全限制
+### 12.3 证书吊销机制 (CRL)
 
+| 环节 | 说明 |
+|------|------|
+| 服务器证书 | `server.crt` 含 CRL 分发点：`http://localhost:8080/crl.pem` |
+| 分发 | `GET /crl.pem` 端点（8080 纯 HTTP，经 nginx 暴露），返回 `application/pkix-crl` |
+| 生成 | `openssl ca -config ca_openssl.cnf -gencrl -out crl.pem`（`default_crl_days = 3650`） |
+| 吊销 | `openssl ca -config ca_openssl.cnf -revoke <cert>.crt` 后重新生成 CRL |
+| 检查方 | 客户端 (如 Windows SCHANNEL) 主动获取 CRL 验证服务器/客户端证书吊销状态 |
+
+> ⚠️ CRL 为静态文件：吊销操作后必须重新生成 `crl.pem` 并分发（重启或重新挂载）。吊销检查发生在客户端侧，服务端不强制校验。
+
+### 12.4 已知安全限制
+
+- ⚠️ **TLS 层不验证客户端证书链** — `optional_no_ca` 请求但不验证；准入控制完全依赖第二层白名单。`ALLOWED_CERT_SUBJECTS` 留空时任何持有证书者均可访问
+- ⚠️ **CRL 为静态文件且经 HTTP 分发** — 内网部署可接受；吊销生效依赖客户端主动获取
 - ⚠️ **无速率限制** — 需要时可添加 slowapi 中间件
 - ⚠️ **LLM API Key 存储在 `.env`** — 本地部署场景下可接受
 - ⚠️ **SQLite 并发限制** — 生产环境建议迁移至 PostgreSQL
@@ -1171,16 +1233,20 @@ pip install -r requirements.txt
 cp .env.example .env
 # 编辑 .env: 填写 LLM_API_KEY, LLM_API_BASE, LLM_MODEL 等
 
-# 启动后端 (端口 8000)
-uvicorn app.main:app --reload --port 8000
+# 启动后端 (端口 8000, HTTPS + CERT_OPTIONAL, 热重载)
+.venv\Scripts\python -m app.main    # Windows
+# source .venv/bin/python -m app.main  # macOS/Linux
 
 # 前端
 cd frontend
 npm install
 
-# 启动前端 (端口 5173, 自动代理 /api → :8000)
+# 启动前端 (端口 5173, HTTPS 开发服务器, mTLS 代理中间件)
 npm run dev
+# 访问 https://localhost:5173 → 显示用户选择页面 → 选择身份登录
 ```
+
+> 开发模式说明：`python -m app.main` 启动单端口 HTTPS 服务 (8000, CERT_OPTIONAL)；Vite 5173 的 `mtlsProxyMiddleware` 中间件根据请求头 `X-Dev-User` 动态选择客户端证书代理 `/api/*` 请求到 8000。用户注册表在 `vite.config.ts` 的 `DEV_USERS` 中配置，前端入口在 `LoginPage.tsx`。
 
 ### 13.2 问答文件上传
 
@@ -1205,11 +1271,11 @@ npm run build        # 生产构建
 npm run preview      # 预览生产构建
 
 # 后端
-uvicorn app.main:app --reload           # 开发模式 (热重载)
-uvicorn app.main:app --host 0.0.0.0    # 生产模式
+python -m app.main                      # 开发模式 (8000 HTTPS + CERT_OPTIONAL, 热重载)
+python run.py                           # 生产模式 (三端口: 8000/8444/8080)
 ```
 
-### 13.3 添加新功能
+### 13.4 添加新功能
 
 #### 添加新 API 端点
 
@@ -1227,7 +1293,7 @@ uvicorn app.main:app --host 0.0.0.0    # 生产模式
 2. 在 `frontend/src/App.tsx` 添加 `<Route>`
 3. 在 `Sidebar.tsx` 添加导航链接 (可选)
 
-### 13.4 数据库迁移
+### 13.5 数据库迁移
 
 SQLite 不直接支持 `ALTER TABLE ADD COLUMN IF NOT EXISTS`，项目采用 try/except 方式:
 
@@ -1242,9 +1308,10 @@ with engine.connect() as conn:
 
 添加新列时在此处追加类似的 try/except 块。
 
-### 13.5 调试技巧
+### 13.6 调试技巧
 
-- **API 调试:** 访问 `http://localhost:8000/docs` (Swagger UI 自动生成)
+- **API 调试:** 访问 `https://localhost:8000/docs` (Swagger UI 自动生成)
+  > ⚠️ 生产模式 (run.py / Docker) 的 8000 端口是 CERT_NONE，从 Swagger 直接调用受保护 API 必然返回 `{"detail":"Client certificate is required"}`。调试受保护接口请用 `curl --cert <客户端证书.crt> --key <客户端密钥.key> -k https://localhost:8443/api/...`（经 nginx 入口），或开发模式下浏览器已导入客户端证书时在 Swagger 中调用
 - **前端调试:** 浏览器 DevTools → Network 面板查看 API 调用
 - **数据库调试:** 使用 SQLite 浏览器打开 `backend/knowledge_base.db`
 - **LLM 调试:** 在 `qa.py` 的 `call_llm()` 函数中添加 `logger.debug()` 打印系统提示
@@ -1256,10 +1323,10 @@ with engine.connect() as conn:
 ### 14.1 生产构建
 
 ```bash
-# 前端构建
+# 前端构建 (vite.config.ts 的 outDir 指向 backend/static)
 cd frontend
 npm run build
-# 输出: frontend/dist/
+# 输出: backend/static/  (构建时读取 ../certs 下的证书文件)
 
 # 后端配置
 cd backend
@@ -1269,50 +1336,105 @@ export CORS_ORIGINS="https://your-domain.com"
 
 ### 14.2 部署方案
 
-**方案 A: Docker Compose (推荐，v1.7)**
+**方案 A: Docker Compose（推荐，v1.9 双容器）**
 
 ```bash
 docker compose up -d --build
-# 8000 登录页 / 8443 mTLS 应用
+# 8000 登录页 / 8443 mTLS 应用 / 8080 CRL 分发
 ```
 
-- 多阶段构建：Node 18 构建前端 → Python 3.11-slim 运行时（ffmpeg + OpenCV headless）
+**双容器架构：**
+
+| 容器 | 镜像 | 职责 |
+|------|------|------|
+| `my-wiki` | 多阶段构建（Node 18 → Python 3.11-slim） | 后端三端口服务（8000 HTTPS 登录页 / 8444 应用 / 8080 CRL） |
+| `my-wiki-nginx` | `nginx:1.25` | 8443 TLS 终止（`optional_no_ca`）+ 8080 CRL 分发 |
+
+```
+浏览器
+  ├─ :8000  HTTPS ──────────────► my-wiki:8000   (登录页, CERT_NONE)
+  ├─ :8443  HTTPS + 客户端证书 ──► nginx ── HTTP ─► my-wiki:8444  (应用)
+  │                              (TLS 终止, X-Client-Cert 头)
+  └─ :8080  HTTP ────────────────► nginx ── HTTP ─► my-wiki:8080  (CRL)
+```
+
+- 多阶段构建：Node 18 构建前端（`vite build` 输出到 `backend/static`）→ Python 3.11-slim 运行时（ffmpeg + OpenCV headless）
 - 数据持久化：本机目录绑定挂载 — `./data`（SQLite）/ `./uploads`（上传文件）
 - **环境变量**：直接在 `docker-compose.yml` 的 `environment` 区块配置（LLM 密钥 + SSL 绝对路径 + 白名单）
-- **证书**：`./certs:/certs:ro` 只读挂载（镜像不含证书，启动必须提供）；SSL 路径使用容器内绝对路径（`/certs/server.crt` 等）
+- **证书**：`./certs:/certs:ro` 只读挂载（镜像不含证书，启动必须提供）；SSL 路径使用容器内绝对路径（`/certs/server.crt` 等）；nginx 容器挂载同一目录（`/etc/nginx/certs`）
 - 修改 compose 环境变量后执行 `docker compose up -d` 生效（无需 `--build`；`docker restart` 不生效）
 - 环境变量优先级：compose `environment` > Dockerfile `ENV`
 - `run.py` 支持 `HOST` / `SSL_CERTFILE` / `SSL_KEYFILE` / `SSL_CA_CERTS` 环境变量覆盖
 
-**方案 B: 本机双端口运行**
+**方案 B: 本机运行**
 
 ```bash
-cd frontend && npm run build
+cd frontend && npm run build          # 构建前端 → backend/static/
 cd backend && .venv\Scripts\python run.py
 ```
 
-`run.py` 同时启动 8000（CERT_NONE 登录页）和 8443（CERT_REQUIRED 应用）。
+`run.py` 启动三端口服务：
+
+| 端口 | 协议 | 说明 |
+|------|------|------|
+| 8000 | HTTPS (CERT_NONE) | 登录页 + 静态 SPA，不请求客户端证书 |
+| 8444 | HTTP | 应用入口，仅解析 `X-Client-Cert` 头识别身份，**须由 nginx 前置** |
+| 8080 | HTTP | CRL 分发 (`GET /crl.pem`) |
+
+> 8444 为纯 HTTP 端口，仅接受来自 TLS 终止组件的 `X-Client-Cert` 头，不能直接访问。本机完整部署 8443 mTLS 入口需同时运行本地 nginx（加载 `nginx/mtls.conf`，证书路径改为本机 `certs/`），或直接使用方案 A。
 
 **部署前置条件**：
 
 | 步骤 | 操作 | 用途 |
 |------|------|------|
-| 1 | 导入 `certs/jsca.crt` 到浏览器受信任根证书 | 信任服务器证书，否则 TLS 握手中止 |
+| 1 | 导入 `certs/ca.crt` 到浏览器受信任根证书 | 信任服务器证书，否则 TLS 握手中止 |
 | 2 | 导入 `.p12` 客户端证书到个人存储 | 身份认证（密码 123456） |
 | 3 | 配置 `ALLOWED_CERT_SUBJECTS` 白名单 | 空 = 允许所有证书；非空 = CN 精确匹配 |
 
-**双向认证信任链**：服务器证书和客户端证书不必由同一 CA 签发。客户端证书可由第三方 CA 签发，只需将其 CA 加入 `SSL_CA_CERTS` 指向的 PEM bundle（多 CA 拼接）：
+### 14.3 证书管理（自建 CA）
+
+项目使用自签 CA（`certs/ca.crt`，CN=JSCA-Root，10 年有效期）签发服务器与客户端证书，配置集中在 `certs/ca_openssl.cnf`（`policy_any`、数据库 `index.txt`、序列号 `ca.srl`、默认 3650 天）。
+
+**服务器证书**：`server.crt`（SAN: `localhost` / `127.0.0.1` + CRL 分发点 `http://localhost:8080/crl.pem`），由 nginx 与后端 8000 端口共用。
+
+**签发客户端证书**（CN 格式 `姓名 18位身份证号`）：
+
+推荐直接修改 `certs/gen_clients.py` 的 `USERS` 列表后运行 `python gen_clients.py`——脚本已封装 Windows 下的编码处理（UTF-8 配置文件 + `req -utf8` + 吊销清理），并输出 `.crt` / `.key` / `.p12`（密码 `123456`，含 clientAuth EKU）。
+
+手工签发步骤（Linux/容器内可直接用 `-subj` 传参）：
 
 ```bash
-cat jsca.crt third_party_ca.crt > ca_bundle.crt
+# ① 生成密钥与 CSR（CN 含中文时必须经 UTF-8 配置文件 + -utf8，见下方警告）
+openssl genrsa -out client.key 2048
+openssl req -new -utf8 -config client.cnf -key client.key -out client.csr
+# client.cnf 内容: [ req ] distinguished_name=dn, prompt=no
+#                 [ dn ] C=CN, ST=32, L=00, O=11, OU=00, CN=张三 320100199001010011
+
+# ② CA 签发（clientAuth EKU 由 ca_openssl.cnf 的 client_ext 扩展段提供）
+openssl ca -config ca_openssl.cnf -batch -notext -days 3650 -in client.csr -out client.crt
+
+# ③ 导出浏览器可导入的 .p12
+openssl pkcs12 -export -in client.crt -inkey client.key -out client.p12 -passout pass:123456
 ```
 
-### 14.3 注意事项
+> ⚠️ **Windows 编码警告**：在 Windows 上不要用 `-subj "/CN=中文..."` 命令行传参——Git Bash 会把 `/C=` 当作路径转换，且 openssl 按 ANSI 代码页转换 argv，中文 CN 会双重编码损坏（实测表现为 `CN=ÖÜºâ`）。必须用 UTF-8 编码的配置文件 + `req -utf8` 标志。签发后可用 `openssl x509 -in client.crt -noout -subject -nameopt utf8` 核对 CN。
+
+**吊销证书 / 重新生成 CRL**：
+
+```bash
+openssl ca -config ca_openssl.cnf -revoke client.crt
+openssl ca -config ca_openssl.cnf -gencrl -out crl.pem
+```
+
+> 客户端证书不必由本项目 CA 签发 — nginx `optional_no_ca` 不验证链，支持第三方 CA 及国密 U-Key 证书；身份识别由应用层白名单完成。
+
+### 14.4 注意事项
 
 - SQLite 在单进程下工作良好，多进程需考虑 WAL 模式
 - 生产环境建议使用 PostgreSQL + pgvector 替换 SQLite 存储嵌入向量
 - Docker 容器默认白名单为空（allow-all），需通过环境变量显式配置
-- SHA-1 签名证书需后端 `ssl_ciphers="DEFAULT:@SECLEVEL=0"`（已默认配置），浏览器端支持有限
+- SHA-1 签名证书：`run.py` 已打 SSL 兼容补丁（`VERIFY_X509_PARTIAL_CHAIN` + 强制 TLS 1.2 + 显式套件），nginx 侧同样限制 TLS 1.2；Chrome/Edge 109+ 浏览器端不再支持 SHA-1 证书
+- 吊销操作后需重新生成 `crl.pem` 并让客户端重新获取（CRL 为静态文件，10 年有效期）
 
 ---
 
@@ -1357,12 +1479,21 @@ pydantic-settings==2.7.0
 
 ```
 GET    /api/health                         健康检查
+GET    /api/auth/status                    证书认证状态 + 用户信息
+GET    /api/auth/login                     登录跳转 (生产模式)
+GET    /crl.pem                            CRL 吊销列表分发 (8080 端口)
 GET    /api/articles?category_id=&search=&tag=&skip=&limit=   文章列表
 GET    /api/articles/:id                   文章详情
 POST   /api/articles                       创建文章
 PUT    /api/articles/:id                   更新文章
 DELETE /api/articles/:id                   删除文章
 GET    /api/articles/:id/download          下载附件
+POST   /api/articles/:id/reprocess         重新解析全部附件
+POST   /api/articles/:id/reprocess/:name   重新解析单个附件
+GET    /api/articles/:id/comments          评论列表
+POST   /api/articles/:id/comments          创建评论 (支持附件)
+PUT    /api/articles/:id/comments/:cid     更新评论
+DELETE /api/articles/:id/comments/:cid     删除评论
 GET    /api/categories                     分类列表
 POST   /api/categories                     创建分类
 PUT    /api/categories/:id                 更新分类
@@ -1391,4 +1522,4 @@ GET    /api/media/:filename                媒体文件直链
 
 ---
 
-> 📝 本文档由 Claude Code 基于项目源码自动生成，最后更新于 2026-07-23。
+> 📝 本文档由 Claude Code 基于项目源码自动生成，最后更新于 2026-08-28。

@@ -20,8 +20,10 @@
 ### 🔒 证书认证 (mTLS)
 - 双向 TLS 客户端证书验证，无需密码
 - 证书 CN 格式为 `[姓名] [18位身份证号]`，后端自动解析为 name/id_number
+- **生产架构**：nginx 反向代理 TLS 终止（`optional_no_ca` 请求证书不验证链）+ 应用层身份解析
+- **国密 U-Key 支持**：通过 Windows 证书库出示 U-Key 证书（Edge/Chrome 均可用）
+- **CRL 吊销检查**：服务器发布 CRL（8080 端口 HTTP 分发，3650 天有效期）
 - **开发模式**：前端显示用户选择页，Vite 代理根据选择动态切换客户端证书
-- **生产模式**：双端口架构 — 8000 展示登录页（Hero + 证书登录按钮），点击后跳转 8443 触发证书选择框，登录后刷新不掉线
 - 顶栏右侧显示姓名，hover 显示完整身份证号
 
 ### 🔍 文章内搜索
@@ -89,7 +91,7 @@
 | **文件解析** | python-docx / openpyxl / python-pptx / PyPDF2 / OpenCV |
 | **音频处理** | wave / audioop / ffmpeg |
 | **AI 接口** | OpenAI 兼容 API（智谱 GLM / GPT 系列等） |
-| **认证** | mTLS 双向 TLS（8000: CERT_NONE 登录页 / 8443: CERT_REQUIRED 应用） |
+| **认证** | mTLS 双向 TLS（8000: CERT_NONE 登录页 / 8443: nginx 入口 optional_no_ca / 8080: CRL 分发） |
 
 ---
 
@@ -175,14 +177,13 @@ my-wiki/
 │   ├── vite.config.ts
 │   └── package.json
 ├── certs/                         # PKI 证书
-│   ├── ca.key / ca.crt            # CA 根证书
-│   ├── server.key / server.crt    # 服务器证书 (CN=localhost)
-│   ├── client.key                 # 客户端私钥（共享）
-│   ├── client_zh.crt / client_zh.p12  # ***REMOVED***的客户端证书
-│   ├── client_xl.crt / client_xl.p12  # 谢林的客户端证书
-│   └── readme.txt                 # 证书生成说明
+│   ├── ca.key / ca.crt            # 项目 CA（CN=JSCA-Root，SHA-256）
+│   ├── server.key / server.crt    # 服务器证书（含 SAN + CRL 分发点）
+│   └── crl.pem                    # CRL 吊销列表（3650 天有效期）
+├── nginx/                         # nginx mTLS 反向代理配置
+│   └── mtls.conf                  # TLS 终止 + optional_no_ca + X-Client-Cert 头
 ├── Dockerfile                     # 多阶段构建（Node 前端 + Python 运行时）
-├── docker-compose.yml             # 容器编排（数据卷 + 环境变量注入）
+├── docker-compose.yml             # 双容器编排（my-wiki + nginx）
 ├── .dockerignore
 └── README.md
 ```
@@ -207,6 +208,7 @@ my-wiki/
 | Safari | 14+ |
 
 > - 构建目标为 Vite 5 默认（es2020），Chrome 87+ 即可运行
+> - **Object.hasOwn polyfill**：`index.html` 内置 polyfill（react-markdown@9 依赖此 ES2022 API），补齐 Chrome 87–92 / Edge 88–92 / Firefox 78–91 / Safari 14–15.3
 > - **SHA-1 客户端证书**：Chrome/Edge 109+ 不支持，需使用 Firefox / Safari（SHA-256 证书不受影响）
 > - mTLS 登录需导入 CA 根证书和客户端 `.p12` 证书（见下文步骤 3）
 
@@ -266,7 +268,7 @@ ALLOWED_CERT_SUBJECTS=/C=CN/ST=32/L=00/O=11/OU=00/CN=***REMOVED***,/C=CN/ST=32/L
 
 ### 3. 导入客户端证书
 
-生产模式（含 Docker）下浏览器需要出示客户端证书（8443 端口 `CERT_REQUIRED`）。
+生产模式（含 Docker）下浏览器需要出示客户端证书（8443 端口 nginx 入口，`optional_no_ca` 请求但不验证链，应用层解析身份）。
 
 **证书文件**（密码均为 `123456`）：
 
@@ -303,7 +305,7 @@ ALLOWED_CERT_SUBJECTS=/C=CN/ST=32/L=00/O=11/OU=00/CN=***REMOVED***,/C=CN/ST=32/L
 | 1 个 | 自动使用，不弹选择框 |
 | 2 个以上 | 弹出选择框供用户选择身份 |
 
-**SHA-1 签名证书兼容**：后端启动时配置 `ssl_ciphers="DEFAULT:@SECLEVEL=0"`，可接受 SHA-1 签名的客户端证书（现代浏览器端仍可能有限制）。
+**SHA-1 签名证书兼容**：`run.py` SSL 兼容补丁与 nginx 均强制 TLS 1.2 + 显式套件（`@SECLEVEL=0`），可接受 SHA-1 签名的客户端证书（Chrome/Edge 109+ 浏览器端不再支持）。
 
 开发模式无需导入 — Vite 代理直接使用 `certs/` 目录下的证书文件连接后端。
 
@@ -326,30 +328,34 @@ npm run dev
 
 > Vite 代理根据前端的 `X-Dev-User` 请求头动态选择客户端证书。用户注册表在 `vite.config.ts` 的 `DEV_USERS` 中配置，添加新用户只需放入证书文件并更新注册表。
 
-**生产模式**（双端口，登录页不弹证书框）：
+**生产模式**（三端口，登录页不弹证书框）：
 
 ```bash
 cd frontend && npm run build          # 构建前端 → backend/static/
-cd backend && .venv\Scripts\python run.py  # 启动双端口服务
+cd backend && .venv\Scripts\python run.py  # 启动三端口服务 (8000/8444/8080)
 # 访问 https://localhost:8000 → 登录页面 → 点击"证书登录" → 选择证书 → 进入系统
 ```
+
+> ⚠️ 8444 为纯 HTTP 端口（仅接受 nginx 的 `X-Client-Cert` 头），本机完整部署 8443 mTLS 入口需同时运行本地 nginx（加载 `nginx/mtls.conf`），或直接使用下方 Docker 部署。
 
 **Docker 部署**：
 
 ```bash
 docker compose up -d --build
-# 访问 https://localhost:8000（登录页）/ https://localhost:8443（应用）
+# 访问 https://localhost:8000（登录页）/ https://localhost:8443（mTLS 应用）
 ```
 
 - 多阶段构建：Node 构建前端 → Python slim 运行时（含 ffmpeg + OpenCV）
+- **双容器架构**：my-wiki（应用）+ nginx（mTLS TLS 终止）
 - 数据持久化：本机目录绑定挂载（`./data` SQLite / `./uploads` 上传文件）
 - **环境变量**：直接在 `docker-compose.yml` 的 `environment` 区块配置（LLM 密钥 + SSL 路径 + 白名单）
 - **证书挂载**：`./certs:/certs:ro`（镜像不含证书，启动必须提供）
 - 修改 compose 环境变量后执行 `docker compose up -d` 即可生效（无需重建镜像）
 
-> 生产模式使用双端口架构：
-> - **8000**（`CERT_NONE`）：仅展示登录页，永不会触发浏览器证书选择框
-> - **8443**（`CERT_REQUIRED`）：全功能应用，所有 API 调用需 mTLS 验证
+> 生产模式使用三端口架构：
+> - **8000**（HTTPS，CERT_NONE）：仅展示登录页，不请求客户端证书
+> - **8443**（nginx mTLS 入口）：`optional_no_ca` 请求客户端证书但不验证链，应用层解析身份 — 支持国密 U-Key 等任意证书
+> - **8080**（HTTP）：CRL 吊销列表分发（SCHANNEL 吊销检查必需）
 
 ### 5. 访问
 
@@ -510,34 +516,29 @@ id, entity_name, name, content, created_by, created_at, updated_at
 
 ### 前后端分离
 - **开发模式**：后端 `https://localhost:8000`（CERT_OPTIONAL），前端 Vite `https://localhost:5173`，通过自定义代理中间件转发 API 请求，根据 `X-Dev-User` 请求头动态选择客户端证书
-- **生产模式**：双端口 — 8000（CERT_NONE）展示登录页（Hero + 证书登录按钮），8443（CERT_REQUIRED）提供全功能应用。前端构建产物放到 `backend/static/`，由两个端口共同服务
+- **生产模式**：三端口 — 8000（HTTPS 登录页）+ 8443（nginx mTLS 入口）+ 8080（CRL 分发）。nginx 做 TLS 终止并传递客户端证书给应用层
 
-### mTLS 证书认证
+### mTLS 证书认证（nginx 反代架构）
 - 证书 CN 格式为 `[姓名] [18位身份证号]`（如 `谢林 320100198601010018`），后端自动解析为 `name` 和 `id_number`
-- **开发模式**：前端显示用户选择页面，Vite 代理中间件根据 `X-Dev-User` 请求头动态选择客户端证书连接后端
-- **生产模式**：双端口架构 — 8000（`CERT_NONE`）展示登录页，8443（`CERT_REQUIRED`）提供全功能应用。用户点击登录后跳转到 8443 触发证书选择框
+- **nginx 8443**：`optional_no_ca` 请求客户端证书但**不验证链**（支持任意 CA 签发、任意算法的证书）
+- **应用层身份解析**：nginx 将证书 PEM 通过 `X-Client-Cert` 头（URL 转义）传递，FastAPI 用 openssl 解析 CN
+- **国密 U-Key 支持**：浏览器通过 Windows 证书库出示 U-Key 证书（Edge/Chrome 可用）
+- **CRL 吊销检查**：服务器证书含 CRL 分发点，指向 `http://localhost:8080/crl.pem`（SCHANNEL 强制要求）
+- **开发模式**：Vite 代理中间件根据 `X-Dev-User` 请求头动态选择客户端证书
 - 顶栏右侧显示姓名，hover 显示完整身份证号
-- 证书由自签 CA (`certs/jsca.crt`，CN=JSCA) 签发，客户端 `.p12` 文件导入浏览器即可
-- 后端配置 `ssl_ciphers="DEFAULT:@SECLEVEL=0"` 兼容 SHA-1 签名的客户端证书
+- 证书由自签 CA (`certs/ca.crt`，CN=JSCA-Root) 签发
 
-#### 双向认证的信任链（相互独立）
+#### 客户端证书验证流程
 
-服务器证书和客户端证书**不必由同一 CA 签发**：
-
-| 验证方向 | 信任来源 | 配置位置 |
-|---------|---------|---------|
-| 客户端验证服务器 | 浏览器信任库（导入 `jsca.crt`） | 浏览器证书管理 |
-| 服务端验证客户端 | `SSL_CA_CERTS` 指定的 CA 列表 | `backend/.env` |
-
-支持第三方 CA 签发的客户端证书：将多个 CA 证书拼接为 bundle 后指向即可：
-
-```bash
-cat jsca.crt third_party_ca.crt > ca_bundle.crt
-# .env: SSL_CA_CERTS=../certs/ca_bundle.crt
+```
+浏览器出示证书（任意 CA/算法）
+  → nginx 8443（TLS 终止，optional_no_ca 不验证）
+  → X-Client-Cert 头（URL 转义 PEM）
+  → FastAPI 解析 CN → 白名单检查 → 身份识别
 ```
 
 ### 三层访问控制
-1. **TLS 层**（8443 端口 `CERT_REQUIRED`）：只有受 CA 签发的证书能完成握手
+1. **TLS 层**（nginx 8443）：服务器出示证书（浏览器验证）；客户端证书被请求但不验证链（`optional_no_ca`）
 2. **应用白名单**（`ALLOWED_CERT_SUBJECTS`）：空 = 全部允许；非空 = 仅 CN 精确匹配的证书可访问 `/api/*`
 3. **资源权限**：文章/评论/实体/分类基于 `created_by` 身份证号比对，仅创建人可修改/删除
 

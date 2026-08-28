@@ -278,6 +278,16 @@ def auth_login(cert: CertInfo = Depends(get_client_cert)):
     return RedirectResponse("/?auth=1", status_code=302)
 
 
+@app.get("/crl.pem")
+def serve_crl():
+    """CRL 分发端点 — 供客户端证书吊销检查（SCHANNEL 通过 HTTP 获取）。"""
+    crl_path = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) / ".." / "certs" / "crl.pem"
+    crl_path = crl_path.resolve()
+    if not crl_path.exists():
+        raise HTTPException(status_code=404, detail="CRL not found")
+    return FileResponse(crl_path, media_type="application/pkix-crl")
+
+
 @app.get("/api/health")
 def health_check():
     return {"status": "ok"}

@@ -4,8 +4,7 @@ services:
     build: .
     container_name: my-wiki
     ports:
-      - "8000:8000"   # 登录页（CERT_NONE，无需客户端证书）
-      - "8443:8443"   # 应用（CERT_REQUIRED，强制客户端证书，兼容 SHA-1）
+      - "8000:8000"   # 登录页（HTTPS，无需客户端证书）
     volumes:
       - ./data:/app/data          # SQLite 数据库持久化（本机 data 目录）
       - ./uploads:/app/uploads    # 上传文件持久化（本机 uploads 目录）
@@ -36,8 +35,21 @@ services:
       # ─── TLS / mTLS ───
       - SSL_CERTFILE=/certs/server.crt
       - SSL_KEYFILE=/certs/server.key
-      # 客户端证书信任链：RootCA（外部根）+ JSCA（中间 CA）
-      - SSL_CA_CERTS=/certs/ca_bundle.crt
+      # 客户端证书信任链（后端保留，备用）
+      - SSL_CA_CERTS=/certs/ca.crt
       # ─── mTLS 白名单（留空 = allow-all；非空 = 逗号分隔 subject DN）───
       - ALLOWED_CERT_SUBJECTS=
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.25
+    container_name: my-wiki-nginx
+    depends_on:
+      - my-wiki
+    ports:
+      - "8443:8443"   # mTLS 应用入口（TLS 终止 + 客户端证书请求不验证）
+      - "8080:8080"   # CRL 分发
+    volumes:
+      - ./nginx/mtls.conf:/etc/nginx/conf.d/mtls.conf:ro
+      - ./certs:/etc/nginx/certs:ro
     restart: unless-stopped

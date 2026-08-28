@@ -18,6 +18,12 @@ build/
 .env.*
 !.env.example
 
+# ===== 证书私钥（禁止提交，含 CA 私钥 / 服务端私钥 / 客户端 .p12） =====
+certs/*.key
+certs/*.p12
+certs/tmp_*.cnf
+certs/verify_output.txt
+
 # ===== 运行时数据 =====
 backend/uploads/
 *.db

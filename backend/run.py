@@ -49,6 +49,33 @@ if sys.platform == "win32":
 import uvicorn
 from app.main import app
 
+# ── SSL 验证兼容补丁：允许叶子证书作为信任锚点 ──────────
+# 场景：中间 CA 已过期但客户端证书本身有效（第三方证书无法重新签发）。
+# VERIFY_X509_PARTIAL_CHAIN：链中任一证书（含叶子）命中信任列表即通过，
+# 从而绕过过期中间 CA 的链验证。需将客户端证书加入 ca_bundle.crt。
+import uvicorn.config as _uv_config
+
+_orig_create_ssl_context = _uv_config.create_ssl_context
+
+def _create_ssl_context_patched(*args, **kwargs):
+    ctx = _orig_create_ssl_context(*args, **kwargs)
+    ctx.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+    # SHA-1 签名的客户端证书在 TLS 1.3 下不受浏览器支持（signature_algorithms
+    # 要求 SHA-256+），强制 TLS 1.2 以兼容 SHA-1 客户端证书
+    ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    # 显式指定 IE 11 / Edge IE 模式兼容的强加密套件。
+    # 避免 SECLEVEL=0 时 DEFAULT 启用弱套件（3DES 等）导致 IE 拒绝连接。
+    ctx.set_ciphers(
+        "ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:"
+        "ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384:"
+        "AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA256:AES256-SHA256:"
+        "@SECLEVEL=0"
+    )
+    return ctx
+
+_uv_config.create_ssl_context = _create_ssl_context_patched
+
 # 证书路径支持环境变量覆盖（.env / Docker env），默认使用 ../certs
 cert_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "certs"))
 keyfile  = os.environ.get("SSL_KEYFILE",  os.path.join(cert_dir, "server.key"))
@@ -76,28 +103,33 @@ async def main():
         ssl_ciphers="DEFAULT:@SECLEVEL=0",  # 兼容 SHA-1 签名的客户端证书
         log_level="info",
     )
-    # Port 8443: REQUIRED client cert — full application
-    config_8443 = uvicorn.Config(
+    # Port 8444: 应用入口（纯 HTTP）— nginx 在此前置做 mTLS 终止，
+    # 通过 X-Client-Cert 头传递客户端证书，应用层解析身份
+    config_8444 = uvicorn.Config(
         app,
-        host=HOST, port=8443,
-        ssl_keyfile=keyfile,
-        ssl_certfile=certfile,
-        ssl_ca_certs=cafile,
-        ssl_cert_reqs=int(ssl.CERT_REQUIRED),
-        ssl_ciphers="DEFAULT:@SECLEVEL=0",  # 兼容 SHA-1 签名的客户端证书
+        host=HOST, port=8444,
+        log_level="info",
+    )
+    # Port 8080: plain HTTP — 仅用于 CRL 分发（证书吊销检查）
+    config_8080 = uvicorn.Config(
+        app,
+        host=HOST, port=8080,
         log_level="info",
     )
 
     server_8000 = uvicorn.Server(config_8000)
-    server_8443 = uvicorn.Server(config_8443)
+    server_8444 = uvicorn.Server(config_8444)
+    server_8080 = uvicorn.Server(config_8080)
 
     print("[PROD] Port 8000 — login page  (no cert required)")
-    print("[PROD] Port 8443 — application  (mTLS required)")
+    print("[PROD] Port 8444 — application  (HTTP, behind nginx mTLS)")
+    print("[PROD] Port 8080 — CRL distribution (plain HTTP)")
     print("[PROD] Visit https://localhost:8000 to start")
 
     await asyncio.gather(
         server_8000.serve(),
-        server_8443.serve(),
+        server_8444.serve(),
+        server_8080.serve(),
     )
 
 if __name__ == "__main__":

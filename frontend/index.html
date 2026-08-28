@@ -4,6 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Knowledge Base — 个人知识库</title>
+    <script>
+      // Object.hasOwn (ES2022) polyfill — react-markdown@9 依赖此 API。
+      // 补齐 Chrome 87–92 / Edge 88–92 / Firefox 78–91 / Safari 14–15.3。
+      if (!Object.hasOwn) {
+        Object.hasOwn = function (obj, prop) {
+          return Object.prototype.hasOwnProperty.call(obj, prop);
+        };
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
