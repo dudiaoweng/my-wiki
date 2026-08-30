@@ -263,7 +263,7 @@ SSL_CERTFILE=../certs/server.crt
 SSL_KEYFILE=../certs/server.key
 SSL_CA_CERTS=../certs/ca.crt
 # 白名单（逗号分隔的 subject DN；留空 = 允许所有证书）
-ALLOWED_CERT_SUBJECTS=/C=CN/ST=32/L=00/O=11/OU=00/CN=***REMOVED***,/C=CN/ST=32/L=00/O=11/OU=00/CN=谢林 320100198001010010
+ALLOWED_CERT_SUBJECTS=/C=CN/ST=32/L=00/O=11/OU=00/CN=谢林 320100198001010010
 ```
 
 ### 3. 导入客户端证书
@@ -274,7 +274,6 @@ ALLOWED_CERT_SUBJECTS=/C=CN/ST=32/L=00/O=11/OU=00/CN=***REMOVED***,/C=CN/ST=32/L
 
 | 文件 | 用户 | CN |
 |------|------|-----|
-| `certs/***REMOVED***.p12` | ***REMOVED*** | ***REMOVED*** |
 | `certs/xielin.p12` | 谢林 | 谢林 320100198001010010 |
 | `certs/xielin2.p12` | 谢林(2) | 谢林 320200199011010011 |
 | `certs/zhangshengli.p12` | 张胜利 | 张胜利 320301198803210011 |
@@ -560,13 +559,11 @@ id, entity_name, name, content, created_by, created_at, updated_at
 ```ts
 // vite.config.ts — 代理层（证书路径映射）
 const DEV_USERS = {
-  zh: { agent: readAgent('client_zh.crt', 'client.key'), displayName: '***REMOVED***' },
   xl: { agent: readAgent('client_xl.crt', 'client.key'), displayName: '谢林' },
 };
 
 // LoginPage.tsx — 前端界面（用户选择列表）
 const DEV_USERS = [
-  { key: 'zh', displayName: '***REMOVED***' },
   { key: 'xl', displayName: '谢林' },
 ];
 ```

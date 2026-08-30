@@ -30,10 +30,6 @@ function readAgentSafe(certFile: string, keyFile: string): https.Agent | null {
 }
 
 const DEV_USERS: Record<string, { agent: https.Agent | null; displayName: string }> = {
-  zh: {
-    agent: readAgentSafe('***REMOVED***.crt', '***REMOVED***.key'),
-    displayName: '***REMOVED***',
-  },
   xl: {
     agent: readAgentSafe('xielin.crt', 'xielin.key'),
     displayName: '谢林',
@@ -47,7 +43,7 @@ const DEV_USERS: Record<string, { agent: https.Agent | null; displayName: string
     displayName: '张胜利',
   },
 };
-const DEFAULT_USER = 'zh';
+const DEFAULT_USER = 'zsl';
 
 // ─── Custom proxy middleware (dynamic cert per request) ──
 function mtlsProxyMiddleware(): Plugin {

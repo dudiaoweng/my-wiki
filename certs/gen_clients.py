@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""签发客户端证书（***REMOVED***/谢林/谢林(2)/张胜利），CN = 姓名 18位身份证号。
+"""签发客户端证书（谢林/谢林(2)/张胜利），CN = 姓名 18位身份证号。
 
 用法: python gen_clients.py  (需 openssl 在 PATH 中)
 输出: <name>.key / <name>.crt / <name>.p12 (密码 123456)
@@ -15,7 +15,6 @@ OPENSSL = "openssl"
 CA_CNF = "ca_openssl.cnf"
 
 USERS = [
-    ("***REMOVED***",     "***REMOVED***"),
     ("xielin",       "谢林 320100198001010010"),
     ("xielin2",      "谢林 320200199011010011"),
     ("zhangshengli", "张胜利 320301198803210011"),
