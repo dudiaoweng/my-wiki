@@ -110,26 +110,16 @@ async def main():
         host=HOST, port=8444,
         log_level="info",
     )
-    # Port 8080: plain HTTP — 仅用于 CRL 分发（证书吊销检查）
-    config_8080 = uvicorn.Config(
-        app,
-        host=HOST, port=8080,
-        log_level="info",
-    )
-
     server_8000 = uvicorn.Server(config_8000)
     server_8444 = uvicorn.Server(config_8444)
-    server_8080 = uvicorn.Server(config_8080)
 
     print("[PROD] Port 8000 — login page  (no cert required)")
     print("[PROD] Port 8444 — application  (HTTP, behind nginx mTLS)")
-    print("[PROD] Port 8080 — CRL distribution (plain HTTP)")
     print("[PROD] Visit https://localhost:8000 to start")
 
     await asyncio.gather(
         server_8000.serve(),
         server_8444.serve(),
-        server_8080.serve(),
     )
 
 if __name__ == "__main__":

@@ -71,6 +71,12 @@ class MediaAuthMiddleware:
     would be reachable without a certificate on the production 8000
     (CERT_NONE) login port.  This is a plain ASGI middleware so it does not
     buffer large file responses.
+
+    两条受信路径：
+      1. 直连 TLS（8000 端口 / 开发模式）—— 证书经 transport peercert 可见；
+      2. nginx 前置（生产 8443 → 8444）—— TLS 在 nginx 终止，客户端证书经
+         ``X-Client-Cert`` 头转发（8444 为纯 HTTP，后端侧 peercert 恒为 None，
+         与 api_router 的身份解析路径一致；8444 仅内网可达）。
     """
     def __init__(self, app):
         self.app = app
@@ -79,7 +85,12 @@ class MediaAuthMiddleware:
         if scope["type"] == "http" and scope.get("path", "").startswith(("/api/media/", "/uploads")):
             transport = scope.get("_transport")
             peercert = transport.get_extra_info("peercert") if transport is not None else None
-            if not peercert:
+            # nginx 转发的客户端证书头（未出示证书时为空，仍拒绝）
+            client_cert = next(
+                (v for k, v in scope.get("headers", []) if k == b"x-client-cert"),
+                b"",
+            )
+            if not peercert and not client_cert.strip():
                 response = JSONResponse(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     content={"detail": "Client certificate is required"},
@@ -276,16 +287,6 @@ def auth_login(cert: CertInfo = Depends(get_client_cert)):
             detail="Client certificate is required",
         )
     return RedirectResponse("/?auth=1", status_code=302)
-
-
-@app.get("/crl.pem")
-def serve_crl():
-    """CRL 分发端点 — 供客户端证书吊销检查（SCHANNEL 通过 HTTP 获取）。"""
-    crl_path = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) / ".." / "certs" / "crl.pem"
-    crl_path = crl_path.resolve()
-    if not crl_path.exists():
-        raise HTTPException(status_code=404, detail="CRL not found")
-    return FileResponse(crl_path, media_type="application/pkix-crl")
 
 
 @app.get("/api/health")

@@ -42,14 +42,14 @@
 ```
 my-wiki/
 ├── backend/                     # Python FastAPI 后端
-│   ├── run.py                   # 生产入口：三端口服务 (8000/8444/8080) + SSL 兼容补丁
-│   ├── .env                     # 环境变量 (LLM API Key 等)
+│   ├── run.py                   # 生产入口：双端口服务 (8000/8444) + SSL 兼容补丁
+│   ├── .env                     # 环境变量 — 仓库根目录 .env（config.py 显式加载）
 │   ├── requirements.txt         # Python 依赖
 │   ├── knowledge_base.db        # SQLite 数据库
 │   ├── uploads/                 # 上传文件存储
 │   ├── static/                  # 前端构建产物 (生产模式, vite outDir)
 │   └── app/
-│       ├── main.py              # FastAPI 应用工厂、路由注册、种子数据、CRL 分发端点
+│       ├── main.py              # FastAPI 应用工厂、路由注册、种子数据
 │       ├── database.py          # SQLAlchemy 引擎、会话、表创建、迁移
 │       ├── dependencies.py      # FastAPI 依赖注入 (get_db)
 │       ├── models.py            # ORM 模型 (Category, Article, ArticleChunk, EntityInfo, Comment)
@@ -126,14 +126,14 @@ my-wiki/
 │
 ├── certs/                       # PKI 证书 (自建 CA 体系)
 │   ├── ca.key / ca.crt          # 项目自签 CA (CN=JSCA-Root, 10 年有效期)
-│   ├── server.key / server.crt  # 服务器证书 (SAN: localhost/127.0.0.1 + CRL 分发点)
-│   ├── crl.pem                  # CRL 吊销列表 (3650 天有效期)
+│   ├── server.key / server.crt  # 服务器证书 (SAN: localhost/127.0.0.1，无 CRL 分发点)
 │   ├── ca_openssl.cnf           # openssl CA 配置 (签发/吊销共用)
 │   ├── index.txt / ca.srl       # CA 数据库 / 序列号文件
+│   ├── gen_server.py / gen_clients.py  # 签发脚本 (服务器 / 客户端)
 │   └── *.crt / *.key / *.p12    # 客户端证书 (开发代理 / 浏览器导入)
 ├── nginx/                       # nginx 反向代理配置
-│   └── mtls.conf                # 8443 TLS 终止 (optional_no_ca) + 8080 CRL 分发
-├── Dockerfile                   # 多阶段构建 (Node 前端构建 → Python 运行时)
+│   └── mtls.conf                # 8443 TLS 终止 (optional_no_ca)
+├── Dockerfile                   # 多阶段构建 (静态 ffmpeg → Node 前端构建 → Python 运行时)
 ├── docker-compose.yml           # 双容器编排 (my-wiki + nginx)
 ├── .dockerignore
 └── .claude/                     # Claude Code 配置
@@ -162,7 +162,7 @@ my-wiki/
 | **python-pptx** | — | PowerPoint 文档解析 |
 | **PyPDF2** | — | PDF 文档解析 |
 | **python-dotenv** | — | 环境变量加载 |
-| **nginx** | 1.25 | 反向代理：mTLS TLS 终止 (`optional_no_ca`) + CRL 分发 |
+| **nginx** | 1.25 | 反向代理：mTLS TLS 终止 (`optional_no_ca`) |
 | **Docker** | — | 容器化部署 (docker compose 双容器) |
 
 ### 2.2 前端
@@ -227,27 +227,26 @@ my-wiki/
 │  │  │  Hooks Layer + API Client (fetch)            │   │  │
 │  │  └──────────────────────────────────────────────┘   │  │
 │  └─────────────────────────────────────────────────────┘  │
-└───┬──────────────────────┬─────────────────────┬──────────┘
-    │ ① 8000 HTTPS         │ ② 8443 HTTPS + mTLS │ ③ 8080 HTTP
-    │   CERT_NONE          │   optional_no_ca    │   CRL 分发
-    │   (登录页)            │   (应用入口)         │   (吊销检查)
-    ▼                      ▼                     ▼
+└───┬──────────────────────┬─────────────────────┐
+    │ ① 8000 HTTPS         │ ② 8443 HTTPS + mTLS │
+    │   CERT_NONE          │   optional_no_ca    │
+    │   (登录页)            │   (应用入口)         │
+    ▼                      ▼
 ┌───────────────────────────────────────────────────────────┐
 │               nginx 反向代理 (nginx:1.25)                  │
 │  ②  TLS 终止 (server.crt) + 请求客户端证书但不验证链        │
 │     证书 PEM → X-Client-Cert 头 (URL 转义) → :8444 HTTP    │
-│  ③  /crl.pem 纯 HTTP 转发 → :8080 HTTP                     │
 └───────────────────────────┬───────────────────────────────┘
-                            │  (仅 ②③ 经 nginx，① 直连后端)
+                            │  (仅 ② 经 nginx，① 直连后端)
                             ▼
 ┌───────────────────────────────────────────────────────────┐
 │               后端 (Python/FastAPI, run.py)                │
-│  ┌──────────────┐  ┌───────────────────┐  ┌────────────┐  │
-│  │ :8000        │  │ :8444             │  │ :8080      │  │
-│  │ HTTPS 登录页  │  │ 应用 (纯 HTTP)     │  │ CRL 分发   │  │
-│  │ CERT_NONE    │  │ 解析 X-Client-    │  │ GET /crl.pem│ │
-│  │ + 静态 SPA    │  │ Cert 头识别身份    │  │            │  │
-│  └──────────────┘  └───────────────────┘  └────────────┘  │
+│  ┌──────────────┐                ┌───────────────────┐    │
+│  │ :8000        │                │ :8444             │    │
+│  │ HTTPS 登录页  │                │ 应用 (纯 HTTP)     │    │
+│  │ CERT_NONE    │                │ 解析 X-Client-    │    │
+│  │ + 静态 SPA    │                │ Cert 头识别身份    │    │
+│  └──────────────┘                └───────────────────┘    │
 │  ┌─────────────────────────────────────────────────────┐  │
 │  │            FastAPI Application                       │  │
 │  │  ┌──────────┐ ┌──────────┐ ┌────────────────────┐   │  │
@@ -454,7 +453,6 @@ my-wiki/
 | `/api` | `main.py` | `/health` | GET | 健康检查 |
 | `/api/auth` | `main.py` | `/status` | GET | 证书认证状态 + 用户信息 (name/id_number/display_name) |
 | `/api/auth` | `main.py` | `/login` | GET | 登录跳转 (生产模式，重定向回前端) |
-| `/` | `main.py` | `/crl.pem` | GET | CRL 吊销列表分发 (8080 端口) |
 
 ### 5.2 核心 API 详解
 
@@ -1011,6 +1009,7 @@ def fallback_keyword_search(db, question, top_k=5):
 - 解析状态追踪：`processing` 字段扩展为 `"processing:{safe_name}"` 格式，精确标识正在解析的附件
 - 前端 AttachmentGallery 根据 processing 字段匹配附件，仅对解析中的附件显示"解析中…"遮罩
 - 文章详情页 5 秒轮询，解析完成后自动刷新并清除遮罩
+- **自动解析开关（`AUTO_PARSE`）**：默认关闭（`0`）。关闭时文章/评论附件上传后仅保留占位符（显示"待解析"），不启动后台解析与标签/实体提取，也不置 `processing` 标志；开启（`1`）则恢复上传后自动后台解析（文档解析、媒体描述、标签/实体/标题提取）。手动 reprocess 端点不受开关影响
 
 ### 9.8 权限控制体系（v1.3+）
 
@@ -1152,7 +1151,7 @@ interface AppContextValue {
 |------|------|------|
 | **mTLS 认证** | nginx 8443 TLS 终止：`optional_no_ca` 请求客户端证书但不验证链，证书 PEM 经 `X-Client-Cert` 头传递，应用层解析 CN 识别身份 | `nginx/mtls.conf`, `auth.py` |
 | **直连兼容** | 开发模式 uvicorn 单端口 8000 (CERT_OPTIONAL)，`auth.py` 从 TLS peercert 提取 CN（双模式：peercert 直连 / X-Client-Cert 头） | `main.py`, `auth.py` |
-| **证书吊销** | 服务器证书含 CRL 分发点 (`http://localhost:8080/crl.pem`)，后端 `GET /crl.pem` 分发吊销列表 | `main.py`, `run.py` |
+| **证书吊销** | 已完全移除 — 服务器证书不含 CRL 分发点（`gen_server.py` 签发），CRL 分发端点已删除 | `main.py`, `run.py` |
 | **应用白名单** | `ALLOWED_CERT_SUBJECTS` 控制允许的证书 CN（空 = 全部允许） | `auth.py`, `config.py` |
 | **资源权限** | 文章/评论/实体/附加信息/分类基于身份证号比对 created_by，仅创建人可修改/删除 | 各路由模块 |
 | **SHA-1 兼容** | `run.py` SSL 兼容补丁：`VERIFY_X509_PARTIAL_CHAIN` + 强制 TLS 1.2 + 显式套件列表 (`@SECLEVEL=0`)；nginx 同样限制 TLS 1.2 + 套件 | `run.py`, `nginx/mtls.conf` |
@@ -1192,22 +1191,23 @@ interface AppContextValue {
   └─ 分类：仅创建人
 ```
 
-### 12.3 证书吊销机制 (CRL)
+### 12.3 证书吊销机制 (CRL) — 已完全移除
+
+CRL 机制已完全移除：`server.crt` 由 `certs/gen_server.py` 签发，不含 CRL 分发点扩展，客户端不会发起任何吊销检查；后端 `GET /crl.pem` 端点、nginx 8080 分发、`certs/crl.pem` 文件均已删除。
 
 | 环节 | 说明 |
 |------|------|
-| 服务器证书 | `server.crt` 含 CRL 分发点：`http://localhost:8080/crl.pem` |
-| 分发 | `GET /crl.pem` 端点（8080 纯 HTTP，经 nginx 暴露），返回 `application/pkix-crl` |
-| 生成 | `openssl ca -config ca_openssl.cnf -gencrl -out crl.pem`（`default_crl_days = 3650`） |
-| 吊销 | `openssl ca -config ca_openssl.cnf -revoke <cert>.crt` 后重新生成 CRL |
-| 检查方 | 客户端 (如 Windows SCHANNEL) 主动获取 CRL 验证服务器/客户端证书吊销状态 |
+| 服务器证书 | `server.crt` 不含 CRL 分发点（`certs/gen_server.py` 签发） |
+| 分发 | 已删除（原 `GET /crl.pem` 端点、nginx 8080 端口） |
+| 生成 | （如需恢复）`openssl ca -config ca_openssl.cnf -gencrl -out crl.pem` |
+| 吊销 | （如需恢复）`openssl ca -config ca_openssl.cnf -revoke <cert>.crt` 后重新生成 CRL |
 
-> ⚠️ CRL 为静态文件：吊销操作后必须重新生成 `crl.pem` 并分发（重启或重新挂载）。吊销检查发生在客户端侧，服务端不强制校验。
+> 如需恢复吊销机制：在 `certs/gen_server.py` 中为服务器证书加入 CRL 分发点扩展后重新签发（分发点必须指向客户端可访问的实际地址，不能用 localhost），并恢复分发端点。
 
 ### 12.4 已知安全限制
 
 - ⚠️ **TLS 层不验证客户端证书链** — `optional_no_ca` 请求但不验证；准入控制完全依赖第二层白名单。`ALLOWED_CERT_SUBJECTS` 留空时任何持有证书者均可访问
-- ⚠️ **CRL 为静态文件且经 HTTP 分发** — 内网部署可接受；吊销生效依赖客户端主动获取
+- ⚠️ **CRL 吊销机制已完全移除** — 服务器证书不含 CRL 分发点、分发端点已删除；已签发证书无法吊销，泄露后只能重新签发整套证书替换
 - ⚠️ **无速率限制** — 需要时可添加 slowapi 中间件
 - ⚠️ **LLM API Key 存储在 `.env`** — 本地部署场景下可接受
 - ⚠️ **SQLite 并发限制** — 生产环境建议迁移至 PostgreSQL
@@ -1229,9 +1229,10 @@ python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
-# 配置环境变量
+# 配置环境变量（仓库根目录，Docker 与本地开发共用）
 cp .env.example .env
 # 编辑 .env: 填写 LLM_API_KEY, LLM_API_BASE, LLM_MODEL 等
+cd ..
 
 # 启动后端 (端口 8000, HTTPS + CERT_OPTIONAL, 热重载)
 .venv\Scripts\python -m app.main    # Windows
@@ -1272,7 +1273,7 @@ npm run preview      # 预览生产构建
 
 # 后端
 python -m app.main                      # 开发模式 (8000 HTTPS + CERT_OPTIONAL, 热重载)
-python run.py                           # 生产模式 (三端口: 8000/8444/8080)
+python run.py                           # 生产模式 (双端口: 8000/8444)
 ```
 
 ### 13.4 添加新功能
@@ -1340,30 +1341,29 @@ export CORS_ORIGINS="https://your-domain.com"
 
 ```bash
 docker compose up -d --build
-# 8000 登录页 / 8443 mTLS 应用 / 8080 CRL 分发
+# 8000 登录页 / 8443 mTLS 应用
 ```
 
 **双容器架构：**
 
 | 容器 | 镜像 | 职责 |
 |------|------|------|
-| `my-wiki` | 多阶段构建（Node 18 → Python 3.11-slim） | 后端三端口服务（8000 HTTPS 登录页 / 8444 应用 / 8080 CRL） |
-| `my-wiki-nginx` | `nginx:1.25` | 8443 TLS 终止（`optional_no_ca`）+ 8080 CRL 分发 |
+| `my-wiki` | 多阶段构建（静态 ffmpeg → Node 18 → Python 3.11-slim） | 后端双端口服务（8000 HTTPS 登录页 / 8444 应用） |
+| `my-wiki-nginx` | `nginx:1.25` | 8443 TLS 终止（`optional_no_ca`） |
 
 ```
 浏览器
   ├─ :8000  HTTPS ──────────────► my-wiki:8000   (登录页, CERT_NONE)
-  ├─ :8443  HTTPS + 客户端证书 ──► nginx ── HTTP ─► my-wiki:8444  (应用)
-  │                              (TLS 终止, X-Client-Cert 头)
-  └─ :8080  HTTP ────────────────► nginx ── HTTP ─► my-wiki:8080  (CRL)
+  └─ :8443  HTTPS + 客户端证书 ──► nginx ── HTTP ─► my-wiki:8444  (应用)
+                                  (TLS 终止, X-Client-Cert 头)
 ```
 
-- 多阶段构建：Node 18 构建前端（`vite build` 输出到 `backend/static`）→ Python 3.11-slim 运行时（ffmpeg + OpenCV headless）
+- 多阶段构建：静态 ffmpeg 二进制（`mwader/static-ffmpeg:7.0`，替代 apt 版 ~450MB）→ Node 18 构建前端（`vite build` 输出到 `backend/static`）→ Python 3.11-slim 运行时（OpenCV headless）
 - 数据持久化：本机目录绑定挂载 — `./data`（SQLite）/ `./uploads`（上传文件）
-- **环境变量**：直接在 `docker-compose.yml` 的 `environment` 区块配置（LLM 密钥 + SSL 绝对路径 + 白名单）
+- **环境变量**：单一配置文件 — 仓库根目录 `.env`（Docker 挂载为 `/app/.env`，本地开发由 `config.py` 显式加载）—— 修改后 `docker compose restart` 即生效
 - **证书**：`./certs:/certs:ro` 只读挂载（镜像不含证书，启动必须提供）；SSL 路径使用容器内绝对路径（`/certs/server.crt` 等）；nginx 容器挂载同一目录（`/etc/nginx/certs`）
-- 修改 compose 环境变量后执行 `docker compose up -d` 生效（无需 `--build`；`docker restart` 不生效）
-- 环境变量优先级：compose `environment` > Dockerfile `ENV`
+- 修改根目录 `.env` 后执行 `docker compose restart` 即生效（无需重建；`.env` 挂载 + `load_dotenv()` 在进程启动时读取）
+- 环境变量优先级：容器环境（Dockerfile `ENV`）> `/app/.env` 文件（`load_dotenv` 不覆盖已存在的环境变量）
 - `run.py` 支持 `HOST` / `SSL_CERTFILE` / `SSL_KEYFILE` / `SSL_CA_CERTS` 环境变量覆盖
 
 **方案 B: 本机运行**
@@ -1373,13 +1373,12 @@ cd frontend && npm run build          # 构建前端 → backend/static/
 cd backend && .venv\Scripts\python run.py
 ```
 
-`run.py` 启动三端口服务：
+`run.py` 启动双端口服务：
 
 | 端口 | 协议 | 说明 |
 |------|------|------|
 | 8000 | HTTPS (CERT_NONE) | 登录页 + 静态 SPA，不请求客户端证书 |
 | 8444 | HTTP | 应用入口，仅解析 `X-Client-Cert` 头识别身份，**须由 nginx 前置** |
-| 8080 | HTTP | CRL 分发 (`GET /crl.pem`) |
 
 > 8444 为纯 HTTP 端口，仅接受来自 TLS 终止组件的 `X-Client-Cert` 头，不能直接访问。本机完整部署 8443 mTLS 入口需同时运行本地 nginx（加载 `nginx/mtls.conf`，证书路径改为本机 `certs/`），或直接使用方案 A。
 
@@ -1395,7 +1394,7 @@ cd backend && .venv\Scripts\python run.py
 
 项目使用自签 CA（`certs/ca.crt`，CN=JSCA-Root，10 年有效期）签发服务器与客户端证书，配置集中在 `certs/ca_openssl.cnf`（`policy_any`、数据库 `index.txt`、序列号 `ca.srl`、默认 3650 天）。
 
-**服务器证书**：`server.crt`（SAN: `localhost` / `127.0.0.1` + CRL 分发点 `http://localhost:8080/crl.pem`），由 nginx 与后端 8000 端口共用。
+**服务器证书**：`server.crt`（SAN: `localhost` / `127.0.0.1`，不含 CRL 分发点 — CRL 机制已完全移除），由 nginx 与后端 8000 端口共用。签发方式：运行 `python gen_server.py`（修改脚本顶部 `SAN` 列表可加入实际访问 IP/域名后重签）。
 
 **签发客户端证书**（CN 格式 `姓名 18位身份证号`）：
 
@@ -1419,12 +1418,7 @@ openssl pkcs12 -export -in client.crt -inkey client.key -out client.p12 -passout
 
 > ⚠️ **Windows 编码警告**：在 Windows 上不要用 `-subj "/CN=中文..."` 命令行传参——Git Bash 会把 `/C=` 当作路径转换，且 openssl 按 ANSI 代码页转换 argv，中文 CN 会双重编码损坏（实测表现为 `CN=ÖÜºâ`）。必须用 UTF-8 编码的配置文件 + `req -utf8` 标志。签发后可用 `openssl x509 -in client.crt -noout -subject -nameopt utf8` 核对 CN。
 
-**吊销证书 / 重新生成 CRL**：
-
-```bash
-openssl ca -config ca_openssl.cnf -revoke client.crt
-openssl ca -config ca_openssl.cnf -gencrl -out crl.pem
-```
+> CRL 吊销机制已完全移除（服务器证书不含 CRL 分发点、分发端点已删除）。如未来需要恢复，见 §12.3。
 
 > 客户端证书不必由本项目 CA 签发 — nginx `optional_no_ca` 不验证链，支持第三方 CA 及国密 U-Key 证书；身份识别由应用层白名单完成。
 
@@ -1434,7 +1428,8 @@ openssl ca -config ca_openssl.cnf -gencrl -out crl.pem
 - 生产环境建议使用 PostgreSQL + pgvector 替换 SQLite 存储嵌入向量
 - Docker 容器默认白名单为空（allow-all），需通过环境变量显式配置
 - SHA-1 签名证书：`run.py` 已打 SSL 兼容补丁（`VERIFY_X509_PARTIAL_CHAIN` + 强制 TLS 1.2 + 显式套件），nginx 侧同样限制 TLS 1.2；Chrome/Edge 109+ 浏览器端不再支持 SHA-1 证书
-- 吊销操作后需重新生成 `crl.pem` 并让客户端重新获取（CRL 为静态文件，10 年有效期）
+- CRL 机制已完全移除（服务器证书不含 CRL 分发点、分发端点已删除）；证书泄露后需重签整套证书替换
+- nginx `client_max_body_size 500m` 与后端 `MAX_UPLOAD_BYTES` (500MB) 对齐 —— 修改上传上限需两处同步（`nginx/mtls.conf` + `backend/app/utils.py`）
 
 ---
 
@@ -1481,7 +1476,6 @@ pydantic-settings==2.7.0
 GET    /api/health                         健康检查
 GET    /api/auth/status                    证书认证状态 + 用户信息
 GET    /api/auth/login                     登录跳转 (生产模式)
-GET    /crl.pem                            CRL 吊销列表分发 (8080 端口)
 GET    /api/articles?category_id=&search=&tag=&skip=&limit=   文章列表
 GET    /api/articles/:id                   文章详情
 POST   /api/articles                       创建文章

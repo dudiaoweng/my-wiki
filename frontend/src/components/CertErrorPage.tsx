@@ -62,7 +62,7 @@ export function CertErrorPage({ reason = 'denied' }: Props) {
                 双击 <code>certs/client_zh.p12</code>（或 <code>client_xl.p12</code>），按向导导入（密码 <code>123456</code>）。
               </li>
               <li>
-                访问 <code>https://localhost:8000</code>
+                访问 <code>{`https://${window.location.hostname}:8000`}</code>
               </li>
               <li>浏览器弹出证书选择框 → 选择对应证书 → 确认登录。</li>
             </ol>

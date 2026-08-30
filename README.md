@@ -22,7 +22,7 @@
 - 证书 CN 格式为 `[姓名] [18位身份证号]`，后端自动解析为 name/id_number
 - **生产架构**：nginx 反向代理 TLS 终止（`optional_no_ca` 请求证书不验证链）+ 应用层身份解析
 - **国密 U-Key 支持**：通过 Windows 证书库出示 U-Key 证书（Edge/Chrome 均可用）
-- **CRL 吊销检查**：服务器发布 CRL（8080 端口 HTTP 分发，3650 天有效期）
+- **CRL**：已完全移除 — 服务器证书不含 CRL 分发点，CRL 分发端点已删除
 - **开发模式**：前端显示用户选择页，Vite 代理根据选择动态切换客户端证书
 - 顶栏右侧显示姓名，hover 显示完整身份证号
 
@@ -91,7 +91,7 @@
 | **文件解析** | python-docx / openpyxl / python-pptx / PyPDF2 / OpenCV |
 | **音频处理** | wave / audioop / ffmpeg |
 | **AI 接口** | OpenAI 兼容 API（智谱 GLM / GPT 系列等） |
-| **认证** | mTLS 双向 TLS（8000: CERT_NONE 登录页 / 8443: nginx 入口 optional_no_ca / 8080: CRL 分发） |
+| **认证** | mTLS 双向 TLS（8000: CERT_NONE 登录页 / 8443: nginx 入口 optional_no_ca） |
 
 ---
 
@@ -178,12 +178,12 @@ my-wiki/
 │   └── package.json
 ├── certs/                         # PKI 证书
 │   ├── ca.key / ca.crt            # 项目 CA（CN=JSCA-Root，SHA-256）
-│   ├── server.key / server.crt    # 服务器证书（含 SAN + CRL 分发点）
-│   └── crl.pem                    # CRL 吊销列表（3650 天有效期）
+│   └── server.key / server.crt    # 服务器证书（SAN，无 CRL 分发点）
 ├── nginx/                         # nginx mTLS 反向代理配置
 │   └── mtls.conf                  # TLS 终止 + optional_no_ca + X-Client-Cert 头
-├── Dockerfile                     # 多阶段构建（Node 前端 + Python 运行时）
+├── Dockerfile                     # 多阶段构建（静态 ffmpeg → Node 前端 → Python 运行时）
 ├── docker-compose.yml             # 双容器编排（my-wiki + nginx）
+├── .env.example                   # 环境变量模板（复制为 .env 使用，已 gitignore）
 ├── .dockerignore
 └── README.md
 ```
@@ -328,11 +328,11 @@ npm run dev
 
 > Vite 代理根据前端的 `X-Dev-User` 请求头动态选择客户端证书。用户注册表在 `vite.config.ts` 的 `DEV_USERS` 中配置，添加新用户只需放入证书文件并更新注册表。
 
-**生产模式**（三端口，登录页不弹证书框）：
+**生产模式**（双端口，登录页不弹证书框）：
 
 ```bash
 cd frontend && npm run build          # 构建前端 → backend/static/
-cd backend && .venv\Scripts\python run.py  # 启动三端口服务 (8000/8444/8080)
+cd backend && .venv\Scripts\python run.py  # 启动双端口服务 (8000/8444)
 # 访问 https://localhost:8000 → 登录页面 → 点击"证书登录" → 选择证书 → 进入系统
 ```
 
@@ -345,17 +345,17 @@ docker compose up -d --build
 # 访问 https://localhost:8000（登录页）/ https://localhost:8443（mTLS 应用）
 ```
 
-- 多阶段构建：Node 构建前端 → Python slim 运行时（含 ffmpeg + OpenCV）
+- 多阶段构建：静态 ffmpeg 二进制 → Node 构建前端 → Python slim 运行时（OpenCV headless）
 - **双容器架构**：my-wiki（应用）+ nginx（mTLS TLS 终止）
 - 数据持久化：本机目录绑定挂载（`./data` SQLite / `./uploads` 上传文件）
 - **环境变量**：直接在 `docker-compose.yml` 的 `environment` 区块配置（LLM 密钥 + SSL 路径 + 白名单）
 - **证书挂载**：`./certs:/certs:ro`（镜像不含证书，启动必须提供）
-- 修改 compose 环境变量后执行 `docker compose up -d` 即可生效（无需重建镜像）
+- 修改根目录 `.env` 后执行 `docker compose restart` 即可生效（无需重建容器/镜像）
 
-> 生产模式使用三端口架构：
+> 生产模式使用双端口架构：
 > - **8000**（HTTPS，CERT_NONE）：仅展示登录页，不请求客户端证书
 > - **8443**（nginx mTLS 入口）：`optional_no_ca` 请求客户端证书但不验证链，应用层解析身份 — 支持国密 U-Key 等任意证书
-> - **8080**（HTTP）：CRL 吊销列表分发（SCHANNEL 吊销检查必需）
+> - 上传上限 500MB：nginx `client_max_body_size` 与后端 `MAX_UPLOAD_BYTES` 需保持一致
 
 ### 5. 访问
 
@@ -373,6 +373,11 @@ docker compose up -d --build
 ---
 
 ## 环境变量
+
+- **单一配置文件**：仓库根目录 `.env`（已 gitignore，模板见 `.env.example`），Docker 部署与本地开发共用
+- **Docker 部署**：挂载为容器内 `/app/.env`，后端启动时 `load_dotenv()` 读取 —— **修改后 `docker compose restart` 即生效**
+- **本地开发**：`config.py` 显式加载根目录 `.env`（cwd 在 backend/ 下同样生效）
+- 路径类变量（数据库 / 上传目录 / 证书路径）不用配置 —— 容器由 Dockerfile `ENV` 提供，本地由代码默认值兜底
 
 ### 基础设施
 
@@ -419,6 +424,12 @@ docker compose up -d --build
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `QA_TEMPERATURE` | LLM 回答温度 | `0.4` |
+
+### 自动解析
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `AUTO_PARSE` | 附件上传/内容编辑后自动后台解析（文档解析、媒体描述、标签/实体/标题提取）。`1` 开启 / `0` 关闭；关闭时附件仅保留"待解析"占位符，可经 reprocess 接口或前端 🔄 按钮手动解析 | `0`（关闭） |
 
 ### TLS / mTLS
 
@@ -516,14 +527,14 @@ id, entity_name, name, content, created_by, created_at, updated_at
 
 ### 前后端分离
 - **开发模式**：后端 `https://localhost:8000`（CERT_OPTIONAL），前端 Vite `https://localhost:5173`，通过自定义代理中间件转发 API 请求，根据 `X-Dev-User` 请求头动态选择客户端证书
-- **生产模式**：三端口 — 8000（HTTPS 登录页）+ 8443（nginx mTLS 入口）+ 8080（CRL 分发）。nginx 做 TLS 终止并传递客户端证书给应用层
+- **生产模式**：双端口 — 8000（HTTPS 登录页）+ 8443（nginx mTLS 入口）。nginx 做 TLS 终止并传递客户端证书给应用层
 
 ### mTLS 证书认证（nginx 反代架构）
 - 证书 CN 格式为 `[姓名] [18位身份证号]`（如 `谢林 320100198601010018`），后端自动解析为 `name` 和 `id_number`
 - **nginx 8443**：`optional_no_ca` 请求客户端证书但**不验证链**（支持任意 CA 签发、任意算法的证书）
 - **应用层身份解析**：nginx 将证书 PEM 通过 `X-Client-Cert` 头（URL 转义）传递，FastAPI 用 openssl 解析 CN
 - **国密 U-Key 支持**：浏览器通过 Windows 证书库出示 U-Key 证书（Edge/Chrome 可用）
-- **CRL 吊销检查**：服务器证书含 CRL 分发点，指向 `http://localhost:8080/crl.pem`（SCHANNEL 强制要求）
+- **CRL**：已完全移除 — 服务器证书不含 CRL 分发点（由 `certs/gen_server.py` 签发），CRL 分发端点已删除
 - **开发模式**：Vite 代理中间件根据 `X-Dev-User` 请求头动态选择客户端证书
 - 顶栏右侧显示姓名，hover 显示完整身份证号
 - 证书由自签 CA (`certs/ca.crt`，CN=JSCA-Root) 签发

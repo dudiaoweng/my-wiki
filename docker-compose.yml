@@ -10,35 +10,9 @@ services:
       - ./uploads:/app/uploads    # 上传文件持久化（本机 uploads 目录）
       # 证书目录只读挂载（镜像内不含证书，启动必须提供）
       - ./certs:/certs:ro
-    environment:
-      # ─── 基础设施（容器内路径）───
-      - DATABASE_URL=sqlite:////app/data/knowledge_base.db
-      - UPLOAD_DIR=/app/uploads
-      # ─── LLM 文本模型 ───
-      - LLM_API_KEY=***REMOVED***
-      - LLM_API_BASE=https://open.bigmodel.cn/api/paas/v4
-      - LLM_MODEL=GLM-5.2
-      # ─── 视觉模型 ───
-      - VISION_API_KEY=***REMOVED***
-      - VISION_API_BASE=https://open.bigmodel.cn/api/paas/v4
-      - VISION_MODEL=GLM-5V-Turbo
-      # ─── 语音识别模型 ───
-      - ASR_API_KEY=***REMOVED***
-      - ASR_API_BASE=https://open.bigmodel.cn/api/paas/v4
-      - ASR_MODEL=GLM-ASR-2512
-      # ─── 嵌入模型 ───
-      - EMBEDDING_API_KEY=***REMOVED***
-      - EMBEDDING_API_BASE=https://open.bigmodel.cn/api/paas/v4
-      - EMBEDDING_MODEL=embedding-3
-      # ─── 问答 ───
-      - QA_TEMPERATURE=0.2
-      # ─── TLS / mTLS ───
-      - SSL_CERTFILE=/certs/server.crt
-      - SSL_KEYFILE=/certs/server.key
-      # 客户端证书信任链（后端保留，备用）
-      - SSL_CA_CERTS=/certs/ca.crt
-      # ─── mTLS 白名单（留空 = allow-all；非空 = 逗号分隔 subject DN）───
-      - ALLOWED_CERT_SUBJECTS=
+      # 环境变量文件挂载（已 gitignore；模板见 .env.example）
+      # 后端启动时 load_dotenv() 读取 /app/.env —— 修改后 docker compose restart 即生效
+      - ./.env:/app/.env:ro
     restart: unless-stopped
 
   nginx:
@@ -48,7 +22,6 @@ services:
       - my-wiki
     ports:
       - "8443:8443"   # mTLS 应用入口（TLS 终止 + 客户端证书请求不验证）
-      - "8080:8080"   # CRL 分发
     volumes:
       - ./nginx/mtls.conf:/etc/nginx/conf.d/mtls.conf:ro
       - ./certs:/etc/nginx/certs:ro

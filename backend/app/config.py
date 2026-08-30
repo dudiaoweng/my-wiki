@@ -4,9 +4,14 @@ All modules should import from here instead of calling os.getenv() directly.
 """
 
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
+# 统一加载仓库根目录 .env（Docker 与本地开发共用同一份）：
+# - 容器内：cwd=/app，挂载的 /app/.env 由第一次 load_dotenv 命中
+# - 本地开发：cwd 在 backend/ 下，由第二次显式加载仓库根目录文件命中
 load_dotenv()
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 # ── LLM text model (title generation, entity extraction, text Q&A) ──
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
@@ -30,6 +35,11 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "embedding-3")
 
 # ── Q&A ──
 QA_TEMPERATURE = float(os.getenv("QA_TEMPERATURE", "0.4"))
+
+# ── 自动解析 ──
+# 附件上传/内容编辑后是否自动后台解析（文档解析、媒体描述、标签/实体/标题提取）。
+# 默认关闭（"0"）——附件仅保留占位符（显示"待解析"），可经 reprocess 端点或前端按钮手动解析。
+AUTO_PARSE = os.getenv("AUTO_PARSE", "0") == "1"
 
 # ── Infrastructure ──
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./knowledge_base.db")

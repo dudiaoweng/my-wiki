@@ -49,6 +49,11 @@ def _revoke_if_valid(serial_file: str) -> None:
     print(f"[skip] {serial_file} (not valid in index.txt)")
 
 
+# ca.srl 缺失时（如 CA 数据库刚清空）从 1001 重新开始编号
+if not os.path.exists("ca.srl"):
+    with open("ca.srl", "w") as f:
+        f.write("1001")
+
 for s in ("1002.pem", "1003.pem", "1004.pem", "1005.pem", "1006.pem", "1007.pem"):
     _revoke_if_valid(s)
 

@@ -15,6 +15,7 @@ from app.models import Article, Category, Comment, EntityInfo, utcnow
 from app.schemas import ArticleCreate, ArticleUpdate, ArticleResponse, ArticleListItem, CommentSummary
 from app.auth import get_client_cert, CertInfo
 from app.llm_extract import extract_tags_and_entities
+from app.config import AUTO_PARSE
 from app.routes.upload import (
     generate_title,
     parse_text_from_bytes, parse_docx, parse_xlsx, parse_pptx, parse_pdf,
@@ -464,8 +465,9 @@ async def create_article(
                 video_tag = f'<video controls src="{media_src}"{poster} alt="{escaped_name}" style="width:100%"></video>'
                 initial_content = f"{initial_content}\n\n{video_tag}" if initial_content else video_tag
             else:
-                # Document type — placeholder, parsed async in background
-                doc_placeholder = f'<div data-attachment="{escaped_name}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {escaped_name}（解析中…）</div>'
+                # Document type — placeholder（AUTO_PARSE 开启时后台解析，否则保留"待解析"）
+                parse_hint = "（解析中…）" if AUTO_PARSE else "（待解析）"
+                doc_placeholder = f'<div data-attachment="{escaped_name}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {escaped_name}{parse_hint}</div>'
                 # Persistent marker so the frontend can always discover document attachments
                 doc_marker = f'<!-- doc-attachment: {escaped_name} | {safe_name} -->'
                 initial_content = f"{initial_content}\n\n{doc_placeholder}\n{doc_marker}" if initial_content else f"{doc_placeholder}\n{doc_marker}"
@@ -483,7 +485,7 @@ async def create_article(
         category_id=category_id or None,
         tags=json.dumps(user_tags, ensure_ascii=False),
         entities=None,
-        processing="processing" if len(uploaded_files) > 0 or initial_content.strip() else None,
+        processing="processing" if AUTO_PARSE and (len(uploaded_files) > 0 or initial_content.strip()) else None,
         attachment_path=attachment_path,
         attachment_name=attachment_name,
         attachment_type=attachment_type,
@@ -493,12 +495,12 @@ async def create_article(
     db.commit()
     db.refresh(article)
 
-    # Launch background enrichment
-    if len(uploaded_files) > 0:
+    # Launch background enrichment（AUTO_PARSE 开关控制；关闭时附件仅存占位符，可手动 reprocess）
+    if AUTO_PARSE and len(uploaded_files) > 0:
         asyncio.create_task(_bg_attachment_enhance(
             article.id, uploaded_files, need_title=not user_title,
         ))
-    elif initial_content.strip():
+    elif AUTO_PARSE and initial_content.strip():
         # No files, just text content — lightweight background extraction
         asyncio.create_task(_bg_extract(article.id, user_tags, need_title=not user_title))
 
@@ -779,8 +781,9 @@ async def update_article(
                     video_tag = f'<video controls src="{media_src}"{poster} alt="{escaped_name}" style="width:100%"></video>'
                     article.content = f"{current}\n\n{video_tag}" if current else video_tag
                 else:
-                    # Document — placeholder, parsed async in background
-                    doc_placeholder = f'<div data-attachment="{escaped_name}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {escaped_name}（解析中…）</div>'
+                    # Document — placeholder（AUTO_PARSE 开启时后台解析，否则保留"待解析"）
+                    parse_hint = "（解析中…）" if AUTO_PARSE else "（待解析）"
+                    doc_placeholder = f'<div data-attachment="{escaped_name}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {escaped_name}{parse_hint}</div>'
                     # Persistent marker so the frontend can always discover document attachments
                     doc_marker = f'<!-- doc-attachment: {escaped_name} | {safe_name} -->'
                     article.content = f"{current}\n\n{doc_placeholder}\n{doc_marker}" if current else f"{doc_placeholder}\n{doc_marker}"
@@ -816,19 +819,19 @@ async def update_article(
         ).strip()
         article.content += f"\n\n<!-- attachments-order: {', '.join(all_order)} -->"
 
-    if len(uploaded_files) > 0:
+    if AUTO_PARSE and len(uploaded_files) > 0:
         article.processing = "processing"
     elif article.processing != "processing":
         article.processing = None  # don't clear processing set by text extraction
     db.commit()
     db.refresh(article)
 
-    # Launch background enrichment for new files
-    if len(uploaded_files) > 0:
+    # Launch background enrichment for new files（AUTO_PARSE 开关控制）
+    if AUTO_PARSE and len(uploaded_files) > 0:
         asyncio.create_task(_bg_attachment_enhance(
             article.id, uploaded_files, need_title=False,
         ))
-    elif content and content_changed and article.content.strip():
+    elif AUTO_PARSE and content and content_changed and article.content.strip():
         article.processing = "processing"
         db.commit()
         asyncio.create_task(_bg_extract(article.id, user_tags, need_title=False))

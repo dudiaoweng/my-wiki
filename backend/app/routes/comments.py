@@ -15,6 +15,7 @@ from app.models import Article, Comment, utcnow
 from app.schemas import CommentCreate, CommentUpdate, CommentResponse
 from app.auth import get_client_cert, CertInfo
 from app.llm_extract import extract_tags_and_entities
+from app.config import AUTO_PARSE
 from app.routes.graph import invalidate_graph_cache
 from app.routes.upload import (
     parse_text_from_bytes, parse_docx, parse_xlsx, parse_pptx, parse_pdf,
@@ -426,8 +427,9 @@ async def create_comment(
                 video_tag = f'<video controls src="{media_src}"{poster} alt="{escaped_name}" style="width:100%"></video>'
                 initial_content = f"{initial_content}\n\n{video_tag}" if initial_content else video_tag
             else:
-                # Document type — placeholder + persistent marker, parsed async
-                doc_placeholder = f'<div data-attachment="{escaped_name}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {escaped_name}（解析中…）</div>'
+                # Document type — placeholder（AUTO_PARSE 开启时后台解析，否则保留"待解析"）
+                parse_hint = "（解析中…）" if AUTO_PARSE else "（待解析）"
+                doc_placeholder = f'<div data-attachment="{escaped_name}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {escaped_name}{parse_hint}</div>'
                 doc_marker = f'<!-- doc-attachment: {escaped_name} | {safe_name} -->'
                 initial_content = f"{initial_content}\n\n{doc_placeholder}\n{doc_marker}" if initial_content else f"{doc_placeholder}\n{doc_marker}"
         except Exception as e:
@@ -446,7 +448,7 @@ async def create_comment(
         content=initial_content,
         tags=json.dumps(user_tags, ensure_ascii=False),
         entities=None,
-        processing="processing" if (has_files or has_content) else None,
+        processing="processing" if AUTO_PARSE and (has_files or has_content) else None,
         attachments=json.dumps(all_attachments, ensure_ascii=False) if all_attachments else None,
         attachment_path=attachment_path,
         attachment_name=attachment_name,
@@ -458,8 +460,8 @@ async def create_comment(
     db.commit()
     db.refresh(comment)
 
-    # Launch background processing
-    if has_files or has_content:
+    # Launch background processing（AUTO_PARSE 开关控制）
+    if AUTO_PARSE and (has_files or has_content):
         asyncio.create_task(_bg_comment_process(
             comment.id, article_id, uploaded_files,
             need_extract=has_content,
@@ -580,7 +582,9 @@ async def update_comment(
                 video_tag = f'<video controls src="{media_src}"{poster} alt="{escaped_name}" style="width:100%"></video>'
                 comment.content = f"{comment.content}\n\n{video_tag}" if comment.content else video_tag
             else:
-                doc_placeholder = f'<div data-attachment="{escaped_name}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {escaped_name}（解析中…）</div>'
+                # Document type — placeholder（AUTO_PARSE 开启时后台解析，否则保留"待解析"）
+                parse_hint = "（解析中…）" if AUTO_PARSE else "（待解析）"
+                doc_placeholder = f'<div data-attachment="{escaped_name}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {escaped_name}{parse_hint}</div>'
                 doc_marker = f'<!-- doc-attachment: {escaped_name} | {safe_name} -->'
                 comment.content = f"{comment.content}\n\n{doc_placeholder}\n{doc_marker}" if comment.content else f"{doc_placeholder}\n{doc_marker}"
         except Exception as e:
@@ -607,12 +611,12 @@ async def update_comment(
         return comment
 
     comment.updated_by = user_cn
-    comment.processing = "processing" if (content_changed or uploaded_files) else comment.processing
+    comment.processing = "processing" if AUTO_PARSE and (content_changed or uploaded_files) else comment.processing
     db.commit()
     db.refresh(comment)
 
-    # Background processing
-    if content_changed or uploaded_files:
+    # Background processing（AUTO_PARSE 开关控制）
+    if AUTO_PARSE and (content_changed or uploaded_files):
         # Subtract old entities, re-extract later in background
         asyncio.create_task(_bg_comment_process(
             comment.id, article_id, uploaded_files,

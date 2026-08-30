@@ -17,6 +17,7 @@ from app.config import (
     VISION_API_KEY, VISION_API_BASE, VISION_MODEL,
     ASR_API_KEY, ASR_API_BASE, ASR_MODEL,
     UPLOAD_DIR as UPLOAD_DIR_STR,
+    AUTO_PARSE,
 )
 from app.utils import find_ffmpeg, read_upload_limited, MAX_UPLOAD_BYTES
 from app.prompts import IMAGE_DESCRIPTION, VIDEO_DESCRIPTION, GENERATE_TITLE
@@ -629,14 +630,14 @@ async def upload_file(
     # 5. Use filename (without extension) as initial title; background task will generate a better one
     title = Path(file.filename).stem or file.filename
 
-    # 5. Create article immediately — media visible, marked as processing
+    # 5. Create article immediately — media visible（AUTO_PARSE 开启时才置 processing）
     article = Article(
         title=title,
         content=raw_text,
         category_id=category_id or None,
         tags=json.dumps([], ensure_ascii=False),
         entities=None,
-        processing="processing",
+        processing="processing" if AUTO_PARSE else None,
         attachment_path=str(safe_name),
         attachment_name=file.filename,
         attachment_type=file.content_type or "",
@@ -744,7 +745,9 @@ async def upload_file(
         finally:
             db2.close()
 
-    asyncio.create_task(_bg_enhance())
+    # AUTO_PARSE 开关控制：关闭时不做 LLM 描述/标签/实体提取，可经 reprocess 手动解析
+    if AUTO_PARSE:
+        asyncio.create_task(_bg_enhance())
 
     # Embeddings are computed after background recognition completes (see _bg_enhance)
 

@@ -30,8 +30,10 @@ export function LoginPage({ onLogin }: Props) {
     // Port 8000 (CERT_NONE) shows this page without triggering a cert dialog.
     // Navigate to port 8443 (CERT_REQUIRED) — the TLS handshake there
     // triggers the browser's native certificate selection dialog.
+    // 沿用地址栏的 hostname：生产环境通过服务器 IP/域名访问，
+    // 不能写死 localhost（否则会跳到用户自己机器上）。
     if (window.location.port === '8000') {
-      window.location.href = 'https://localhost:8443/api/auth/login';
+      window.location.href = `https://${window.location.hostname}:8443/api/auth/login`;
     } else {
       window.location.href = '/api/auth/login';
     }

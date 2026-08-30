@@ -2,12 +2,18 @@
 .git
 .gitignore
 
+# 镜像导出产物（1GB+ tar 不进构建上下文）
+dist/
+*.tar
+
+# 环境变量（含 API Key，不进构建上下文）
+.env
+
 # Python
 backend/.venv
 backend/__pycache__
 backend/**/__pycache__
 backend/*.pyc
-backend/.env          # 密钥不进镜像，通过 docker-compose 环境变量注入
 backend/knowledge_base.db
 backend/uploads/
 backend/.output.log
