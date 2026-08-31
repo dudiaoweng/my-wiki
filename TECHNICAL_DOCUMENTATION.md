@@ -1006,10 +1006,10 @@ def fallback_keyword_search(db, question, top_k=5):
 - 每个附件缩略图左下角 🔄 按钮（hover 显示，仅文章创建人）
 - 单文件解析：`POST /api/articles/{id}/reprocess/{safe_name}`
 - 全量解析：`POST /api/articles/{id}/reprocess`
-- 解析状态追踪：`processing` 字段扩展为 `"processing:{safe_name}"` 格式，精确标识正在解析的附件
-- 前端 AttachmentGallery 根据 processing 字段匹配附件，仅对解析中的附件显示"解析中…"遮罩
-- 文章详情页 5 秒轮询，解析完成后自动刷新并清除遮罩
-- **自动解析开关（`AUTO_PARSE`）**：默认关闭（`0`）。关闭时文章/评论附件上传后仅保留占位符（显示"待解析"），不启动后台解析与标签/实体提取，也不置 `processing` 标志；开启（`1`）则恢复上传后自动后台解析（文档解析、媒体描述、标签/实体/标题提取）。手动 reprocess 端点不受开关影响
+- 解析状态追踪：`processing` 字段两阶段——`"processing:{safe_name}"`（读取中：文本提取）→ `"recognizing:{safe_name}"`（解析中：LLM 识别，评论用 `"recognizing"`）→ 完成清空。文档上传后文本提取与识别结果分两步落库
+- 前端 AttachmentGallery 根据 processing 字段匹配附件，分别显示"读取中…"/"解析中…"遮罩
+- 文章详情页 5 秒轮询，两阶段各自落库后前端即可看到；识别完成清空遮罩并通知刷新
+- **自动解析开关（`AUTO_PARSE`）**：默认关闭（`0`）。控制 LLM 类后台解析（媒体描述、标签/实体/标题提取）。上传接口与评论的文档附件（txt/md/docx/xlsx/pptx/pdf）文本提取为纯本地解析，请求返回后由后台任务异步执行并置 `processing` 标志，不受开关影响；关闭时媒体描述与标签/实体提取跳过，文章编辑器的附件仍保留"待解析"占位符。手动 reprocess 端点不受开关影响
 
 ### 9.8 权限控制体系（v1.3+）
 

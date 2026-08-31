@@ -127,8 +127,14 @@ export function ArticleList() {
         for (const nodeId of selectedGraphNodeIds) {
           if (nodeId === `article:${a.id}`) return true;
           if (nodeId === `category:${a.category_id}`) return true;
-          // Match LLM-extracted entity by name
-          if (a.entities?.entities?.some((e) => nodeId === `entity:${e.name}`)) return true;
+          // 实体节点 id = entity:{name}::{type}，按「名称+类型」匹配
+          // 旧数据产生的无类型节点（entity:{name}::）按名称匹配
+          if (nodeId?.startsWith('entity:')) {
+            const [ename, etype] = nodeId.slice('entity:'.length).split('::');
+            if (a.entities?.entities?.some(
+              (e) => e.name === ename && (!etype || (e.type ?? '') === etype)
+            )) return true;
+          }
         }
         return false;
       });
@@ -159,36 +165,27 @@ export function ArticleList() {
     return articles;
   }, [articles, selectedArticleIds, viewedArticleId]);
 
-  // Entities (LLM-extracted) — computed from article.entities, with most common type
+  // Entities (LLM-extracted) — computed from article.entities, keyed by (name, type)
+  // 同名但类型不同视为不同实体：分开展示、分别计数
   const llmEntityList = useMemo(() => {
     const counts = new Map<string, number>();
-    const types = new Map<string, Map<string, number>>(); // name -> type -> count
     const creators = new Map<string, string>(); // name -> first created_by
     for (const a of entityPool) {
       if (!a.entities?.entities) continue;
       for (const e of a.entities.entities) {
-        counts.set(e.name, (counts.get(e.name) ?? 0) + 1);
-        if (!types.has(e.name)) types.set(e.name, new Map());
-        const tmap = types.get(e.name)!;
-        tmap.set(e.type, (tmap.get(e.type) ?? 0) + 1);
+        const key = `${e.name}::${e.type ?? '其他'}`;
+        counts.set(key, (counts.get(key) ?? 0) + 1);
         if (!creators.has(e.name) && (e as any).created_by) {
           creators.set(e.name, (e as any).created_by);
         }
       }
     }
     return Array.from(counts.entries())
-      .map(([name, count]) => {
-        const tmap = types.get(name);
-        let bestType = '';
-        let bestCount = 0;
-        if (tmap) {
-          for (const [t, c] of tmap) {
-            if (c > bestCount) { bestType = t; bestCount = c; }
-          }
-        }
-        return { name, count, type: bestType, created_by: creators.get(name) };
+      .map(([key, count]) => {
+        const [name, type] = key.split('::');
+        return { name, count, type, created_by: creators.get(name) };
       })
-      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name) || (a.type ?? '').localeCompare(b.type ?? ''));
   }, [entityPool]);
 
   // Clear selections when filters change

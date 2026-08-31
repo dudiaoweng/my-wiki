@@ -14,7 +14,7 @@ from app.database import SessionLocal
 from app.models import Article, Comment, utcnow
 from app.schemas import CommentCreate, CommentUpdate, CommentResponse
 from app.auth import get_client_cert, CertInfo
-from app.llm_extract import extract_tags_and_entities
+from app.llm_extract import extract_chunked_iter, merge_tags, merge_entities
 from app.config import AUTO_PARSE
 from app.routes.graph import invalidate_graph_cache
 from app.routes.upload import (
@@ -35,6 +35,10 @@ router = APIRouter(
 
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads"))
 
+# 文档类扩展名 — 纯本地解析（不调用 LLM）。上传后始终自动提取文本，
+# 不受 AUTO_PARSE 开关影响（AUTO_PARSE 仅控制媒体描述与标签/实体提取）
+DOCUMENT_EXTENSIONS = TEXT_EXTENSIONS | WORD_EXTENSIONS | EXCEL_EXTENSIONS | PPT_EXTENSIONS | PDF_EXTENSIONS
+
 
 # ─── Helpers ────────────────────────────────────────
 
@@ -54,7 +58,11 @@ def _merge_entities_into_article(article: Article, comment_entities: dict) -> bo
     comm_rels = comment_entities.get("relations", [])
 
     seen_names = {(e.get("name"), e.get("type")) for e in art_ents}
-    seen_rels = {(r.get("source"), r.get("target"), r.get("label")) for r in art_rels}
+    # 实体以「名称+类型」为标识，关系去重键纳入两端类型
+    seen_rels = {
+        (r.get("source"), r.get("source_type") or "", r.get("target"), r.get("target_type") or "", r.get("label"))
+        for r in art_rels
+    }
 
     changed = False
     for e in comm_ents:
@@ -64,7 +72,7 @@ def _merge_entities_into_article(article: Article, comment_entities: dict) -> bo
             art_ents.append(e)
             changed = True
     for r in comm_rels:
-        key = (r.get("source"), r.get("target"), r.get("label"))
+        key = (r.get("source"), r.get("source_type") or "", r.get("target"), r.get("target_type") or "", r.get("label"))
         if key not in seen_rels:
             seen_rels.add(key)
             art_rels.append(r)
@@ -223,11 +231,11 @@ async def _bg_comment_process(
                     parsed = await asyncio.to_thread(parse_pptx, uf["storage_path"])
                 elif ext in PDF_EXTENSIONS:
                     parsed = await asyncio.to_thread(parse_pdf, uf["storage_path"])
-                elif ext in IMAGE_EXTENSIONS:
+                elif ext in IMAGE_EXTENSIONS and AUTO_PARSE:
                     parsed = await parse_image(uf["storage_path"], uf["filename"])
-                elif ext in VIDEO_EXTENSIONS:
+                elif ext in VIDEO_EXTENSIONS and AUTO_PARSE:
                     parsed = await parse_video(uf["storage_path"], uf["filename"])
-                elif ext in AUDIO_EXTENSIONS:
+                elif ext in AUDIO_EXTENSIONS and AUTO_PARSE:
                     with open(uf["storage_path"], "rb") as f:
                         audio_bytes = f.read()
                     parsed = await parse_media(audio_bytes, uf["filename"], uf["content_type"])
@@ -250,17 +258,52 @@ async def _bg_comment_process(
             except Exception as e:
                 logger.warning(f"[BG_COMMENT] File parsing failed for {uf['filename']}: {e}")
 
-        # Step B: Extract tags + entities if there's content
-        if need_extract and full_text.strip():
+        # ── 第一步返回：文档/媒体文本提取完成，先落库 ──
+        # 前端每 5s 轮询立即看到文本；识别阶段（标签/实体提取）继续在后台运行
+        if has_changes and AUTO_PARSE and need_extract and full_text.strip():
+            comment = db2.query(Comment).filter(Comment.id == comment_id).first()
+            if comment:
+                comment.content = full_text
+                comment.processing = "recognizing"
+                db2.commit()
+
+        # Step B: Extract tags + entities（LLM 解析，AUTO_PARSE 控制）
+        # 分段提取，每段完成后立即落库——后续段失败时已保存的结果不受影响
+        if need_extract and AUTO_PARSE and full_text.strip():
+            comment = db2.query(Comment).filter(Comment.id == comment_id).first()
+            if not comment:
+                return
+            article = db2.query(Article).filter(Article.id == article_id).first()
+            if not article:
+                return
+
             try:
-                llm_tags, entities = await asyncio.to_thread(
-                    extract_tags_and_entities, full_text.strip(),
-                )
+                cur_tags = json.loads(comment.tags) if comment.tags else []
+                if not isinstance(cur_tags, list):
+                    cur_tags = []
+                async for seg_tags, seg_entities in extract_chunked_iter(full_text.strip()):
+                    if seg_tags:
+                        cur_tags = merge_tags(cur_tags, seg_tags)
+                        comment.tags = json.dumps(cur_tags, ensure_ascii=False)
+                    if isinstance(seg_entities, dict) and seg_entities:
+                        # Annotate entity items with comment creator
+                        now_str = utcnow().isoformat()
+                        for e in seg_entities.get("entities", []):
+                            if not e.get("created_by"):
+                                e["created_by"] = comment.created_by or ""
+                                e["created_at"] = now_str
+                        cur_entities = json.loads(comment.entities) if comment.entities else None
+                        merged_entities = merge_entities(cur_entities, seg_entities)
+                        comment.entities = (
+                            json.dumps(merged_entities, ensure_ascii=False) if merged_entities else None
+                        )
+                        _merge_entities_into_article(article, seg_entities)
+                    # 逐段落库
+                    db2.commit()
             except Exception as e:
                 logger.warning(f"[BG_COMMENT] LLM extraction failed: {e}")
-                llm_tags, entities = [], None
 
-            # Re-fetch
+            # Re-fetch（正文可能已被第一阶段的提交更新）
             comment = db2.query(Comment).filter(Comment.id == comment_id).first()
             if not comment:
                 return
@@ -271,36 +314,22 @@ async def _bg_comment_process(
             if has_changes:
                 comment.content = full_text
 
-            if llm_tags:
-                comment.tags = json.dumps(llm_tags, ensure_ascii=False)
-            if isinstance(entities, dict) and entities:
-                # Annotate entity items with comment creator
-                now_str = utcnow().isoformat()
-                for e in entities.get("entities", []):
-                    if not e.get("created_by"):
-                        e["created_by"] = comment.created_by or ""
-                        e["created_at"] = now_str
-                comment.entities = json.dumps(entities, ensure_ascii=False)
-                _merge_entities_into_article(article, entities)
-
             comment.processing = None
             db2.commit()
             invalidate_graph_cache()
             # Embed comment content for Q&A
             await _embed_comment_content(comment, db2)
-            logger.info(
-                "[BG_COMMENT] comment %s processed: %d tags, %d entities",
-                comment_id, len(llm_tags or []),
-                len((entities or {}).get("entities", [])) if isinstance(entities, dict) else 0,
-            )
+            logger.info("[BG_COMMENT] comment %s processing complete", comment_id)
         else:
-            # No LLM extraction needed, just update content
-            if has_changes:
-                comment = db2.query(Comment).filter(Comment.id == comment_id).first()
-                if comment:
+            # 无 LLM 提取（AUTO_PARSE 关闭或无需提取）——仅写入文档提取的文本。
+            # 无论是否有变化都要清 processing，避免占位符卡在"读取中…"
+            comment = db2.query(Comment).filter(Comment.id == comment_id).first()
+            if comment:
+                if has_changes:
                     comment.content = full_text
-                    comment.processing = None
-                    db2.commit()
+                comment.processing = None
+                db2.commit()
+                if has_changes:
                     await _embed_comment_content(comment, db2)
     except Exception as e:
         logger.warning(f"[BG_COMMENT] Failed: {e}")
@@ -427,8 +456,9 @@ async def create_comment(
                 video_tag = f'<video controls src="{media_src}"{poster} alt="{escaped_name}" style="width:100%"></video>'
                 initial_content = f"{initial_content}\n\n{video_tag}" if initial_content else video_tag
             else:
-                # Document type — placeholder（AUTO_PARSE 开启时后台解析，否则保留"待解析"）
-                parse_hint = "（解析中…）" if AUTO_PARSE else "（待解析）"
+                # 文档类型 — 占位符。文档文本提取为纯本地解析，始终后台执行；
+                # 未知类型在 AUTO_PARSE 关闭时保留"待解析"（媒体描述/实体提取由 AUTO_PARSE 控制）
+                parse_hint = "（读取中…）" if (ext in DOCUMENT_EXTENSIONS or AUTO_PARSE) else "（待解析）"
                 doc_placeholder = f'<div data-attachment="{escaped_name}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {escaped_name}{parse_hint}</div>'
                 doc_marker = f'<!-- doc-attachment: {escaped_name} | {safe_name} -->'
                 initial_content = f"{initial_content}\n\n{doc_placeholder}\n{doc_marker}" if initial_content else f"{doc_placeholder}\n{doc_marker}"
@@ -442,13 +472,17 @@ async def create_comment(
 
     has_files = len(uploaded_files) > 0
     has_content = bool(initial_content.strip())
+    # 文档附件始终自动提取文本（纯本地解析）；AUTO_PARSE 只控制 LLM 类解析
+    has_doc_files = any(
+        Path(uf["filename"]).suffix.lower() in DOCUMENT_EXTENSIONS for uf in uploaded_files
+    )
 
     comment = Comment(
         article_id=article_id,
         content=initial_content,
         tags=json.dumps(user_tags, ensure_ascii=False),
         entities=None,
-        processing="processing" if AUTO_PARSE and (has_files or has_content) else None,
+        processing="processing" if (AUTO_PARSE and (has_files or has_content)) or has_doc_files else None,
         attachments=json.dumps(all_attachments, ensure_ascii=False) if all_attachments else None,
         attachment_path=attachment_path,
         attachment_name=attachment_name,
@@ -460,8 +494,9 @@ async def create_comment(
     db.commit()
     db.refresh(comment)
 
-    # Launch background processing（AUTO_PARSE 开关控制）
-    if AUTO_PARSE and (has_files or has_content):
+    # Launch background processing — 文档文本提取始终执行；
+    # 媒体描述与标签/实体提取（LLM）由 AUTO_PARSE 开关控制
+    if (AUTO_PARSE and (has_files or has_content)) or has_doc_files:
         asyncio.create_task(_bg_comment_process(
             comment.id, article_id, uploaded_files,
             need_extract=has_content,
@@ -582,8 +617,9 @@ async def update_comment(
                 video_tag = f'<video controls src="{media_src}"{poster} alt="{escaped_name}" style="width:100%"></video>'
                 comment.content = f"{comment.content}\n\n{video_tag}" if comment.content else video_tag
             else:
-                # Document type — placeholder（AUTO_PARSE 开启时后台解析，否则保留"待解析"）
-                parse_hint = "（解析中…）" if AUTO_PARSE else "（待解析）"
+                # 文档类型 — 占位符。文档文本提取为纯本地解析，始终后台执行；
+                # 未知类型在 AUTO_PARSE 关闭时保留"待解析"（媒体描述/实体提取由 AUTO_PARSE 控制）
+                parse_hint = "（读取中…）" if (ext in DOCUMENT_EXTENSIONS or AUTO_PARSE) else "（待解析）"
                 doc_placeholder = f'<div data-attachment="{escaped_name}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {escaped_name}{parse_hint}</div>'
                 doc_marker = f'<!-- doc-attachment: {escaped_name} | {safe_name} -->'
                 comment.content = f"{comment.content}\n\n{doc_placeholder}\n{doc_marker}" if comment.content else f"{doc_placeholder}\n{doc_marker}"
@@ -610,13 +646,18 @@ async def update_comment(
     if not content_changed and not uploaded_files and not tags_changed and not attachments_changed:
         return comment
 
+    # 新上传的文档附件始终自动提取文本；AUTO_PARSE 只控制 LLM 类解析
+    has_new_doc_files = any(
+        Path(uf["filename"]).suffix.lower() in DOCUMENT_EXTENSIONS for uf in uploaded_files
+    )
+
     comment.updated_by = user_cn
-    comment.processing = "processing" if AUTO_PARSE and (content_changed or uploaded_files) else comment.processing
+    comment.processing = "processing" if (AUTO_PARSE and (content_changed or uploaded_files)) or has_new_doc_files else comment.processing
     db.commit()
     db.refresh(comment)
 
-    # Background processing（AUTO_PARSE 开关控制）
-    if AUTO_PARSE and (content_changed or uploaded_files):
+    # Background processing — 文档文本提取始终执行；LLM 类解析由 AUTO_PARSE 控制
+    if (AUTO_PARSE and (content_changed or uploaded_files)) or has_new_doc_files:
         # Subtract old entities, re-extract later in background
         asyncio.create_task(_bg_comment_process(
             comment.id, article_id, uploaded_files,

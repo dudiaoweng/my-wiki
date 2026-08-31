@@ -20,6 +20,7 @@ from app.config import (
     AUTO_PARSE,
 )
 from app.utils import find_ffmpeg, read_upload_limited, MAX_UPLOAD_BYTES
+from app.llm_extract import extract_chunked_iter, merge_tags, merge_entities
 from app.prompts import IMAGE_DESCRIPTION, VIDEO_DESCRIPTION, GENERATE_TITLE
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
@@ -46,15 +47,33 @@ IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.bmp', '.
 
 # ─── File parsers ──────────────────────────────────
 
+def _decode_text(content_bytes: bytes) -> str:
+    """带编码检测的文本解码（Windows 记事本默认保存 GBK，硬编码 UTF-8 会乱码）。
+
+    优先级：BOM（utf-8-sig / utf-16）→ 严格 UTF-8 → 严格 GB18030（GBK/GB2312
+    超集）→ UTF-8 容错替换兜底。纯 ASCII 在所有编码下字节一致，无影响。
+    """
+    if content_bytes.startswith(b"\xef\xbb\xbf"):
+        return content_bytes.decode("utf-8-sig")
+    if content_bytes.startswith(b"\xff\xfe") or content_bytes.startswith(b"\xfe\xff"):
+        return content_bytes.decode("utf-16")
+    for enc in ("utf-8", "gb18030"):
+        try:
+            return content_bytes.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return content_bytes.decode("utf-8", errors="replace")
+
+
 async def parse_text(file: UploadFile) -> str:
     """Parse plain text files."""
     content = await file.read()
-    return content.decode("utf-8", errors="replace")
+    return _decode_text(content)
 
 
 def parse_text_from_bytes(content_bytes: bytes) -> str:
     """Parse plain text from already-read bytes."""
-    return content_bytes.decode("utf-8", errors="replace")
+    return _decode_text(content_bytes)
 
 
 def parse_docx(file_path: str) -> str:
@@ -554,15 +573,6 @@ async def generate_title(text: str) -> str:
 
 
 
-async def extract_entities_and_relations(text: str) -> tuple[list[str], dict | None]:
-    """Extract tags and structured entities+relations from document text via LLM.
-    Returns (tags, entities_dict).
-    Uses the shared extraction function via asyncio.to_thread to avoid blocking."""
-    import asyncio
-    from app.llm_extract import extract_tags_and_entities
-    return await asyncio.to_thread(extract_tags_and_entities, text)
-
-
 # ─── Route ─────────────────────────────────────────
 
 @router.post("", response_model=ArticleResponse, status_code=201)
@@ -591,33 +601,28 @@ async def upload_file(
     with open(file_path, "wb") as f:
         f.write(content_bytes)
 
-    # 2. Build initial content (no LLM — immediate display of media)
+    # 2. Build initial content — 媒体立即显示标签；文档先占位，文本提取在后台异步完成
+    #   （文档解析为纯本地操作，不阻塞 HTTP 响应；AUTO_PARSE 只控制 LLM 类解析）
     is_media = ext in IMAGE_EXTENSIONS or ext in AUDIO_EXTENSIONS or ext in VIDEO_EXTENSIONS
     is_doc = ext in (TEXT_EXTENSIONS | WORD_EXTENSIONS | EXCEL_EXTENSIONS | PPT_EXTENSIONS | PDF_EXTENSIONS)
     media_src = f"/api/media/{safe_name}"
-    raw_text = ""  # text extracted without LLM help
+    raw_text = ""  # initial content — media tag or document placeholder
 
-    try:
-        if ext in TEXT_EXTENSIONS:
-            raw_text = parse_text_from_bytes(content_bytes)
-        elif ext in WORD_EXTENSIONS:
-            raw_text = await asyncio.to_thread(parse_docx, str(file_path))
-        elif ext in EXCEL_EXTENSIONS and ext != '.csv':
-            raw_text = await asyncio.to_thread(parse_xlsx, str(file_path))
-        elif ext in PPT_EXTENSIONS:
-            raw_text = await asyncio.to_thread(parse_pptx, str(file_path))
-        elif ext in PDF_EXTENSIONS:
-            raw_text = await asyncio.to_thread(parse_pdf, str(file_path))
-        elif ext in IMAGE_EXTENSIONS:
+    if is_media:
+        if ext in IMAGE_EXTENSIONS:
             raw_text = f'<img src="{media_src}" alt="{escaped_name}" style="max-width:100%;height:auto;display:block;border-radius:4px">'
         elif ext in AUDIO_EXTENSIONS:
             raw_text = f'<audio controls src="{media_src}" style="width:100%"></audio>'
-        elif ext in VIDEO_EXTENSIONS:
-            raw_text = f'<video controls src="{media_src}" style="width:100%"></video>'
         else:
-            raw_text = f"# {file.filename}\n\n不支持的文件格式。文件已作为附件保存。"
-    except Exception as e:
-        raw_text = f"# {file.filename}\n\n文件解析失败，文件已作为附件保存。"
+            raw_text = f'<video controls src="{media_src}" style="width:100%"></video>'
+    elif is_doc:
+        raw_text = (
+            f'<div data-attachment="{escaped_name}" data-path="{safe_name}" '
+            f'style="padding:10px 14px;background:var(--c-surface);border-radius:8px;'
+            f'border:1px solid var(--c-border);margin:8px 0">📎 {escaped_name}（读取中…）</div>'
+        )
+    else:
+        raw_text = f"# {file.filename}\n\n不支持的文件格式。文件已作为附件保存。"
 
     # 3. Add persistent doc-attachment marker for non-media files (so the frontend
     #    can uniquely identify each file, even when multiple share the same name).
@@ -630,14 +635,21 @@ async def upload_file(
     # 5. Use filename (without extension) as initial title; background task will generate a better one
     title = Path(file.filename).stem or file.filename
 
-    # 5. Create article immediately — media visible（AUTO_PARSE 开启时才置 processing）
+    # 5. Create article immediately — media visible；文档占位（后台提取文本）
+    #   processing 两阶段标志：
+    #   - 文档 → "processing:{safe_name}"（读取中）→ 提取完成先落库，AUTO_PARSE
+    #     开启时转 "recognizing:{safe_name}"（解析中）→ 解析完成清空
+    #   - 媒体/未知类型 + AUTO_PARSE → 直接 "recognizing:{safe_name}"（无本地提取阶段）
     article = Article(
         title=title,
         content=raw_text,
         category_id=category_id or None,
         tags=json.dumps([], ensure_ascii=False),
         entities=None,
-        processing="processing" if AUTO_PARSE else None,
+        processing=(
+            f"processing:{safe_name}" if is_doc
+            else (f"recognizing:{safe_name}" if AUTO_PARSE else None)
+        ),
         attachment_path=str(safe_name),
         attachment_name=file.filename,
         attachment_type=file.content_type or "",
@@ -655,8 +667,54 @@ async def upload_file(
         from app.database import SessionLocal
         db2 = SessionLocal()
         try:
-            # Step A: Generate full content with LLM description (for media)
-            if is_media:
+            errs: list[str] = []
+            full_text = raw_text
+
+            # Step A: 提取文档文本（纯本地解析，始终执行）——替换占位符
+            if is_doc:
+                try:
+                    if ext in TEXT_EXTENSIONS:
+                        with open(file_path, "rb") as f:
+                            parsed = parse_text_from_bytes(f.read())
+                    elif ext in WORD_EXTENSIONS:
+                        parsed = await asyncio.to_thread(parse_docx, str(file_path))
+                    elif ext in EXCEL_EXTENSIONS and ext != '.csv':
+                        parsed = await asyncio.to_thread(parse_xlsx, str(file_path))
+                    elif ext in PPT_EXTENSIONS:
+                        parsed = await asyncio.to_thread(parse_pptx, str(file_path))
+                    elif ext in PDF_EXTENSIONS:
+                        parsed = await asyncio.to_thread(parse_pdf, str(file_path))
+                    else:
+                        parsed = ""
+
+                    if parsed:
+                        placeholder = f'<div data-attachment="{escaped_name}"'
+                        idx = full_text.find(placeholder)
+                        if idx >= 0:
+                            end_idx = full_text.find('</div>', idx)
+                            if end_idx >= 0:
+                                full_text = full_text[:idx] + parsed + full_text[end_idx + 6:]
+                    else:
+                        errs.append("文档读取未提取到内容")
+                except Exception as e:
+                    logger.warning(f"[UPLOAD] Document parsing failed for {file.filename}: {e}")
+                    errs.append(f"文档读取失败：{e}")
+
+            # ── 第一步返回：文档文本提取完成，立即落库 ──
+            # 前端每 5s 轮询会先看到文本；识别结果在第二阶段完成后再落库
+            if is_doc:
+                art = db2.query(Article).filter(Article.id == article_id).first()
+                if not art:
+                    return
+                # 文档读取失败时把占位符提示改为"读取失败"，避免卡在"读取中…"
+                if any(e.startswith("文档读取") for e in errs):
+                    full_text = full_text.replace("（读取中…）", "（读取失败）")
+                art.content = full_text
+                art.processing = f"recognizing:{safe_name}" if AUTO_PARSE else None
+                db2.commit()
+
+            # Step B: 媒体 LLM 描述（AUTO_PARSE 控制）
+            if AUTO_PARSE and is_media:
                 if ext in IMAGE_EXTENSIONS:
                     full_text = await parse_image(str(file_path), file.filename)
                 elif ext in VIDEO_EXTENSIONS:
@@ -667,39 +725,50 @@ async def upload_file(
                         audio_bytes = f.read()
                     desc = await parse_media(audio_bytes, file.filename, file.content_type or "")
                     full_text = raw_text + "\n\n" + desc
-            else:
-                full_text = raw_text
 
-            # Step B: Extract tags/entities (title is already set from filename)
-            bg_tags, bg_entities = await extract_entities_and_relations(full_text)
+            # Step C: 标签/实体提取（LLM，AUTO_PARSE 控制）——分段提取、逐段落库
+            bg_tags, bg_entities = [], None
+            if AUTO_PARSE:
+                try:
+                    async for seg_tags, seg_entities in extract_chunked_iter(full_text):
+                        if seg_tags:
+                            bg_tags = merge_tags(bg_tags, seg_tags)
+                        if seg_entities:
+                            bg_entities = merge_entities(bg_entities, seg_entities)
+                        # 逐段落库（本任务串行使用 db2，无并发访问）
+                        art = db2.query(Article).filter(Article.id == article_id).first()
+                        if not art:
+                            return
+                        if bg_tags:
+                            art.tags = json.dumps(bg_tags, ensure_ascii=False)
+                        if bg_entities:
+                            art.entities = json.dumps(bg_entities, ensure_ascii=False)
+                        db2.commit()
+                except Exception as e:
+                    logger.warning(f"[UPLOAD] LLM extraction failed: {e}")
 
             art = db2.query(Article).filter(Article.id == article_id).first()
             if not art:
                 return
 
-            # Collect errors for transparency
-            errs: list[str] = []
-
-            # Update content with full description (preserve order/doc-attachment markers)
+            # ── 第二步返回：识别结果（媒体描述 / 标签 / 实体）──
             if is_media:
                 markers = []
                 for m in re.finditer(r'<!-- (?:attachments-order|doc-attachment): .+? -->', raw_text):
                     markers.append(m.group())
-                if markers:
-                    art.content = full_text + '\n\n' + '\n'.join(markers)
+                art.content = (full_text + '\n\n' + '\n'.join(markers)) if markers else full_text
+
+            # Update tags + entities（仅 AUTO_PARSE 开启时执行过提取）
+            if AUTO_PARSE:
+                if bg_tags:
+                    art.tags = json.dumps(bg_tags, ensure_ascii=False)
                 else:
-                    art.content = full_text
+                    errs.append("标签提取未返回结果")
 
-            # Update tags + entities; report if LLM extraction returned nothing
-            if bg_tags:
-                art.tags = json.dumps(bg_tags, ensure_ascii=False)
-            else:
-                errs.append("标签提取未返回结果")
-
-            if bg_entities:
-                art.entities = json.dumps(bg_entities, ensure_ascii=False)
-            else:
-                errs.append("实体和关系提取未返回结果")
+                if bg_entities:
+                    art.entities = json.dumps(bg_entities, ensure_ascii=False)
+                else:
+                    errs.append("实体和关系提取未返回结果")
 
             # Append error notes to content so the user can see what happened
             if errs:
@@ -745,8 +814,8 @@ async def upload_file(
         finally:
             db2.close()
 
-    # AUTO_PARSE 开关控制：关闭时不做 LLM 描述/标签/实体提取，可经 reprocess 手动解析
-    if AUTO_PARSE:
+    # 后台任务：文档文本提取始终执行；媒体描述与标签/实体提取（LLM）由 AUTO_PARSE 控制
+    if AUTO_PARSE or is_doc:
         asyncio.create_task(_bg_enhance())
 
     # Embeddings are computed after background recognition completes (see _bg_enhance)

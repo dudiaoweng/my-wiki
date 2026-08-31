@@ -100,25 +100,36 @@ def get_graph(db: Session = Depends(get_db)):
             ents = ent_data.get("entities", [])
             rels = ent_data.get("relations", [])
 
-            # Entity nodes
+            # 实体以「名称+类型」为标识 → 节点 id = entity:{name}::{type}
+            # 用于解析旧格式关系（无类型）：name → 该文章中出现过的类型集合
+            name_types: dict[str, set[str]] = {}
+            for ent in ents:
+                name = ent.get("name", "")
+                if name:
+                    name_types.setdefault(name, set()).add(ent.get("type") or "")
+
+            def ensure_entity_node(name: str, etype: str) -> str:
+                nid = f"entity:{name}::{etype}"
+                if nid not in seen_entity_ids:
+                    seen_entity_ids.add(nid)
+                    label = f"{name}（{etype}）" if etype else name
+                    nodes.append(GraphNode(
+                        id=nid,
+                        label=label,
+                        type="entity",
+                        url=f"/articles?search={name}",
+                    ))
+                return nid
+
+            # Entity nodes + "article → entity" edges
             for ent in ents:
                 name = ent.get("name", "")
                 if not name:
                     continue
-                ent_node_id = f"entity:{name}"
-                if ent_node_id not in seen_entity_ids:
-                    seen_entity_ids.add(ent_node_id)
-                    nodes.append(GraphNode(
-                        id=ent_node_id,
-                        label=name,
-                        type="entity",
-                        url=f"/articles?search={name}",
-                    ))
-
-                # Edge: article → entity
+                nid = ensure_entity_node(name, ent.get("type") or "")
                 edges.append(GraphEdge(
                     source=article_node_id,
-                    target=ent_node_id,
+                    target=nid,
                     label="提及",
                 ))
 
@@ -129,22 +140,23 @@ def get_graph(db: Session = Depends(get_db)):
                 lbl = rel.get("label", "关联")
                 if not src or not tgt:
                     continue
-                # Ensure nodes exist (lazy creation)
-                for name in (src, tgt):
-                    eid = f"entity:{name}"
-                    if eid not in seen_entity_ids:
-                        seen_entity_ids.add(eid)
-                        nodes.append(GraphNode(
-                            id=eid,
-                            label=name,
-                            type="entity",
-                            url=f"/articles?search={name}",
-                        ))
-                edges.append(GraphEdge(
-                    source=f"entity:{src}",
-                    target=f"entity:{tgt}",
-                    label=lbl,
-                ))
+                src_type = rel.get("source_type") or ""
+                tgt_type = rel.get("target_type") or ""
+
+                # 新格式带类型 → 精确指向该 (name, type) 节点；
+                # 旧格式无类型 → 按名称解析：唯一类型直接指向，多类型分别连边，无记录建无类型节点
+                if src_type:
+                    src_ids = [ensure_entity_node(src, src_type)]
+                else:
+                    src_ids = [ensure_entity_node(src, t) for t in sorted(name_types.get(src) or {""})]
+                if tgt_type:
+                    tgt_ids = [ensure_entity_node(tgt, tgt_type)]
+                else:
+                    tgt_ids = [ensure_entity_node(tgt, t) for t in sorted(name_types.get(tgt) or {""})]
+
+                for sid in src_ids:
+                    for tid in tgt_ids:
+                        edges.append(GraphEdge(source=sid, target=tid, label=lbl))
 
     # Safety cap: if graph exceeds limit, return truncated data
     if len(nodes) > MAX_NODES:

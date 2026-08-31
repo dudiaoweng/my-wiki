@@ -54,6 +54,8 @@ class EntityRelation(BaseModel):
     source: str
     target: str
     label: str
+    source_type: Optional[str] = None
+    target_type: Optional[str] = None
 
 
 class ArticleEntities(BaseModel):

@@ -37,8 +37,9 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "embedding-3")
 QA_TEMPERATURE = float(os.getenv("QA_TEMPERATURE", "0.4"))
 
 # ── 自动解析 ──
-# 附件上传/内容编辑后是否自动后台解析（文档解析、媒体描述、标签/实体/标题提取）。
-# 默认关闭（"0"）——附件仅保留占位符（显示"待解析"），可经 reprocess 端点或前端按钮手动解析。
+# 控制 LLM 类后台解析（媒体描述、标签/实体/标题提取）。文档附件的文本提取
+# 是纯本地解析（不调用 LLM），始终自动执行，不受本开关影响。
+# 默认关闭（"0"）——仅跳过 LLM 解析，可经 reprocess 端点或前端按钮手动解析。
 AUTO_PARSE = os.getenv("AUTO_PARSE", "0") == "1"
 
 # ── Infrastructure ──
@@ -47,9 +48,12 @@ UPLOAD_DIR = os.getenv("UPLOAD_DIR", "./uploads")
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "https://localhost:5173")
 
 # ── TLS / mTLS ──
-SSL_CERTFILE = os.getenv("SSL_CERTFILE", "certs/server.crt")
-SSL_KEYFILE = os.getenv("SSL_KEYFILE", "certs/server.key")
-SSL_CA_CERTS = os.getenv("SSL_CA_CERTS", "certs/ca.crt")
+# 证书固定放在仓库根目录 certs/ 下；默认值锚定到仓库根目录，与启动时 cwd 无关
+# （本地开发 cwd 在 backend/ 下同样命中）。容器内由 Dockerfile ENV 覆盖为 /certs/*。
+_CERTS_DIR = Path(__file__).resolve().parents[2] / "certs"
+SSL_CERTFILE = os.getenv("SSL_CERTFILE", str(_CERTS_DIR / "server.crt"))
+SSL_KEYFILE = os.getenv("SSL_KEYFILE", str(_CERTS_DIR / "server.key"))
+SSL_CA_CERTS = os.getenv("SSL_CA_CERTS", str(_CERTS_DIR / "ca.crt"))
 ALLOWED_CERT_SUBJECTS = [
     s.strip()
     for s in os.getenv("ALLOWED_CERT_SUBJECTS", "").split(",")

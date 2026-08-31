@@ -97,7 +97,10 @@ export function ArticleCard({ article, selected, onSelect, onOpen }: Props) {
           {article.created_by && (
             <span title={article.created_by}>👤 创建人 {formatUser(article.created_by)}</span>
           )}
-          {article.processing === 'processing' && (
+          {article.processing?.startsWith('processing') && (
+            <span className={styles.processingBadge}>⏳ 读取中…</span>
+          )}
+          {article.processing?.startsWith('recognizing') && (
             <span className={styles.processingBadge}>⏳ 解析中…</span>
           )}
           {article.attachment_name && (

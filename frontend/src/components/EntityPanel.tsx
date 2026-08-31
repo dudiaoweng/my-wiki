@@ -142,6 +142,8 @@ export function EntityPanel({
 
   // ── Entity info panel state (附加信息) ──
   const [selectedEntityName, setSelectedEntityName] = useState<string | null>(null);
+  // 同名不同类型视为不同实体，选中状态按 (name, type) 区分
+  const [selectedEntityType, setSelectedEntityType] = useState<string | null>(null);
   const [entityInfos, setEntityInfos] = useState<EntityInfoItem[]>([]);
   const [loadingInfos, setLoadingInfos] = useState(false);
   const [addingInfo, setAddingInfo] = useState(false);
@@ -166,23 +168,26 @@ export function EntityPanel({
   }, []);
 
   // Toggle entity selection — expand/collapse info panel
-  const handleEntitySelect = useCallback(async (entityName: string, ctrl = false) => {
+  // 同名不同类型视为不同实体：按 (name, type) 区分选中行；附加信息按名字加载（后端以名字为键）
+  const handleEntitySelect = useCallback(async (ent: EntityInfo, ctrl = false) => {
     // Notify parent (ArticleList) for article filtering
-    onEntitySelect?.(entityName, ctrl);
+    onEntitySelect?.(ent.name, ctrl);
 
-    if (selectedEntityName === entityName) {
+    if (selectedEntityName === ent.name && selectedEntityType === (ent.type ?? null)) {
       // Deselect
       setSelectedEntityName(null);
+      setSelectedEntityType(null);
       setEntityInfos([]);
       setAddingInfo(false);
       setEditingInfoId(null);
     } else {
-      setSelectedEntityName(entityName);
+      setSelectedEntityName(ent.name);
+      setSelectedEntityType(ent.type ?? null);
       setAddingInfo(false);
       setEditingInfoId(null);
-      await loadEntityInfos(entityName);
+      await loadEntityInfos(ent.name);
     }
-  }, [selectedEntityName, loadEntityInfos, onEntitySelect]);
+  }, [selectedEntityName, selectedEntityType, loadEntityInfos, onEntitySelect]);
 
   // Refresh infos after mutation
   const refreshInfos = useCallback(async () => {
@@ -567,16 +572,17 @@ export function EntityPanel({
                   </div>
                 ) : (
                   /* ── Read-only mode ── */
-                  <div className={`${styles.item} ${selectedEntityName === ent.name ? styles.itemSelected : ''}`}>
+                  <div className={`${styles.item} ${selectedEntityName === ent.name && selectedEntityType === (ent.type ?? null) ? styles.itemSelected : ''}`}>
                     <button
                       className={styles.itemClickArea}
-                      onClick={(e) => handleEntitySelect(ent.name, e.ctrlKey || e.metaKey)}
+                      onClick={(e) => handleEntitySelect(ent, e.ctrlKey || e.metaKey)}
                       title={(ent as any).created_by
                         ? `类型：${ent.type}\n创建人：${(ent as any).created_by?.replace(/\s+\d{18}$/, '') ?? '未知'}`
                         : `类型：${ent.type}`}
                     >
                       <span style={{ fontSize: 14, flexShrink: 0 }}>{entityIcon(ent.type)}</span>
                       <span className={styles.tagName} style={{ color: '#7D5DA9' }}>{ent.name}</span>
+                      <span style={{ fontSize: 10, color: 'var(--c-text-muted)', marginLeft: 4, flexShrink: 0 }}>{ent.type}</span>
                     </button>
                     {canModifyEntity(ent) && (
                       <button
@@ -597,7 +603,7 @@ export function EntityPanel({
                 )}
 
                 {/* ── Additional Info Panel ── */}
-                {selectedEntityName === ent.name && (
+                {selectedEntityName === ent.name && selectedEntityType === (ent.type ?? null) && (
                   <div className={styles.infoPanel}>
                     {loadingInfos ? (
                       <div className={styles.infoLoading}>加载中…</div>

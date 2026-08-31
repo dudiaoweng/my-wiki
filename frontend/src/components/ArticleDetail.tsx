@@ -84,8 +84,10 @@ export function ArticleDetailView({
     };
   }, [articleId, showToast]);
 
-  // Poll while background recognition is running ("processing" or "processing:file")
-  const isProcessing = !!article?.processing?.startsWith('processing');
+  // Poll while background processing is running:
+  // "processing" / "processing:file" = 读取中（文本提取）；"recognizing:file" = 解析中（LLM 识别）
+  const procState = article?.processing ?? '';
+  const isProcessing = procState.startsWith('processing') || procState.startsWith('recognizing');
   useEffect(() => {
     if (!article || !isProcessing) return;
     const timer = setInterval(async () => {
@@ -275,7 +277,9 @@ export function ArticleDetailView({
       <h1 className={styles.title}>
         {article.title}
         {isProcessing && (
-          <span className={styles.processingBadge}>⏳ 解析中…</span>
+          <span className={styles.processingBadge}>
+            ⏳ {procState.startsWith('recognizing') ? '解析中…' : '读取中…'}
+          </span>
         )}
       </h1>
 

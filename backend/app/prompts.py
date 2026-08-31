@@ -24,11 +24,13 @@ EXTRACT_TAGS_ENTITIES = """从以下文档内容中提取关键概念和实体�
 不要提取泛化概念（如"机器学习"、"项目管理"、"云计算"）——这些应作为标签。
 不要提取无具体标识的泛指（如"工程师"、"互联网公司"、"数据库"）。
 
-关系（relations）：只提取实体之间的关系，source 和 target 必须都是已提取的实体。
-- 示例：Google 开发了 Kubernetes → {{"source":"Google","target":"Kubernetes","label":"开发"}}
+关系（relations）：只提取实体之间的关系，source 和 target 必须都是已提取的实体，
+并同时给出它们在 entities 列表中的类型（source_type / target_type，必须与 entities 中一致）。
+实体以「名称+类型」作为唯一标识，同一名称可以有多个不同类型。
+- 示例：Google 开发了 Kubernetes → {{"source":"Google","source_type":"组织","target":"Kubernetes","target_type":"产品","label":"开发"}}
 
 以 JSON 格式返回（只返回 JSON，不要其他内容）：
-{{"tags":["标签1","标签2"],"entities":[{{"name":"实体名","type":"类型"}}],"relations":[{{"source":"源实体","target":"目标实体","label":"关系描述"}}]}}
+{{"tags":["标签1","标签2"],"entities":[{{"name":"实体名","type":"类型"}}],"relations":[{{"source":"源实体名","source_type":"源实体类型","target":"目标实体名","target_type":"目标实体类型","label":"关系描述"}}]}}
 
 根据内容量自动决定提取数量，全面覆盖所有具有具体名称的实体和关键概念标签。
 

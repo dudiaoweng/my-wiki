@@ -224,6 +224,9 @@ export function AttachmentGallery({
           const serverParsing = typeof processing === 'string' && processing.startsWith('processing:')
             ? processing.slice('processing:'.length) === itemKey
             : false;
+          const serverRecognizing = typeof processing === 'string' && processing.startsWith('recognizing:')
+            ? processing.slice('recognizing:'.length) === itemKey
+            : false;
           const isParsing = parsingKeys.has(itemKey) || serverParsing;
           return (
             <div
@@ -247,6 +250,9 @@ export function AttachmentGallery({
                 )}
                 {isVideo && <span className={styles.playOverlay}>▶</span>}
                 {isParsing && (
+                  <span className={styles.parsingOverlay}>读取中…</span>
+                )}
+                {serverRecognizing && !isParsing && (
                   <span className={styles.parsingOverlay}>解析中…</span>
                 )}
                 {onReprocess && !isParsing && (

@@ -3,6 +3,7 @@
 Used by both upload (async → via asyncio.to_thread) and articles CRUD (sync).
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -114,3 +115,74 @@ def extract_tags_and_entities(text: str, max_chars: int = 2000) -> tuple[list[st
         logger.info("LLM extraction returned empty result")
 
     return tags, entities
+
+
+async def extract_chunked_iter(text: str, max_chars: int = 2000, max_segments: int = 10):
+    """分段提取的异步迭代器：每段完成后立即 yield (tags, entities_dict)。
+
+    调用方可在每段 yield 后立即落库（逐段落库）——后续段失败时已保存的
+    结果不受影响。未配置 API key 或无内容时不产出任何结果。
+    """
+    text = text.strip()
+    if not LLM_API_KEY:
+        logger.info("LLM extraction skipped: no LLM_API_KEY configured")
+        return
+    if not text:
+        return
+
+    if len(text) <= max_chars:
+        tags, entities = await asyncio.to_thread(extract_tags_and_entities, text, max_chars)
+        yield tags, entities
+        return
+
+    # 延迟导入避免循环依赖（qa → upload；comments/articles → 本模块）
+    from app.routes.qa import chunk_article
+
+    segments = chunk_article(text)
+    if len(segments) > max_segments:
+        logger.info(
+            "LLM chunked extraction: %d segments, only first %d processed",
+            len(segments), max_segments,
+        )
+        segments = segments[:max_segments]
+
+    for seg in segments:
+        tags, entities = await asyncio.to_thread(extract_tags_and_entities, seg, max_chars)
+        yield tags, entities
+
+
+def merge_tags(current: list[str], new_tags: list[str]) -> list[str]:
+    """合并标签（按名称去重，保持顺序）。"""
+    merged = list(current)
+    for t in new_tags:
+        if t not in merged:
+            merged.append(t)
+    return merged
+
+
+def _rel_key(r: dict) -> tuple:
+    """关系去重键 — 实体以「名称+类型」为标识，关系两端均纳入类型。"""
+    return (r.get("source"), r.get("source_type") or "", r.get("target"), r.get("target_type") or "", r.get("label"))
+
+
+def merge_entities(current: dict | None, incoming: dict | None) -> dict | None:
+    """合并两批实体/关系（实体按 name+type、关系按 source+source_type+target+target_type+label 去重）。"""
+    if not isinstance(incoming, dict):
+        return current
+    ents = list(current.get("entities", [])) if isinstance(current, dict) else []
+    rels = list(current.get("relations", [])) if isinstance(current, dict) else []
+    seen_ents = {(e.get("name"), e.get("type")) for e in ents}
+    for e in incoming.get("entities", []):
+        key = (e.get("name"), e.get("type"))
+        if key not in seen_ents:
+            seen_ents.add(key)
+            ents.append(e)
+    seen_rels = {_rel_key(r) for r in rels}
+    for r in incoming.get("relations", []):
+        key = _rel_key(r)
+        if key not in seen_rels:
+            seen_rels.add(key)
+            rels.append(r)
+    if not ents:
+        return None
+    return {"entities": ents, "relations": rels}

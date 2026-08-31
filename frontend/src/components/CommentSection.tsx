@@ -224,6 +224,9 @@ function stripContentForDisplay(content: string): string {
     .trim();
 }
 
+/** 超过该长度的评论默认折叠，显示"展开全文"按钮 */
+const COLLAPSE_CHARS = 500;
+
 /** Render a single comment — attachments + content. */
 function CommentBody({
   comment,
@@ -236,14 +239,27 @@ function CommentBody({
   const displayContent = mediaItems.length > 0
     ? stripContentForDisplay(comment.content || '')
     : (comment.content || '');
+  const [expanded, setExpanded] = useState(false);
+  const isLong = displayContent.length > COLLAPSE_CHARS;
 
   return (
     <>
-      <div className={`${styles.content} markdown-content`}>
+      <div
+        className={`${styles.content} markdown-content${isLong && !expanded ? ` ${styles.collapsed}` : ''}`}
+      >
         <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={rehypePlugins}>
           {displayContent}
         </Markdown>
       </div>
+      {isLong && (
+        <button
+          type="button"
+          className={styles.expandBtn}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded ? '收起' : '展开全文'}
+        </button>
+      )}
       {mediaItems.length > 0 && <AttachmentGallery items={mediaItems} />}
     </>
   );
@@ -336,9 +352,11 @@ export function CommentSection({
     };
   }, [articleId]);
 
-  // ── Poll every 5s when any comment is processing ──
+  // ── Poll every 5s when any comment is processing / recognizing ──
   useEffect(() => {
-    const hasProcessing = comments.some((c) => c.processing === 'processing');
+    const hasProcessing = comments.some(
+      (c) => c.processing === 'processing' || c.processing === 'recognizing'
+    );
 
     if (hasProcessing && !pollingRef.current) {
       pollingRef.current = setInterval(async () => {
@@ -346,7 +364,9 @@ export function CommentSection({
           const data = await api.getComments(articleId);
           setComments(data);
           // If all processing done, stop polling and notify
-          if (!data.some((c) => c.processing === 'processing') && data.length > 0) {
+          if (!data.some(
+            (c) => c.processing === 'processing' || c.processing === 'recognizing'
+          ) && data.length > 0) {
             if (pollingRef.current) {
               clearInterval(pollingRef.current);
               pollingRef.current = null;
@@ -570,9 +590,12 @@ export function CommentSection({
                   </span>
                   <span className={styles.time}>{formatDate(comment.created_at)}</span>
                   {comment.processing === 'processing' && (
+                    <span className={styles.processingBadge}>⏳ 读取中…</span>
+                  )}
+                  {comment.processing === 'recognizing' && (
                     <span className={styles.processingBadge}>⏳ 解析中…</span>
                   )}
-                  {canModify && comment.processing !== 'processing' && (
+                  {canModify && !comment.processing && (
                     <div className={styles.itemActions}>
                       <button
                         className={styles.actionBtn}

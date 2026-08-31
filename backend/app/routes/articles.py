@@ -14,7 +14,7 @@ from app.database import SessionLocal
 from app.models import Article, Category, Comment, EntityInfo, utcnow
 from app.schemas import ArticleCreate, ArticleUpdate, ArticleResponse, ArticleListItem, CommentSummary
 from app.auth import get_client_cert, CertInfo
-from app.llm_extract import extract_tags_and_entities
+from app.llm_extract import extract_chunked_iter, merge_tags, merge_entities
 from app.config import AUTO_PARSE
 from app.routes.upload import (
     generate_title,
@@ -56,24 +56,6 @@ def _annotate_entity_creator(entities: dict | None, creator: str) -> dict | None
             e["created_by"] = creator
             e["created_at"] = now
     return entities
-
-
-def _extract_and_merge(article: Article, user_tags: list[str], db: Session) -> None:
-    """Call LLM to extract tags + entities from article content, then merge with
-    user-provided tags and update the article in the database."""
-    llm_tags, entities = extract_tags_and_entities(article.content)
-
-    if llm_tags or entities:
-        merged_tags = list(dict.fromkeys([*user_tags, *llm_tags]))
-        article.tags = json.dumps(merged_tags, ensure_ascii=False)
-        if isinstance(entities, dict) and entities:
-            entities = _annotate_entity_creator(entities, article.created_by or "")
-            article.entities = json.dumps(entities, ensure_ascii=False)
-        db.commit()
-        logger.info(
-            "LLM extraction success for article %s: %d tags, %d entities",
-            article.id, len(llm_tags), len(entities.get("entities", [])) if isinstance(entities, dict) else 0,
-        )
 
 
 @router.get("", response_model=list[ArticleListItem])
@@ -172,30 +154,34 @@ async def _bg_extract(article_id: str, user_tags: list[str], need_title: bool) -
         if not art:
             return
 
-        # Run tag/entity extraction and title generation concurrently
-        extract_task = asyncio.to_thread(extract_tags_and_entities, art.content)
-        title_task = generate_title(art.content) if need_title else None
+        # Run tag/entity extraction（分段提取、逐段落库）and title generation concurrently
+        title_task = asyncio.create_task(generate_title(art.content)) if need_title else None
 
-        if title_task:
-            (llm_tags, entities), generated = await asyncio.gather(
-                extract_task, title_task,
-            )
-        else:
-            llm_tags, entities = await extract_task
+        cur_tags: list[str] = []
+        cur_entities: dict | None = None
+        try:
+            async for seg_tags, seg_entities in extract_chunked_iter(art.content or ""):
+                if seg_tags:
+                    cur_tags = merge_tags(cur_tags, seg_tags)
+                if seg_entities:
+                    cur_entities = merge_entities(cur_entities, seg_entities)
+                # 逐段落库（本任务串行使用 db2，无并发访问）
+                art = db2.query(Article).filter(Article.id == article_id).first()
+                if not art:
+                    return
+                if cur_tags:
+                    merged_tags = list(dict.fromkeys([*user_tags, *cur_tags]))
+                    art.tags = json.dumps(merged_tags, ensure_ascii=False)
+                if cur_entities:
+                    art.entities = json.dumps(
+                        _annotate_entity_creator(cur_entities, art.created_by or ""),
+                        ensure_ascii=False,
+                    )
+                db2.commit()
+        except Exception as e:
+            logger.warning("[BG_EXTRACT] LLM extraction failed: %s", e)
 
-        # Apply tag + entity extraction results
-        if llm_tags or entities:
-            merged_tags = list(dict.fromkeys([*user_tags, *llm_tags]))
-            art.tags = json.dumps(merged_tags, ensure_ascii=False)
-            if isinstance(entities, dict) and entities:
-                entities = _annotate_entity_creator(entities, art.created_by or "")
-                art.entities = json.dumps(entities, ensure_ascii=False)
-            db2.commit()
-            logger.info(
-                "[BG_EXTRACT] article %s: %d tags, %d entities",
-                article_id, len(llm_tags),
-                len(entities.get("entities", [])) if isinstance(entities, dict) else 0,
-            )
+        generated = await title_task if title_task else None
 
         # Apply auto-generated title, or fall back to default
         if need_title:
@@ -340,16 +326,35 @@ async def _bg_attachment_enhance(
             except Exception as e:
                 logger.warning(f"[BG_ATTACH] Media description failed for {uf['filename']}: {e}")
 
-        # Step B: Generate title + extract tags/entities in parallel
-        title_task = generate_title(full_text) if need_title else None
-        extract_task = _asyncio.to_thread(extract_tags_and_entities, full_text)
+        # Step B: Generate title + extract tags/entities（分段提取、逐段落库）
+        title_task = _asyncio.create_task(generate_title(full_text)) if need_title else None
 
-        if title_task:
-            (bg_tags, bg_entities), generated_title = await _asyncio.gather(
-                extract_task, title_task,
-            )
-        else:
-            bg_tags, bg_entities = await extract_task
+        bg_tags: list[str] = []
+        bg_entities: dict | None = None
+        try:
+            async for seg_tags, seg_entities in extract_chunked_iter(full_text):
+                if seg_tags:
+                    bg_tags = merge_tags(bg_tags, seg_tags)
+                if seg_entities:
+                    bg_entities = merge_entities(bg_entities, seg_entities)
+                # 逐段落库（本任务串行使用 db2，无并发访问）
+                art = db2.query(Article).filter(Article.id == article_id).first()
+                if not art:
+                    return
+                if bg_tags:
+                    existing_tags = json.loads(art.tags) if art.tags else []
+                    merged = list(dict.fromkeys([*existing_tags, *bg_tags]))
+                    art.tags = json.dumps(merged, ensure_ascii=False)
+                if bg_entities:
+                    art.entities = json.dumps(
+                        _annotate_entity_creator(bg_entities, art.created_by or ""),
+                        ensure_ascii=False,
+                    )
+                db2.commit()
+        except Exception as e:
+            logger.warning("[BG_ATTACH] LLM extraction failed: %s", e)
+
+        generated_title = await title_task if title_task else None
 
         # Re-fetch article (may have been modified)
         art = db2.query(Article).filter(Article.id == article_id).first()
@@ -362,16 +367,6 @@ async def _bg_attachment_enhance(
                 art.title = generated_title
             elif art.title == "无标题" and uploaded_files:
                 art.title = uploaded_files[0]["filename"]  # fallback to first filename
-
-        # Apply tags + entities
-        if bg_tags or bg_entities:
-            if bg_tags:
-                existing_tags = json.loads(art.tags) if art.tags else []
-                merged = list(dict.fromkeys([*existing_tags, *bg_tags]))
-                art.tags = json.dumps(merged, ensure_ascii=False)
-            if isinstance(bg_entities, dict) and bg_entities:
-                bg_entities = _annotate_entity_creator(bg_entities, art.created_by or "")
-                art.entities = json.dumps(bg_entities, ensure_ascii=False)
 
         # Apply enriched content (media descriptions + document parsing)
         if full_text != (art.content or ""):
