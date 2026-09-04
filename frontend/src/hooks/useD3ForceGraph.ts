@@ -9,6 +9,7 @@ export interface SimNode extends d3.SimulationNodeDatum {
   type: string;
   url: string;
   color: string | null;
+  entity_type?: string | null;
   r?: number;
 }
 
@@ -37,9 +38,9 @@ export function buildTooltipHtml(type: string, label: string, entityType?: strin
 // ── Options ──
 export interface UseD3ForceGraphOptions {
   /** Graph data { nodes, edges } — null/empty means nothing to render */
-  graph: { nodes: { id: string; label: string; type: string; url: string; color: string | null }[]; edges: { source: string; target: string; label: string }[] } | null;
-  /** Map of entity name → type (for rendering entity icons) */
-  entityTypeMap: Map<string, string>;
+  graph: { nodes: { id: string; label: string; type: string; url: string; color: string | null; entity_type?: string | null }[]; edges: { source: string; target: string; label: string }[] } | null;
+  /** Map of entity name → type — 仅作为节点缺失 entity_type 时的回退 */
+  entityTypeMap?: Map<string, string>;
   /** Called when a node is clicked */
   onNodeClick?: (nodeId: string, nodeType: string, label: string, ctrlKey: boolean, clientX?: number, clientY?: number) => void;
   /** Set of selected node IDs for visual highlighting */
@@ -68,7 +69,7 @@ export function useD3ForceGraph(
 ) {
   const {
     graph,
-    entityTypeMap,
+    entityTypeMap = new Map<string, string>(),
     entityInfoMap,
     onNodeClick,
     selectedNodeIds,
@@ -227,7 +228,7 @@ export function useD3ForceGraph(
     nodeGroup
       .on('mouseenter', function (event, d) {
         const rect = container.getBoundingClientRect();
-        let tooltipHtml = buildTooltipHtml(d.type, d.label, entityTypeMap.get(d.label));
+        let tooltipHtml = buildTooltipHtml(d.type, d.label, d.entity_type || entityTypeMap.get(d.label));
         // Append entity additional info for entity nodes
         if (d.type === 'entity') {
           const infos = entityInfoMapRef.current?.get(d.label);
@@ -304,7 +305,7 @@ export function useD3ForceGraph(
     nodeGroup
       .filter((d) => d.type === 'entity')
       .append('text')
-      .text((d) => entityIcon(entityTypeMap.get(d.label)))
+      .text((d) => entityIcon(d.entity_type || entityTypeMap.get(d.label)))
       .attr('text-anchor', 'middle').attr('dy', 5)
       .attr('font-size', 13)
       .attr('font-family', 'var(--font-body)');

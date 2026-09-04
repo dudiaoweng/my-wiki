@@ -69,6 +69,7 @@ class QASource(BaseModel):
     title: str
     excerpt: str
     relevance: float
+    entities: list[dict] = []  # 命中分块的块级实体标注 [{name, type}]
 
 class QAResponse(BaseModel):
     answer: str
@@ -80,7 +81,12 @@ class QAResponse(BaseModel):
 MAX_CHUNK_CHARS = 2000  # Keep chunks within embedding model token limits
 
 def chunk_article(content: str) -> list[str]:
-    """Split article into chunks by markdown headings, then by size."""
+    """Split article into chunks by markdown headings, then by size.
+
+    HTML 注释（doc-attachment / attachments-order 附件标记）是元数据，
+    分块前移除，避免产生无意义噪声块。
+    """
+    content = re.sub(r'<!--.*?-->', '', content)
     # Split by headings but keep the heading text with its content
     sections = re.split(r'\n(?=#{1,3}\s)', content)
     chunks: list[str] = []
@@ -259,10 +265,11 @@ async def ensure_embeddings(db: Session, force: bool = False):
         _embedded_article_count = db.query(Article).count()
 
 
-async def semantic_search(db: Session, question: str, top_k: int = 5) -> list[tuple[float, Article, str]]:
+async def semantic_search(db: Session, question: str, top_k: int = 5) -> list[tuple[float, Article, ArticleChunk | None]]:
     """
     Semantic search using embeddings.
-    Returns list of (score, article, chunk_text).
+    Returns list of (score, article, chunk) — chunk 为命中的分块行（含块级实体标注）；
+    关键词兜底路径无分块行时为 None。
     """
     # Ensure all articles have embeddings
     await ensure_embeddings(db)
@@ -279,7 +286,7 @@ async def semantic_search(db: Session, question: str, top_k: int = 5) -> list[tu
     if not chunks:
         return fallback_keyword_search(db, question, top_k)
 
-    results: list[tuple[float, Article, str]] = []
+    results: list[tuple[float, Article, ArticleChunk]] = []
     seen_articles: set[str] = set()
 
     for chunk in chunks:
@@ -288,25 +295,25 @@ async def semantic_search(db: Session, question: str, top_k: int = 5) -> list[tu
         except (json.JSONDecodeError, TypeError):
             continue
         score = cosine_similarity(q_embedding, vec)
-        results.append((score, chunk.article, chunk.chunk_text))
+        results.append((score, chunk.article, chunk))
 
     # Sort by score descending, take top results per article
     results.sort(key=lambda x: x[0], reverse=True)
-    deduped: list[tuple[float, Article, str]] = []
-    for score, article, text in results:
+    deduped: list[tuple[float, Article, ArticleChunk]] = []
+    for score, article, chunk in results:
         if article.id not in seen_articles:
             seen_articles.add(article.id)
-            deduped.append((score, article, text))
+            deduped.append((score, article, chunk))
         if len(deduped) >= top_k:
             break
 
     return deduped
 
 
-def fallback_keyword_search(db: Session, question: str, top_k: int = 5) -> list[tuple[float, Article, str]]:
+def fallback_keyword_search(db: Session, question: str, top_k: int = 5) -> list[tuple[float, Article, ArticleChunk | None]]:
     """Fallback: simple keyword-based search when embeddings unavailable."""
     articles = db.query(Article).all()
-    results: list[tuple[float, Article, str]] = []
+    results: list[tuple[float, Article, ArticleChunk | None]] = []
 
     # Tokenize: CJK bigrams + English words
     tokens = set()
@@ -325,7 +332,7 @@ def fallback_keyword_search(db: Session, question: str, top_k: int = 5) -> list[
             if t in content_lower:
                 score += 1.0
         if score > 0:
-            results.append((score, a, a.content[:500]))
+            results.append((score, a, None))
 
     results.sort(key=lambda x: x[0], reverse=True)
     return results[:top_k]
@@ -335,6 +342,68 @@ def get_excerpt(content: str, max_len: int = 200) -> str:
     clean = re.sub(r'[#*`>\[\]()!\-|]', ' ', content)
     clean = re.sub(r'\s+', ' ', clean).strip()
     return clean[:max_len] + ('…' if len(clean) > max_len else '')
+
+
+# ─── 向量分块共享助手（提取与 Q&A 检索共用同一套切分） ───
+
+def rebuild_article_chunks(db: Session, article_id: str, content: str) -> list[ArticleChunk]:
+    """删除文章正文分块后按最终内容重建（embedding 由调用方或 ensure_embeddings 补充）。"""
+    db.query(ArticleChunk).filter(
+        ArticleChunk.article_id == article_id,
+        ~ArticleChunk.chunk_index.like("comment.%"),
+    ).delete()
+    rows: list[ArticleChunk] = []
+    for i, text in enumerate(chunk_article(content)):
+        rows.append(ArticleChunk(
+            article_id=article_id, chunk_index=str(i), chunk_text=text, embedding=None,
+        ))
+    db.add_all(rows)
+    db.commit()
+    return rows
+
+
+async def embed_chunk_rows(db: Session, chunks: list[ArticleChunk]) -> None:
+    """对分块逐条计算嵌入（best-effort，失败保留 None）。"""
+    for ch in chunks:
+        try:
+            vec = await get_embedding(ch.chunk_text)
+            ch.embedding = json.dumps(vec)
+        except Exception:
+            logger.warning(
+                "Failed to embed chunk %s of article %s", ch.chunk_index, ch.article_id, exc_info=True,
+            )
+    db.commit()
+
+
+def get_article_chunks(db: Session, article_id: str) -> list[ArticleChunk]:
+    """按序返回文章正文分块行（不含评论分块）——提取与检索共用，支持块级实体标注。"""
+    rows = db.query(ArticleChunk).filter(
+        ArticleChunk.article_id == article_id,
+        ~ArticleChunk.chunk_index.like("comment.%"),
+    ).all()
+    rows.sort(key=lambda c: int(c.chunk_index) if c.chunk_index.isdigit() else 10 ** 9)
+    return rows
+
+
+def get_comment_chunks(db: Session, comment_id: str) -> list[ArticleChunk]:
+    """按序返回评论分块行（chunk_text 带 [评论] 前缀，喂给提取时需剥离）。"""
+    rows = db.query(ArticleChunk).filter(
+        ArticleChunk.chunk_index.like(f"comment.{comment_id[:8]}.%"),
+    ).all()
+    rows.sort(key=lambda c: int(c.chunk_index.rsplit(".", 1)[-1]) if c.chunk_index.rsplit(".", 1)[-1].isdigit() else 10 ** 9)
+    return rows
+
+
+def parse_chunk_entities(chunk: ArticleChunk | None) -> list[dict]:
+    """解析块级实体标注 JSON → [{name, type}] 列表。"""
+    if not chunk or not chunk.entities:
+        return []
+    try:
+        data = json.loads(chunk.entities)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    ents = data.get("entities", []) if isinstance(data, dict) else []
+    return [{"name": e.get("name", ""), "type": e.get("type", "")} for e in ents if e.get("name")]
 
 
 # ─── File parsing for Q&A context ──────────────────
@@ -749,14 +818,15 @@ async def ask_question(body: QARequest, db: Session = Depends(get_db)):
             QASource(
                 article_id=a.id,
                 title=a.title,
-                excerpt=get_excerpt(chunk_text),
+                excerpt=get_excerpt(chunk.chunk_text if chunk else ""),
                 relevance=round(score, 3),
+                entities=parse_chunk_entities(chunk),
             )
-            for score, a, chunk_text in top_chunks
+            for score, a, chunk in top_chunks
             if score >= MIN_RELEVANCE
         ]
         entity_info_text = _collect_entity_info(question, top_chunks, db)
-        relevant_chunks = [(s, a, t) for s, a, t in top_chunks if s >= MIN_RELEVANCE]
+        relevant_chunks = [(s, a, c) for s, a, c in top_chunks if s >= MIN_RELEVANCE]
     else:
         top_chunks = []
         sources = []
@@ -792,7 +862,7 @@ async def ask_question(body: QARequest, db: Session = Depends(get_db)):
 async def call_llm(
     question: str,
     history: list[QAMessage],
-    top_chunks: list[tuple[float, Article, str]],
+    top_chunks: list[tuple[float, Article, ArticleChunk | None]],
     entity_info: str = "",
     file_contexts: list[dict] | None = None,
 ) -> str:
@@ -812,7 +882,8 @@ async def call_llm(
                 fcontent = fc.get("content", "")
                 context_parts.append(f"### [上传文件: {fname}]\n{fcontent[:3000]}\n")
 
-    for score, article, chunk_text in top_chunks:
+    for score, article, chunk in top_chunks:
+        chunk_text = chunk.chunk_text if chunk else (article.content or "")[:500]
         context_parts.append(f"### [{article.title}]\n{chunk_text[:1500]}\n")
 
     context = "\n---\n".join(context_parts)

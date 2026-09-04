@@ -117,28 +117,19 @@ def extract_tags_and_entities(text: str, max_chars: int = 2000) -> tuple[list[st
     return tags, entities
 
 
-async def extract_chunked_iter(text: str, max_chars: int = 2000, max_segments: int = 10):
+async def extract_chunks_iter(segments: list[str], max_chars: int = 2000, max_segments: int = 10):
     """分段提取的异步迭代器：每段完成后立即 yield (tags, entities_dict)。
 
-    调用方可在每段 yield 后立即落库（逐段落库）——后续段失败时已保存的
-    结果不受影响。未配置 API key 或无内容时不产出任何结果。
+    分段列表由调用方提供（向量分块 ArticleChunk），提取与 Q&A 检索共用同一
+    套切分。调用方可在每段 yield 后立即落库（逐段落库）——后续段失败时已
+    保存的结果不受影响。未配置 API key 或无分段时不产出任何结果。
     """
-    text = text.strip()
     if not LLM_API_KEY:
         logger.info("LLM extraction skipped: no LLM_API_KEY configured")
         return
-    if not text:
+    if not segments:
         return
 
-    if len(text) <= max_chars:
-        tags, entities = await asyncio.to_thread(extract_tags_and_entities, text, max_chars)
-        yield tags, entities
-        return
-
-    # 延迟导入避免循环依赖（qa → upload；comments/articles → 本模块）
-    from app.routes.qa import chunk_article
-
-    segments = chunk_article(text)
     if len(segments) > max_segments:
         logger.info(
             "LLM chunked extraction: %d segments, only first %d processed",

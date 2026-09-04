@@ -1,6 +1,6 @@
 # 知识库系统 — 技术文档
 
-> **版本**: 1.9 | **最后更新**: 2026-08-28 | **作者**: dudiaoweng
+> **版本**: 2.0 | **最后更新**: 2026-09-02 | **作者**: dudiaoweng
 
 ---
 
@@ -30,11 +30,11 @@
 - 📄 **文章管理** — 创建、编辑、删除 Markdown 文章，支持分类和标签；仅创建人可编辑/删除
 - 💬 **文章评论** — 评论 CRUD，支持多附件、内容纳入智能问答；仅评论人可编辑/删除
 - 🔐 **权限控制** — 基于身份证号的创建人验证，文章/评论/实体/分类均受保护
-- 📤 **文件上传解析** — 支持 .txt / .md / .docx / .xlsx / .pptx / .pdf / 图片 / 音视频，自动通过 LLM 提取标题、实体和关系
+- 📤 **文件上传解析** — 支持 .txt / .md / .docx / .xlsx / .pptx / .pdf / 图片 / 音视频；文档文本异步提取（读取中→解析中两阶段），自动通过 LLM 提取标题、实体和关系（分段提取、逐段落库）
 - 🔍 **智能搜索** — 基于向量嵌入 (embedding) 的语义搜索 + 关键词降级搜索
 - 🤖 **智能问答 (RAG)** — 检索增强生成，结合知识库文章和实体附加信息回答用户问题
 - 🕸️ **知识图谱** — D3.js 力导向图，展示文章-分类-实体之间的关系网络
-- 🏷️ **实体管理** — LLM 自动提取实体+关系，支持附加信息（类别+内容），用于增强知识图谱和 Q&A 上下文
+- 🏷️ **实体管理** — LLM 自动提取实体+关系（实体以「名称+类型」为标识），支持附加信息（类别+内容），用于增强知识图谱和 Q&A 上下文
 - 📱 **响应式设计** — 桌面端三栏布局，移动端自适应堆叠
 
 ### 1.1 项目结构总览
@@ -302,11 +302,12 @@ my-wiki/
                        │ tags (JSON TEXT)     │       │ chunk_text   │
                        │ entities (JSON TEXT) │       │ embedding    │
                        │ created_at           │       │   (JSON TEXT)│
-                       │ updated_at (IDX)     │       └──────────────┘
-                       │ attachment_path      │
-                       │ attachment_name      │       ┌──────────────┐
-                       │ attachment_type      │       │ EntityInfo   │
-                       └──────────────────────┘       ├──────────────┤
+                       │ updated_at (IDX)     │       │ entities     │
+                       │ attachment_path      │       │   (JSON TEXT)│
+                       │ attachment_name      │       └──────────────┘
+                       │ attachment_type      │       ┌──────────────┐
+                       └──────────────────────┘       │ EntityInfo   │
+                                                      ├──────────────┤
                                                       │ id (PK)      │
                                                       │ entity_name  │
                                                       │   (IDX)      │
@@ -351,13 +352,20 @@ my-wiki/
 {
   "entities": [
     {"name": "机器学习", "type": "concept"},
+    {"name": "机器学习", "type": "技术"},
     {"name": "深度学习", "type": "concept"}
   ],
   "relations": [
-    {"source": "机器学习", "target": "深度学习", "label": "包含"}
+    {
+      "source": "机器学习", "source_type": "concept",
+      "target": "深度学习", "target_type": "concept",
+      "label": "包含"
+    }
   ]
 }
 ```
+
+> **实体身份规则**：实体以「名称+类型」为标识——同名但类型不同是两个不同实体，可同时存在（如「中华人民共和国」地点/组织）。关系两端均携带类型（`source_type` / `target_type`），关系去重键为五元组 `(source, source_type, target, target_type, label)`。
 
 #### `article_chunks` — 文章分块 (用于语义搜索)
 
@@ -367,7 +375,8 @@ my-wiki/
 | `article_id` | VARCHAR(36) | FK→articles, ON DELETE CASCADE, INDEX | 所属文章 |
 | `chunk_index` | VARCHAR | NOT NULL | 分块序号 (如 "0", "1") |
 | `chunk_text` | TEXT | NOT NULL | 分块文本内容 |
-| `embedding` | TEXT | NULLABLE | 向量嵌入 (JSON 浮点数组) |
+| `embedding` | TEXT | NULLABLE | 向量嵌入 (JSON 浮点数组，嵌入失败时为 NULL 但分块行保留) |
+| `entities` | TEXT | NULLABLE | 块级实体标注 (JSON 对象，分段提取时逐段落库) |
 
 #### `entity_infos` — 实体附加信息
 
@@ -536,11 +545,17 @@ my-wiki/
       "article_id": "abc-123",
       "title": "设计模式笔记",
       "excerpt": "观察者模式定义了对象之间的一对多依赖...",
-      "relevance": 0.89
+      "relevance": 0.89,
+      "entities": [
+        {"name": "观察者模式", "type": "concept"},
+        {"name": "GoF", "type": "组织"}
+      ]
     }
   ]
 }
 ```
+
+> `sources[].entities` 取自命中分块的块级实体标注（`article_chunks.entities`，见 §9.9），前端在来源卡片显示实体 chips。
 
 **降级策略:** 如果 LLM API 不可用，使用关键词匹配 (`fallback_keyword_search`) 生成摘要式回答。
 
@@ -566,27 +581,29 @@ my-wiki/
          ▼
 ┌──────────────────┐
 │ 2. 立即显示       │  ← 文本/图片/音频/视频以媒体标签立即显示
-│ (创建文章)        │  ← 标题="正在识别…", processing="processing"
+│ (创建文章)        │  ← 文档: processing="processing:{name}" (读取中)
+│                  │  ← 媒体+AUTO_PARSE: "recognizing:{name}" (解析中)
 └────────┬─────────┘
          │
          ▼
 ┌──────────────────┐
-│ 3. 后台渐进增强    │  ← 文本: LLM 提取标签+实体
-│ (_bg_enhance)     │  ← 图片: 视觉模型生成描述
-│                   │  ← 视频: OpenCV 提取帧 → 视觉模型描述
-│                   │  ← 音频: ffmpeg 转单声道 WAV → ASR 转录
+│ 3. 后台异步任务    │  ← Step A: 文档文本提取 (纯本地解析, 始终执行)
+│ (_bg_enhance)     │     → 文本先落库, processing 转 "recognizing:{name}"
+│                   │  ← Step B: 媒体 LLM 描述 (AUTO_PARSE 控制)
+│                   │     → 图片: 视觉模型 / 视频: OpenCV 帧 / 音频: ASR
+│                   │  ← 重建向量分块 + 嵌入 (文本最终确定后)
 └────────┬─────────┘
          │
          ▼
 ┌──────────────────┐
-│ 4. 标题+标签+     │  ← 标题生成 + 实体提取 (并行)
-│    实体提取       │
+│ 4. 分段 LLM 提取  │  ← 标题生成 + 标签/实体/关系提取 (AUTO_PARSE 控制)
+│ (逐段落库)        │  ← 基于向量分块逐段提取, 每段完成立即落库
 └────────┬─────────┘
          │
          ▼
 ┌──────────────────┐
-│ 5. 内容更新 +     │  ← 更新文章内容 (含错误报告)
-│    嵌入计算       │  ← 内容增强完成后才计算向量嵌入
+│ 5. 合并落库       │  ← 更新文章内容 (含错误报告) + 合并标签/实体
+│    完成清空状态    │  ← processing → None, 前端停止轮询
 └──────────────────┘
 ```
 
@@ -599,7 +616,7 @@ my-wiki/
 |------|------|------|---------|
 | `category:` | category | 文章分类 | 彩色圆点 |
 | `article:` | article | 文章 | 彩色矩形卡片 |
-| `entity:` | entity | LLM 提取的实体 | 带类型表情符号的圆点 |
+| `entity:` | entity | LLM 提取的实体（节点 id = `entity:{名称}::{类型}`） | 图标按类型，标签只显示名称 |
 
 **边类型:**
 | 标签 | 源→目标 | 说明 |
@@ -857,6 +874,7 @@ const notifyArticleSaved = useCallback(() => {
 
 ```python
 def chunk_article(content: str) -> list[str]:
+    # 0. 移除 HTML 注释 (<!-- doc-attachment --> 等附件标记是元数据, 不产生分块)
     # 1. 按 Markdown 标题分割 (##, ###)
     # 2. 长段落按双换行分割
     # 3. 超长段落按单换行分割
@@ -888,12 +906,14 @@ async def ensure_embeddings(db, force=False):
 #### 语义搜索
 
 ```python
-async def semantic_search(db, question, top_k=5):
+async def semantic_search(db, question, top_k=5) -> list[tuple[float, Article, ArticleChunk | None]]:
     # 1. ensure_embeddings(db)  — 增量计算缺失的嵌入 (asyncio.Lock 保护)
     # 2. q_embedding = get_embedding(question)
     # 3. 遍历所有 chunk，计算余弦相似度
     # 4. 按文章去重，取 top_k
     # 5. 所有嵌入计算失败 → fallback_keyword_search
+    # 返回值携带命中的分块行 (chunk) —— QASource.entities 取自该块的块级实体
+    # 标注，前端在来源卡片显示实体 chips；关键词兜底路径 chunk=None
 ```
 
 #### 实体信息增强
@@ -924,7 +944,7 @@ def fallback_keyword_search(db, question, top_k=5):
 
 | 文件类型 | 解析方式 | 备注 |
 |---------|---------|------|
-| `.txt`, `.md`, 代码文件 | 直接 `file.read()` + UTF-8 解码 | 文本类 |
+| `.txt`, `.md`, 代码文件 | 编码检测后解码：BOM（utf-8-sig/utf-16）→ 严格 UTF-8 → 严格 GB18030（GBK/GB2312 超集）→ UTF-8 容错替换 | 文本类（Windows GBK 文件不再乱码） |
 | `.docx` | `python-docx` → 提取段落文本 | Word 文档 |
 | `.xlsx` | `openpyxl` → 遍历所有工作表 | Excel 表格 |
 | `.pptx` | `python-pptx` → 提取幻灯片文本 | PowerPoint |
@@ -962,7 +982,9 @@ def fallback_keyword_search(db, question, top_k=5):
 **节点视觉设计:**
 - `category` — 彩色圆点 (使用分类颜色)
 - `article` — 彩色矩形，显示文章标题 (~160px 宽)
-- `entity` — 圆形，显示类型表情符号 + 实体名
+- `entity` — 圆形，图标按实体类型（人物👤/组织🏢/地点📍/事件⚡/产品📦/作品📄…），标签只显示实体名
+
+**实体节点标识:** 实体以「名称+类型」为标识，节点 id = `entity:{name}::{type}`——同名不同类型（如「中华人民共和国」地点/组织）是两个独立节点；类型经 `entity_type` 字段下发，前端据此渲染图标。旧数据产生的无类型节点（`entity:{name}::`）按名称匹配兜底。
 
 **交互功能:**
 - 缩放/平移 (d3.zoom)
@@ -1010,6 +1032,7 @@ def fallback_keyword_search(db, question, top_k=5):
 - 前端 AttachmentGallery 根据 processing 字段匹配附件，分别显示"读取中…"/"解析中…"遮罩
 - 文章详情页 5 秒轮询，两阶段各自落库后前端即可看到；识别完成清空遮罩并通知刷新
 - **自动解析开关（`AUTO_PARSE`）**：默认关闭（`0`）。控制 LLM 类后台解析（媒体描述、标签/实体/标题提取）。上传接口与评论的文档附件（txt/md/docx/xlsx/pptx/pdf）文本提取为纯本地解析，请求返回后由后台任务异步执行并置 `processing` 标志，不受开关影响；关闭时媒体描述与标签/实体提取跳过，文章编辑器的附件仍保留"待解析"占位符。手动 reprocess 端点不受开关影响
+- **分段 LLM 提取（v2.0）**：标签/实体/关系提取基于向量分块逐段进行——每段最多 2000 字符、最多 10 段；每段完成后立即落库（逐段落库），后续段失败时已保存的结果不受影响。各段结果按「名称+类型」（实体）/ 五元组（关系）去重合并。详见 §9.9
 
 ### 9.8 权限控制体系（v1.3+）
 
@@ -1025,6 +1048,43 @@ def fallback_keyword_search(db, question, top_k=5):
 
 - 前端通过身份证号比对隐藏非创建人的编辑/删除按钮
 - 后端 403 兜底拦截，错误详情区分权限错误与认证错误（认证 403 触发登录跳转，权限 403 仅弹 toast）
+
+### 9.9 分段提取与块级实体标注（v2.0）
+
+**问题背景**：单次 LLM 提取受上下文长度限制（默认截断 2000 字符），长文档后半部分的实体/关系会丢失。
+
+**方案 A — 单一分段来源**：提取与语义搜索共用同一套向量分块（`article_chunks` 表）。上传/评论/附件重解析在提取前统一调用 `rebuild_article_chunks()` 重建分块并嵌入，随后从分块行读取文本逐段提取——不再重复切分逻辑，保证「检索到的块」与「提取用的段」一一对应。
+
+```
+长文本 ──chunk_article──► article_chunks 表 (唯一分段来源)
+                              │
+              ┌───────────────┼────────────────┐
+              ▼               ▼                ▼
+        语义搜索检索      嵌入向量计算      分段 LLM 提取
+        (semantic_search) (embed_chunk_rows) (extract_chunks_iter)
+```
+
+**方案 B — 块级实体标注（逐段落库）**：`article_chunks.entities` 列记录每个分块提取到的实体/关系。提取循环每段完成后立即 `db.commit()`，段级失败不丢失前段结果。
+
+```python
+chunk_rows = get_article_chunks(db2, article_id)
+texts = [r.chunk_text for r in chunk_rows]
+seg_idx = 0
+async for seg_tags, seg_entities in extract_chunks_iter(texts):
+    if seg_entities and seg_idx < len(chunk_rows):
+        chunk_rows[seg_idx].entities = json.dumps(seg_entities, ensure_ascii=False)
+    db2.commit()          # 逐段落库
+    seg_idx += 1
+```
+
+**块级标注的下游应用**：`semantic_search()` 返回命中的分块行，`QASource.entities`（经 `parse_chunk_entities(chunk)` 解析）随检索结果返回前端，QA 回答的来源卡片显示实体 chips（`🏷 实体名`），用户可直观看到检索依据。
+
+**限制与容错**：
+- 每段 ≤ 2000 字符、最多 10 段（超出部分不提取）
+- `merge_tags`（标签按名称去重）/ `merge_entities`（实体按名称+类型、关系按五元组去重）合并各段结果
+- 嵌入失败时分块行保留（`embedding=None`），提取不受影响；检索时走关键词兜底
+- 评论分块以 `comment.{id}.{i}` 索引存储，喂给提取时剥离 `[评论] ` 前缀
+- 文档提取（`extract_chunks_iter`）是异步生成器，调用方需用计数器迭代（`enumerate()` 不支持异步生成器）
 
 ---
 
@@ -1516,4 +1576,4 @@ GET    /api/media/:filename                媒体文件直链
 
 ---
 
-> 📝 本文档由 Claude Code 基于项目源码自动生成，最后更新于 2026-08-28。
+> 📝 本文档由 Claude Code 基于项目源码自动生成，最后更新于 2026-09-02。

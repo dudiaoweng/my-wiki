@@ -27,6 +27,7 @@ class GraphNode(BaseModel):
     type: str  # "article" | "category" | "entity"
     url: str
     color: str | None = None
+    entity_type: str | None = None  # 实体语义类型（人物/组织/地点…），前端据此渲染图标
 
 
 class GraphEdge(BaseModel):
@@ -112,12 +113,13 @@ def get_graph(db: Session = Depends(get_db)):
                 nid = f"entity:{name}::{etype}"
                 if nid not in seen_entity_ids:
                     seen_entity_ids.add(nid)
-                    label = f"{name}（{etype}）" if etype else name
+                    # 标签只显示名称，类型通过 entity_type 字段下发，前端按类型渲染图标
                     nodes.append(GraphNode(
                         id=nid,
-                        label=label,
+                        label=name,
                         type="entity",
                         url=f"/articles?search={name}",
+                        entity_type=etype or None,
                     ))
                 return nid
 

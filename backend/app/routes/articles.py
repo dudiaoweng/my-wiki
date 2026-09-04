@@ -14,7 +14,7 @@ from app.database import SessionLocal
 from app.models import Article, Category, Comment, EntityInfo, utcnow
 from app.schemas import ArticleCreate, ArticleUpdate, ArticleResponse, ArticleListItem, CommentSummary
 from app.auth import get_client_cert, CertInfo
-from app.llm_extract import extract_chunked_iter, merge_tags, merge_entities
+from app.llm_extract import extract_chunks_iter, merge_tags, merge_entities
 from app.config import AUTO_PARSE
 from app.routes.upload import (
     generate_title,
@@ -154,17 +154,29 @@ async def _bg_extract(article_id: str, user_tags: list[str], need_title: bool) -
         if not art:
             return
 
-        # Run tag/entity extraction（分段提取、逐段落库）and title generation concurrently
+        # ── 向量分块先行：提取与 Q&A 检索共用同一套切分 ──
+        from app.routes.qa import rebuild_article_chunks, embed_chunk_rows, get_article_chunks
+        if (art.content or "").strip():
+            chunk_rows = rebuild_article_chunks(db2, article_id, art.content or "")
+            await embed_chunk_rows(db2, chunk_rows)
+
+        # Run tag/entity extraction（基于向量分块逐段提取、逐段落库）and title generation concurrently
         title_task = asyncio.create_task(generate_title(art.content)) if need_title else None
 
         cur_tags: list[str] = []
         cur_entities: dict | None = None
         try:
-            async for seg_tags, seg_entities in extract_chunked_iter(art.content or ""):
+            chunk_rows = get_article_chunks(db2, article_id)
+            texts = [r.chunk_text for r in chunk_rows]
+            seg_idx = 0
+            async for seg_tags, seg_entities in extract_chunks_iter(texts):
                 if seg_tags:
                     cur_tags = merge_tags(cur_tags, seg_tags)
                 if seg_entities:
                     cur_entities = merge_entities(cur_entities, seg_entities)
+                    # 块级实体标注：该段提取结果写入对应分块
+                    if seg_idx < len(chunk_rows):
+                        chunk_rows[seg_idx].entities = json.dumps(seg_entities, ensure_ascii=False)
                 # 逐段落库（本任务串行使用 db2，无并发访问）
                 art = db2.query(Article).filter(Article.id == article_id).first()
                 if not art:
@@ -178,6 +190,7 @@ async def _bg_extract(article_id: str, user_tags: list[str], need_title: bool) -
                         ensure_ascii=False,
                     )
                 db2.commit()
+                seg_idx += 1
         except Exception as e:
             logger.warning("[BG_EXTRACT] LLM extraction failed: %s", e)
 
@@ -326,17 +339,29 @@ async def _bg_attachment_enhance(
             except Exception as e:
                 logger.warning(f"[BG_ATTACH] Media description failed for {uf['filename']}: {e}")
 
-        # Step B: Generate title + extract tags/entities（分段提取、逐段落库）
+        # ── 向量分块先行：提取与 Q&A 检索共用同一套切分 ──
+        from app.routes.qa import rebuild_article_chunks, embed_chunk_rows, get_article_chunks
+        if full_text.strip():
+            chunk_rows = rebuild_article_chunks(db2, article_id, full_text)
+            await embed_chunk_rows(db2, chunk_rows)
+
+        # Step B: Generate title + extract tags/entities（基于向量分块逐段提取、逐段落库）
         title_task = _asyncio.create_task(generate_title(full_text)) if need_title else None
 
         bg_tags: list[str] = []
         bg_entities: dict | None = None
         try:
-            async for seg_tags, seg_entities in extract_chunked_iter(full_text):
+            chunk_rows = get_article_chunks(db2, article_id)
+            texts = [r.chunk_text for r in chunk_rows]
+            seg_idx = 0
+            async for seg_tags, seg_entities in extract_chunks_iter(texts):
                 if seg_tags:
                     bg_tags = merge_tags(bg_tags, seg_tags)
                 if seg_entities:
                     bg_entities = merge_entities(bg_entities, seg_entities)
+                    # 块级实体标注：该段提取结果写入对应分块
+                    if seg_idx < len(chunk_rows):
+                        chunk_rows[seg_idx].entities = json.dumps(seg_entities, ensure_ascii=False)
                 # 逐段落库（本任务串行使用 db2，无并发访问）
                 art = db2.query(Article).filter(Article.id == article_id).first()
                 if not art:
@@ -351,6 +376,7 @@ async def _bg_attachment_enhance(
                         ensure_ascii=False,
                     )
                 db2.commit()
+                seg_idx += 1
         except Exception as e:
             logger.warning("[BG_ATTACH] LLM extraction failed: %s", e)
 

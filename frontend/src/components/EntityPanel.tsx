@@ -27,7 +27,7 @@ interface Props {
   onRefresh?: () => void;
   onGraphNodeClick?: (nodeId: string, nodeType: string, label: string, multi?: boolean) => void;
   selectedGraphNodeIds?: Set<string>;
-  onEntitySelect?: (entityName: string, ctrl: boolean) => void;
+  onEntitySelect?: (entityName: string, entityType: string, ctrl: boolean) => void;
 }
 
 export function EntityPanel({
@@ -67,6 +67,8 @@ export function EntityPanel({
   const [newEntityName, setNewEntityName] = useState('');
   const [newEntityType, setNewEntityType] = useState('人物');
   const [editingEntityName, setEditingEntityName] = useState<string | null>(null);
+  // 同名不同类型视为不同实体，编辑态按 (name, type) 区分
+  const [editingEntityType, setEditingEntityType] = useState<string | null>(null);
   const [editEntityName, setEditEntityName] = useState('');
   const [editEntityType, setEditEntityType] = useState('人物');
   const [entitySearch, setEntitySearch] = useState('');
@@ -107,6 +109,7 @@ export function EntityPanel({
   // ── Entity edit/delete handlers ──
   const handleStartEdit = (entity: EntityInfo) => {
     setEditingEntityName(entity.name);
+    setEditingEntityType(entity.type ?? null);
     setEditEntityName(entity.name);
     setEditEntityType(entity.type || '其他');
   };
@@ -118,6 +121,7 @@ export function EntityPanel({
       await api.updateEntity(editingEntityName, name !== editingEntityName ? name : undefined, editEntityType);
       showToast(`实体「${editingEntityName}」已更新`, 'success');
       setEditingEntityName(null);
+      setEditingEntityType(null);
       refetchGraph();
       onRefresh?.();
     } catch (e: unknown) {
@@ -170,8 +174,8 @@ export function EntityPanel({
   // Toggle entity selection — expand/collapse info panel
   // 同名不同类型视为不同实体：按 (name, type) 区分选中行；附加信息按名字加载（后端以名字为键）
   const handleEntitySelect = useCallback(async (ent: EntityInfo, ctrl = false) => {
-    // Notify parent (ArticleList) for article filtering
-    onEntitySelect?.(ent.name, ctrl);
+    // Notify parent (ArticleList) for article filtering — 传递 (name, type)
+    onEntitySelect?.(ent.name, ent.type ?? '其他', ctrl);
 
     if (selectedEntityName === ent.name && selectedEntityType === (ent.type ?? null)) {
       // Deselect
@@ -367,9 +371,11 @@ export function EntityPanel({
         const rect = graphContainerRef.current?.getBoundingClientRect();
         if (rect) {
           const found = entities.find((e: any) => e.name === label);
+          // 节点 id = entity:{name}::{type} — 类型从 id 解析（同名不同类型是不同节点）
+          const etype = id.startsWith('entity:') ? id.slice('entity:'.length).split('::')[1] || '' : '';
           setGraphPopover({
             entityName: label,
-            entityType: entityTypeMap.get(label) || '其他',
+            entityType: etype || entityTypeMap.get(label) || '其他',
             x: clientX - rect.left,
             y: clientY - rect.top,
             createdBy: found?.created_by || undefined,
@@ -542,8 +548,8 @@ export function EntityPanel({
 
           <div className={styles.list}>
             {filteredEntities.map((ent) => (
-              <div key={ent.name}>
-                {editingEntityName === ent.name ? (
+              <div key={`${ent.name}::${ent.type}`}>
+                {editingEntityName === ent.name && editingEntityType === (ent.type ?? null) ? (
                   /* ── Edit mode ── */
                   <div className={styles.editRow} style={{ marginBottom: 2 }}>
                     <select
@@ -568,7 +574,7 @@ export function EntityPanel({
                       style={{ flex: 1, minWidth: 0 }}
                     />
                     <button className={`${styles.editBtn} ${styles.editBtnSave}`} onClick={handleSaveEdit}>✓</button>
-                    <button className={`${styles.editBtn} ${styles.editBtnCancel}`} onClick={() => setEditingEntityName(null)}>✕</button>
+                    <button className={`${styles.editBtn} ${styles.editBtnCancel}`} onClick={() => { setEditingEntityName(null); setEditingEntityType(null); }}>✕</button>
                   </div>
                 ) : (
                   /* ── Read-only mode ── */

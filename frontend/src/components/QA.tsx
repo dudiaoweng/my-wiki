@@ -224,6 +224,19 @@ export function QA() {
                         >
                           <span className={styles.sourceRelevance}>{Math.round(src.relevance * 100)}%</span>
                           {src.title}
+                          {src.entities && src.entities.length > 0 && (
+                            <span
+                              style={{
+                                display: 'block',
+                                marginTop: 4,
+                                fontSize: 10,
+                                color: 'var(--c-text-muted)',
+                                lineHeight: 1.4,
+                              }}
+                            >
+                              {src.entities.slice(0, 6).map((e) => `🏷 ${e.name}`).join(' · ')}
+                            </span>
+                          )}
                         </button>
                       ))}
                     </div>

@@ -11,10 +11,10 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from app.dependencies import get_db
 from app.database import SessionLocal
-from app.models import Article, Comment, utcnow
+from app.models import Article, ArticleChunk, Comment, utcnow
 from app.schemas import CommentCreate, CommentUpdate, CommentResponse
 from app.auth import get_client_cert, CertInfo
-from app.llm_extract import extract_chunked_iter, merge_tags, merge_entities
+from app.llm_extract import extract_chunks_iter, merge_tags, merge_entities
 from app.config import AUTO_PARSE
 from app.routes.graph import invalidate_graph_cache
 from app.routes.upload import (
@@ -23,7 +23,7 @@ from app.routes.upload import (
     TEXT_EXTENSIONS, WORD_EXTENSIONS, EXCEL_EXTENSIONS, PPT_EXTENSIONS,
     PDF_EXTENSIONS, IMAGE_EXTENSIONS, AUDIO_EXTENSIONS, VIDEO_EXTENSIONS,
 )
-from app.routes.qa import _extract_video_thumbnail
+from app.routes.qa import _extract_video_thumbnail, get_comment_chunks
 from app.utils import read_upload_limited, MAX_UPLOAD_BYTES, delete_uploaded_files
 
 logger = logging.getLogger(__name__)
@@ -160,11 +160,10 @@ def _rebuild_article_entities_from_comments(article: Article, db: Session) -> bo
 # ─── Embedding helper ────────────────────────────────
 
 async def _embed_comment_content(comment, db) -> None:
-    """Create/update ArticleChunk rows for a comment so it appears in Q&A search."""
+    """重建评论向量分块并逐条嵌入（嵌入失败保留 None，分块行仍存在，
+    提取与 Q&A 检索才能读到同一套切分）。"""
     try:
-        from app.models import ArticleChunk
-        from app.routes.qa import chunk_article, get_embedding
-        import json as _json
+        from app.routes.qa import chunk_article, embed_chunk_rows
 
         # Delete old chunks for this comment
         db.query(ArticleChunk).filter(
@@ -175,22 +174,20 @@ async def _embed_comment_content(comment, db) -> None:
         clean = re.sub(r'<!--.*?-->', '', clean)
         clean = re.sub(r'\s+', ' ', clean).strip()
         if not clean:
+            db.commit()
             return
 
-        chunks = chunk_article(clean)
-        for i, chunk_text in enumerate(chunks):
-            idx = f"comment.{comment.id[:8]}.{i}"
-            try:
-                vec = await get_embedding(chunk_text)
-                db.add(ArticleChunk(
-                    article_id=comment.article_id,
-                    chunk_index=idx,
-                    chunk_text=f"[评论] {chunk_text}",
-                    embedding=_json.dumps(vec),
-                ))
-            except Exception:
-                pass
+        rows: list[ArticleChunk] = []
+        for i, chunk_text in enumerate(chunk_article(clean)):
+            rows.append(ArticleChunk(
+                article_id=comment.article_id,
+                chunk_index=f"comment.{comment.id[:8]}.{i}",
+                chunk_text=f"[评论] {chunk_text}",
+                embedding=None,
+            ))
+        db.add_all(rows)
         db.commit()
+        await embed_chunk_rows(db, rows)
     except Exception:
         logger.warning("[EMBED_COMMENT] Failed to embed comment %s", comment.id, exc_info=True)
 
@@ -268,7 +265,7 @@ async def _bg_comment_process(
                 db2.commit()
 
         # Step B: Extract tags + entities（LLM 解析，AUTO_PARSE 控制）
-        # 分段提取，每段完成后立即落库——后续段失败时已保存的结果不受影响
+        # 基于向量分块逐段提取（提取与 Q&A 检索共用同一套切分），每段完成后立即落库
         if need_extract and AUTO_PARSE and full_text.strip():
             comment = db2.query(Comment).filter(Comment.id == comment_id).first()
             if not comment:
@@ -277,11 +274,18 @@ async def _bg_comment_process(
             if not article:
                 return
 
+            # 评论分块不存在时先建（文本提取已完成、内容已定稿）
+            if not get_comment_chunks(db2, comment_id):
+                await _embed_comment_content(comment, db2)
+
             try:
                 cur_tags = json.loads(comment.tags) if comment.tags else []
                 if not isinstance(cur_tags, list):
                     cur_tags = []
-                async for seg_tags, seg_entities in extract_chunked_iter(full_text.strip()):
+                chunk_rows = get_comment_chunks(db2, comment_id)
+                texts = [r.chunk_text.removeprefix("[评论] ") for r in chunk_rows]
+                seg_idx = 0
+                async for seg_tags, seg_entities in extract_chunks_iter(texts):
                     if seg_tags:
                         cur_tags = merge_tags(cur_tags, seg_tags)
                         comment.tags = json.dumps(cur_tags, ensure_ascii=False)
@@ -298,8 +302,12 @@ async def _bg_comment_process(
                             json.dumps(merged_entities, ensure_ascii=False) if merged_entities else None
                         )
                         _merge_entities_into_article(article, seg_entities)
+                        # 块级实体标注：该段提取结果写入对应评论分块
+                        if seg_idx < len(chunk_rows):
+                            chunk_rows[seg_idx].entities = json.dumps(seg_entities, ensure_ascii=False)
                     # 逐段落库
                     db2.commit()
+                    seg_idx += 1
             except Exception as e:
                 logger.warning(f"[BG_COMMENT] LLM extraction failed: {e}")
 
@@ -317,8 +325,7 @@ async def _bg_comment_process(
             comment.processing = None
             db2.commit()
             invalidate_graph_cache()
-            # Embed comment content for Q&A
-            await _embed_comment_content(comment, db2)
+            # 评论分块已在提取前建立（向量分块先行），无需重复嵌入
             logger.info("[BG_COMMENT] comment %s processing complete", comment_id)
         else:
             # 无 LLM 提取（AUTO_PARSE 关闭或无需提取）——仅写入文档提取的文本。

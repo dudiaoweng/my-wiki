@@ -83,21 +83,27 @@ export function ArticleList() {
     setHighlightEntity(null);
   }, []);
 
-  // Handle entity selection
-  const handleEntitySelect = useCallback((entity: string, ctrl: boolean) => {
+  // Handle entity selection — 实体以「名称+类型」为标识，筛选集按 name::type 键存
+  const lastEntityNameRef = useRef<string | null>(null);
+  const handleEntitySelect = useCallback((entity: string, entityType: string, ctrl: boolean) => {
+    const key = `${entity}::${entityType}`;
+    lastEntityNameRef.current = entity;
     setSelectedEntities((prev) => {
       const next = new Set(prev);
       if (ctrl) {
-        if (next.has(entity)) next.delete(entity); else next.add(entity);
+        if (next.has(key)) next.delete(key); else next.add(key);
       } else {
-        if (next.has(entity)) next.delete(entity);
-        else { next.clear(); next.add(entity); }
+        if (next.has(key)) next.delete(key);
+        else { next.clear(); next.add(key); }
       }
       return next;
     });
-    // Toggle entity highlight when viewing an article inline
-    setHighlightEntity((prev) => (prev === entity ? null : entity));
   }, []);
+
+  // 正文高亮按名称（文本无法区分类型）：选中任一类型行即高亮该名称，集合清空才熄灭
+  useEffect(() => {
+    setHighlightEntity(selectedEntities.size > 0 ? lastEntityNameRef.current : null);
+  }, [selectedEntities]);
 
   // Handle knowledge graph node click → toggle selection, filter article list locally
   const handleGraphNodeClick = useCallback(
@@ -140,10 +146,12 @@ export function ArticleList() {
       });
     }
 
-    // Additionally filter by selected entities (matches LLM-extracted entities)
+    // Additionally filter by selected entities — 按 (name, type) 精确匹配
     if (selectedEntities.size > 0) {
       result = result.filter((a) =>
-        a.entities?.entities?.some((e) => selectedEntities.has(e.name))
+        a.entities?.entities?.some((e) =>
+          selectedEntities.has(`${e.name}::${e.type ?? '其他'}`)
+        )
       );
     }
 
@@ -208,13 +216,18 @@ export function ArticleList() {
 
   // Poll only processing articles — update their cards individually
   useEffect(() => {
-    const processing = articles.filter((a) => a.processing === 'processing');
+    // 处理中状态包含三态："processing" / "processing:{safe_name}"（读取中）/
+    // "recognizing:{safe_name}"（解析中）
+    const isBusy = (p?: string | null) => !!p && (p.startsWith('processing') || p.startsWith('recognizing'));
+    const processing = articles.filter((a) => isBusy(a.processing));
     if (processing.length === 0) return;
     const timer = setInterval(async () => {
       const updated = await Promise.allSettled(
         processing.map((a) => api.getArticle(a.id).catch(() => null)),
       );
-      const done = updated.some((r) => r.status === 'fulfilled' && r.value && r.value.processing !== 'processing');
+      const done = updated.some(
+        (r) => r.status === 'fulfilled' && r.value && !isBusy(r.value.processing),
+      );
       if (done) refetch(); // only full refetch when something changed
     }, 5000);
     return () => clearInterval(timer);

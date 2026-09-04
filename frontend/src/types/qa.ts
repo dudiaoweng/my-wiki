@@ -10,6 +10,7 @@ export interface QASource {
   title: string;
   excerpt: string;
   relevance: number;
+  entities?: { name: string; type: string }[];
 }
 
 export interface FileContext {

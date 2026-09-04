@@ -87,6 +87,7 @@ class ArticleChunk(Base):
     chunk_index = Column(String, nullable=False)  # e.g. "0", "1", "1.2"
     chunk_text = Column(Text, nullable=False)
     embedding = Column(Text, nullable=True)  # JSON array of floats
+    entities = Column(Text, nullable=True)  # JSON：该块提取到的实体/关系（块级标注）
 
     article = relationship("Article", back_populates="chunks")
 

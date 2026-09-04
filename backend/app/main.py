@@ -149,7 +149,8 @@ def seed_database():
             for cat in DEFAULT_CATEGORIES:
                 db.merge(Category(**cat))
             db.commit()
-        if db.query(Article).count() == 0:
+        # 示例文章种子 — SEED_SAMPLE_ARTICLES=0 时跳过（清空数据后保持空库）
+        if os.getenv("SEED_SAMPLE_ARTICLES", "1") == "1" and db.query(Article).count() == 0:
             for art in DEFAULT_ARTICLES:
                 db.merge(Article(
                     id=art["id"], title=art["title"], content=art["content"],

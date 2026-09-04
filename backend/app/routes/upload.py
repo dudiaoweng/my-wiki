@@ -20,7 +20,7 @@ from app.config import (
     AUTO_PARSE,
 )
 from app.utils import find_ffmpeg, read_upload_limited, MAX_UPLOAD_BYTES
-from app.llm_extract import extract_chunked_iter, merge_tags, merge_entities
+from app.llm_extract import extract_chunks_iter, merge_tags, merge_entities
 from app.prompts import IMAGE_DESCRIPTION, VIDEO_DESCRIPTION, GENERATE_TITLE
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
@@ -726,15 +726,27 @@ async def upload_file(
                     desc = await parse_media(audio_bytes, file.filename, file.content_type or "")
                     full_text = raw_text + "\n\n" + desc
 
-            # Step C: 标签/实体提取（LLM，AUTO_PARSE 控制）——分段提取、逐段落库
+            # ── 向量分块先行：提取与 Q&A 检索共用同一套切分 ──
+            from app.routes.qa import rebuild_article_chunks, embed_chunk_rows, get_article_chunks
+            if full_text.strip():
+                chunk_rows = rebuild_article_chunks(db2, article_id, full_text)
+                await embed_chunk_rows(db2, chunk_rows)
+
+            # Step C: 标签/实体提取（LLM，AUTO_PARSE 控制）——基于向量分块逐段提取、逐段落库
             bg_tags, bg_entities = [], None
             if AUTO_PARSE:
                 try:
-                    async for seg_tags, seg_entities in extract_chunked_iter(full_text):
+                    chunk_rows = get_article_chunks(db2, article_id)
+                    texts = [r.chunk_text for r in chunk_rows]
+                    seg_idx = 0
+                    async for seg_tags, seg_entities in extract_chunks_iter(texts):
                         if seg_tags:
                             bg_tags = merge_tags(bg_tags, seg_tags)
                         if seg_entities:
                             bg_entities = merge_entities(bg_entities, seg_entities)
+                            # 块级实体标注：该段提取结果写入对应分块
+                            if seg_idx < len(chunk_rows):
+                                chunk_rows[seg_idx].entities = json.dumps(seg_entities, ensure_ascii=False)
                         # 逐段落库（本任务串行使用 db2，无并发访问）
                         art = db2.query(Article).filter(Article.id == article_id).first()
                         if not art:
@@ -744,6 +756,7 @@ async def upload_file(
                         if bg_entities:
                             art.entities = json.dumps(bg_entities, ensure_ascii=False)
                         db2.commit()
+                        seg_idx += 1
                 except Exception as e:
                     logger.warning(f"[UPLOAD] LLM extraction failed: {e}")
 
@@ -777,27 +790,7 @@ async def upload_file(
 
             art.processing = None  # mark as done
 
-            # Compute embeddings now that content has been enriched by LLM recognition
-            try:
-                from app.routes.qa import chunk_article, get_embedding
-                from app.models import ArticleChunk
-
-                chunks = chunk_article(art.content or "")
-                for i, chunk_text in enumerate(chunks):
-                    try:
-                        vec = await get_embedding(chunk_text)
-                        db2.add(ArticleChunk(
-                            article_id=art.id,
-                            chunk_index=str(i),
-                            chunk_text=chunk_text,
-                            embedding=json.dumps(vec),
-                        ))
-                    except Exception as embed_err:
-                        logger.warning(f"[UPLOAD] Embedding chunk {i} failed: {embed_err}")
-                logger.info(f"[UPLOAD] Indexed {len(chunks)} chunks for article {art.id}")
-            except Exception as re_idx_err:
-                logger.warning(f"[UPLOAD] Indexing failed (best-effort): {re_idx_err}")
-
+            # 分块与嵌入已在提取前完成（向量分块先行），此处仅提交识别结果
             db2.commit()
             logger.info(f"[UPLOAD] Enhanced: title={art.title!r} tags={bg_tags} errors={errs}")
         except Exception as e:

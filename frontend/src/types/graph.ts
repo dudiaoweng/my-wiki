@@ -4,6 +4,7 @@ export interface GraphNode {
   type: 'article' | 'category' | 'entity';
   url: string;
   color: string | null;
+  entity_type: string | null;
 }
 
 export interface GraphEdge {
