@@ -8,7 +8,7 @@ import json
 import logging
 import re
 
-from app.config import LLM_API_KEY, LLM_API_BASE, LLM_MODEL
+from app.config import LLM_API_KEY, LLM_API_BASE, LLM_MODEL, LLM_TIMEOUT
 from app.prompts import EXTRACT_TAGS_ENTITIES
 
 logger = logging.getLogger(__name__)
@@ -18,7 +18,7 @@ def extract_tags_and_entities(text: str, max_chars: int = 2000) -> tuple[list[st
     """Call LLM to extract tags + entities + relations from text.
 
     Returns (tags_list, entities_dict_or_none).
-    Uses synchronous httpx with 60s timeout, 2 retries, and JSON fallback parsing.
+    Uses synchronous httpx with LLM_TIMEOUT timeout, 2 retries, and JSON fallback parsing.
     Returns empty results on any failure (best-effort).
     """
     if not LLM_API_KEY:
@@ -33,7 +33,7 @@ def extract_tags_and_entities(text: str, max_chars: int = 2000) -> tuple[list[st
     raw_response = None
     for attempt in range(3):  # 3 attempts = 2 retries
         try:
-            with httpx.Client(timeout=60.0) as client:
+            with httpx.Client(timeout=LLM_TIMEOUT) as client:
                 resp = client.post(
                     f"{LLM_API_BASE.rstrip('/')}/chat/completions",
                     headers={

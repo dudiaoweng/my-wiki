@@ -22,8 +22,10 @@ build/
 certs/*.key
 certs/*.p12
 certs/*.crt
+certs/*.cer
 certs/*.csr
 certs/*.jks
+certs/*.bak-*
 certs/client*.conf
 certs/tmp_*.cnf
 certs/verify_output.txt

@@ -334,8 +334,8 @@ async def _bg_attachment_enhance(
                 elif ext in AUDIO_EXTENSIONS:
                     with open(uf["storage_path"], "rb") as f:
                         audio_bytes = f.read()
-                    desc = await parse_media(audio_bytes, uf["filename"], uf["content_type"])
-                    full_text = full_text + "\n\n" + desc if full_text else desc
+                    desc = await parse_media(audio_bytes, uf["filename"], uf["content_type"], storage_name)
+                    full_text = _replace_media_placeholder(full_text, storage_name, desc)
             except Exception as e:
                 logger.warning(f"[BG_ATTACH] Media description failed for {uf['filename']}: {e}")
 
@@ -905,8 +905,8 @@ async def reprocess_article(
     if article.created_by != user_cn:
         raise HTTPException(status_code=403, detail="只有文章创建人可以重新解析")
 
-    if article.processing == "processing":
-        raise HTTPException(status_code=409, detail="文章正在解析中，请稍候")
+    if article.processing:
+        raise HTTPException(status_code=409, detail="文章正在处理中，请稍候")
 
     # Rebuild uploaded_files list from attachment markers in content
     uploaded_files: list[dict] = []
@@ -965,8 +965,8 @@ async def reprocess_single_attachment(
     if article.created_by != user_cn:
         raise HTTPException(status_code=403, detail="只有文章创建人可以重新解析")
 
-    if article.processing == "processing":
-        raise HTTPException(status_code=409, detail="文章正在解析中，请稍候")
+    if article.processing:
+        raise HTTPException(status_code=409, detail="文章正在处理中，请稍候")
 
     # Validate safe_name to prevent path traversal
     if "/" in safe_name or "\\" in safe_name or ".." in safe_name:
@@ -991,6 +991,44 @@ async def reprocess_single_attachment(
         [{"filename": original_name, "content_type": "", "storage_path": str(storage_path)}],
         need_title=False,
     ))
+    return article
+
+
+@router.post("/{article_id}/recognize", response_model=ArticleResponse)
+async def recognize_article(
+    article_id: str = PathParam(..., max_length=36),
+    db: Session = Depends(get_db),
+    cert: CertInfo = Depends(get_client_cert),
+):
+    """对文章当前文本内容重新解析：重建分块/嵌入并重新提取标签/实体（creator only）。
+
+    与 reprocess（重新解析原始附件文件）不同，本接口不触碰附件，
+    基于正文当前文本重新执行向量分块与 LLM 提取——适合解析失败后重试、
+    手动编辑正文后更新标签/实体等场景。已有用户标签保留，新提取标签合并；
+    实体/关系以新提取结果覆盖。
+    """
+    _validate_article_id(article_id)
+    article = db.query(Article).filter(Article.id == article_id).first()
+    if not article:
+        raise HTTPException(status_code=404, detail="Article not found")
+
+    user_cn = cert.display_name or ""
+    if article.created_by != user_cn:
+        raise HTTPException(status_code=403, detail="只有文章创建人可以重新解析")
+
+    if article.processing:
+        raise HTTPException(status_code=409, detail="文章正在处理中，请稍候")
+
+    if not (article.content or "").strip():
+        raise HTTPException(status_code=400, detail="文章没有文本内容，无法识别")
+
+    # 保留用户已有标签（_bg_extract 会与提取结果合并）
+    existing_tags = json.loads(article.tags) if article.tags else []
+
+    article.processing = "recognizing"
+    db.commit()
+
+    asyncio.create_task(_bg_extract(article.id, existing_tags, need_title=False))
     return article
 
 

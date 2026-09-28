@@ -1,4 +1,5 @@
 import asyncio
+import html
 import json
 import logging
 import math
@@ -19,6 +20,7 @@ from app.config import (
     ASR_API_KEY, ASR_API_BASE, ASR_MODEL,
     EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL,
     QA_TEMPERATURE,
+    LLM_TIMEOUT, VISION_TIMEOUT, ASR_TIMEOUT, EMBEDDING_TIMEOUT, FFMPEG_TIMEOUT,
     UPLOAD_DIR as UPLOAD_DIR_STR,
 )
 from app.utils import find_ffmpeg, read_upload_limited
@@ -153,7 +155,7 @@ async def get_embedding(text: str) -> list[float]:
     # Truncate to avoid exceeding model token limits
     text = text[:2000]
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=EMBEDDING_TIMEOUT) as client:
         resp = await client.post(
             f"{EMBEDDING_API_BASE.rstrip('/')}/embeddings",
             headers={
@@ -167,6 +169,13 @@ async def get_embedding(text: str) -> list[float]:
         )
         resp.raise_for_status()
         data = resp.json()
+        # llama.cpp b10775 路由版返回原生格式 [{"index":0,"embedding":[[...]]}]，
+        # 与 OpenAI 的 {"data":[{"embedding":[...]}]} 不同，两种都兼容
+        if isinstance(data, list):
+            emb = data[0]["embedding"]
+            if emb and isinstance(emb[0], list):
+                emb = emb[0]  # 单输入时向量多套了一层
+            return emb
         return data["data"][0]["embedding"]
 
 
@@ -464,7 +473,7 @@ async def parse_audio_for_qa(content_bytes: bytes, filename: str) -> str:
         try:
             result = subprocess.run(
                 [ffmpeg_path, '-i', 'pipe:0', '-ac', '1', '-ar', '16000', '-f', 'wav', 'pipe:1'],
-                input=content_bytes, capture_output=True, timeout=60,
+                input=content_bytes, capture_output=True, timeout=FFMPEG_TIMEOUT,
             )
             if result.returncode != 0:
                 return f"[音频转换失败：ffmpeg 无法解码此文件]"
@@ -476,7 +485,7 @@ async def parse_audio_for_qa(content_bytes: bytes, filename: str) -> str:
     if not ASR_API_KEY:
         return "[音频识别失败：未配置语音识别模型 API。]"
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=ASR_TIMEOUT) as client:
             resp = await client.post(
                 f"{ASR_API_BASE.rstrip('/').replace('/chat/completions', '')}/audio/transcriptions",
                 headers={"Authorization": f"Bearer {ASR_API_KEY}"},
@@ -579,7 +588,7 @@ async def parse_video_for_qa(content_bytes: bytes, filename: str) -> str:
         })
 
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=VISION_TIMEOUT) as client:
             resp = await client.post(
                 f"{VISION_API_BASE.rstrip('/')}/chat/completions",
                 headers={
@@ -875,7 +884,7 @@ async def call_llm(
     # Separate text files from image files
     if file_contexts:
         for fc in file_contexts:
-            fname = fc.get("filename", "文件")
+            fname = html.escape(str(fc.get("filename", "文件")))
             if fc.get("is_image"):
                 image_contexts.append(fc)
             else:
@@ -936,7 +945,7 @@ async def call_llm(
     api_base = VISION_API_BASE if image_contexts else LLM_API_BASE
     api_key = VISION_API_KEY if image_contexts else LLM_API_KEY
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=LLM_TIMEOUT) as client:
         resp = await client.post(
             f"{api_base.rstrip('/')}/chat/completions",
             headers={
@@ -1022,7 +1031,7 @@ def build_fallback_answer(question: str, sources: list[QASource], entity_info: s
     if file_contexts:
         lines.append("以下是与上传文件相关的内容：\n")
         for fc in file_contexts:
-            fname = fc.get("filename", "文件")
+            fname = html.escape(str(fc.get("filename", "文件")))
             if fc.get("is_image"):
                 lines.append(f"**📎 {fname}** (图片，已传递给视觉模型)\n")
             else:

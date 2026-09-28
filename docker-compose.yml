@@ -12,6 +12,7 @@ services:
       - ./certs:/certs:ro
       # 环境变量文件挂载（已 gitignore；模板见 .env.example）
       # 后端启动时 load_dotenv() 读取 /app/.env —— 修改后 docker compose restart 即生效
+      # 模型参数（API_BASE/MODEL/KEY）统一在 .env 中配置，此处不做任何覆盖
       - ./.env:/app/.env:ro
     restart: unless-stopped
 

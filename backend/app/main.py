@@ -29,7 +29,7 @@ from app.database import init_db, SessionLocal
 from app.models import Category, Article, Comment
 from app.routes import articles, categories, tags, entities, stats, graph, qa, upload, comments
 from app.config import UPLOAD_DIR as UPLOAD_DIR_STR
-from app.auth import verify_client_cert, get_client_cert, CertInfo
+from app.auth import verify_client_cert, get_client_cert, verify_client_cert_pem, CertInfo
 
 logger = logging.getLogger(__name__)
 
@@ -85,12 +85,17 @@ class MediaAuthMiddleware:
         if scope["type"] == "http" and scope.get("path", "").startswith(("/api/media/", "/uploads")):
             transport = scope.get("_transport")
             peercert = transport.get_extra_info("peercert") if transport is not None else None
-            # nginx 转发的客户端证书头（未出示证书时为空，仍拒绝）
+            # nginx 转发的客户端证书头：未出示时为空；出示了也要先验证签名
+            # （nginx optional_no_ca 不验 CA，伪造证书在此拦截）
+            from urllib.parse import unquote
             client_cert = next(
                 (v for k, v in scope.get("headers", []) if k == b"x-client-cert"),
                 b"",
             )
-            if not peercert and not client_cert.strip():
+            header_verified = bool(client_cert.strip()) and verify_client_cert_pem(
+                unquote(client_cert.decode("utf-8", "replace"))
+            )
+            if not peercert and not header_verified:
                 response = JSONResponse(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     content={"detail": "Client certificate is required"},
@@ -301,11 +306,19 @@ def serve_media(filename: str, download: bool = False):
         raise HTTPException(status_code=403, detail="Forbidden")
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
-    headers = {}
+    headers = {"X-Content-Type-Options": "nosniff"}
+    ext = file_path.suffix.lower()
     if download:
         import urllib.parse
         encoded = urllib.parse.quote(filename.split('_', 1)[-1] if '_' in filename else filename)
         headers["Content-Disposition"] = f'attachment; filename*=UTF-8\'\'{encoded}'
+    elif ext not in _INLINE_EXTS:
+        # 非媒体类型（html/txt 等）：强制下载，防止直开渲染时执行内嵌脚本
+        headers["Content-Disposition"] = "attachment"
+    elif ext == ".svg":
+        # SVG 可内嵌脚本：保持 inline 展示（<img> 嵌入不执行脚本），
+        # 但直开导航时用 CSP sandbox 禁掉脚本执行
+        headers["Content-Security-Policy"] = "sandbox"
     return FileResponse(str(file_path), headers=headers)
 
 # Production mode: serve built frontend over HTTPS + mTLS

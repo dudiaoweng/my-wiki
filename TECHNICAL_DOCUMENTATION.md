@@ -55,7 +55,7 @@ my-wiki/
 │       ├── models.py            # ORM 模型 (Category, Article, ArticleChunk, EntityInfo, Comment)
 │       ├── schemas.py           # Pydantic 请求/响应模型
 │       ├── config.py            # 集中化配置：LLM/Vision/ASR/Embedding/QA/TLS (环境变量)
-│       ├── auth.py              # mTLS 身份解析：peercert 直连模式 + nginx X-Client-Cert 头模式
+│       ├── auth.py              # mTLS 身份：签名验证 (openssl verify) + CN 解析（peercert 直连 / nginx X-Client-Cert 头双模式）
 │       ├── prompts.py           # 所有 LLM 提示词模板
 │       ├── llm_extract.py       # 共享 LLM 标签+实体提取 (统一超时/重试/容错)
 │       ├── utils.py             # 共享工具函数 (find_ffmpeg 等)
@@ -206,6 +206,7 @@ my-wiki/
 
 > 任何兼容 OpenAI API 格式的服务均可替换使用。未配置独立密钥时自动回退到 LLM 配置。
 > 所有配置统一在 `app/config.py` 中管理，各模块通过 `from app.config import ...` 引用。
+> **模型参数统一在仓库根目录 `.env` 配置**（docker-compose 不做覆盖）。项目当前默认智谱云端（open.bigmodel.cn）；备选本地 llama-server（`http://host.docker.internal:8080`，容器部署）在 `.env` 中以注释形式给出，ASR/Embedding 的本地模型坑见 §9.1 / §9.3。
 
 ---
 
@@ -234,7 +235,7 @@ my-wiki/
     ▼                      ▼
 ┌───────────────────────────────────────────────────────────┐
 │               nginx 反向代理 (nginx:1.25)                  │
-│  ②  TLS 终止 (server.crt) + 请求客户端证书但不验证链        │
+│  ②  TLS 终止 (server.crt) + 请求客户端证书不验证（后端验签） │
 │     证书 PEM → X-Client-Cert 头 (URL 转义) → :8444 HTTP    │
 └───────────────────────────┬───────────────────────────────┘
                             │  (仅 ② 经 nginx，① 直连后端)
@@ -431,10 +432,13 @@ my-wiki/
 | | | `/{id}/download` | GET | 下载附件 |
 | | | `/{id}/reprocess` | POST | 重新解析全部附件 |
 | | | `/{id}/reprocess/{safe_name}` | POST | 重新解析单个附件 |
+| | | `/{id}/recognize` | POST | 重新解析文章文本内容（标签/实体、检索索引） |
 | `/api/articles/{article_id}/comments` | `routes/comments.py` | `/` | GET | 评论列表 |
 | | | `/` | POST | 创建评论 (支持附件) |
 | | | `/{comment_id}` | PUT | 更新评论 |
 | | | `/{comment_id}` | DELETE | 删除评论 |
+| | | `/{comment_id}/reprocess` | POST | 重新解析评论内容（只针对内容） |
+| | | `/{comment_id}/reprocess/{safe_name}` | POST | 重新解析评论单个附件（只针对该附件） |
 | `/api/categories` | `routes/categories.py` | `/` | GET | 分类列表 |
 | | | `/` | POST | 创建分类 |
 | | | `/{id}` | PUT | 更新分类 |
@@ -887,10 +891,12 @@ def chunk_article(content: str) -> list[str]:
 ```python
 async def get_embedding(text: str) -> list[float]:
     # POST {base}/embeddings
-    # 模型: embedding-3
+    # 模型: embedding-3（云端）/ bge-m3-Q4_K_M（本地 llama-server）
     # 文本截断 2000 字符
     # 返回浮点向量
 ```
+
+**响应格式兼容**（v2.1）：云端返回 OpenAI 格式 `{"data": [{"embedding": [...]}]}`；本地 llama.cpp b10775 路由版返回原生格式 `[{"index": 0, "embedding": [[...]]}]`（顶层数组 + 向量多套一层）。`get_embedding` 两种格式都解析。**注意**：本地 bge-m3 子进程默认 `ubatch-size=512`，长分块（>500 token）会报 `input is too large to process` 500 —— preset 里需配 `ubatch-size = 2048`（`batch-size` 是逻辑批，配了没用）。
 
 #### 嵌入管理
 
@@ -960,6 +966,19 @@ def fallback_keyword_search(db, question, top_k=5):
 3. **转换后**: 调用 ASR API (`/audio/transcriptions` 端点) 获取转录文本
 4. **错误处理**: 转换失败或识别失败时，错误信息写入文章内容供用户查看
 
+**模型选择**（`.env` 统一配置）：
+
+| 场景 | ASR_API_BASE / ASR_MODEL | 备注 |
+|------|--------------------------|------|
+| 云端 | `https://open.bigmodel.cn/api/paas/v4` / `GLM-ASR-2512` | 当前默认 |
+| 本地 llama-server | `http://host.docker.internal:8080`（容器）/ `localhost:8080`（本地开发）/ `Qwen3-ASR-1.7B-Q4_K_M` | 需 preset 挂 mmproj（见下） |
+
+**本地 Qwen3-ASR 的坑（2026-09 实测）**：
+
+- **mmproj 必须经 preset INI 挂载**：b10775 路由器不自动识别 `mmproj-` 前缀，没挂时 `/v1/models` 显示 `input_modalities: ["text"]`，`/audio/transcriptions` 返回 501 "The current model does not support audio input"。挂上后变为 `["text","audio"]` 即正常
+- **输出带前缀噪音**：转录文本形如 `language Chinese<asr_text>正文…`，后端已循环剥离 `language <语种>` 与 `<...>` 标记
+- **替换式写入（v2.1）**：`parse_media` 返回带 `<audio>` 标签的完整描述，调用方（upload/articles）用 `_replace_media_placeholder` 替换占位标签行——多次 reprocess 不再在正文中堆叠旧转录段
+
 ### 9.4 视频处理详解
 
 1. 使用 OpenCV (`cv2`) 打开视频文件
@@ -1023,28 +1042,38 @@ def fallback_keyword_search(db, question, top_k=5):
 
 两个区域通过 `flex: 1 1 0%` 等分可用高度。
 
-### 9.7 附件手动重新解析（v1.4）
+### 9.7 手动重新解析体系（v1.4+）
 
-- 每个附件缩略图左下角 🔄 按钮（hover 显示，仅文章创建人）
-- 单文件解析：`POST /api/articles/{id}/reprocess/{safe_name}`
-- 全量解析：`POST /api/articles/{id}/reprocess`
-- 解析状态追踪：`processing` 字段两阶段——`"processing:{safe_name}"`（读取中：文本提取）→ `"recognizing:{safe_name}"`（解析中：LLM 识别，评论用 `"recognizing"`）→ 完成清空。文档上传后文本提取与识别结果分两步落库
-- 前端 AttachmentGallery 根据 processing 字段匹配附件，分别显示"读取中…"/"解析中…"遮罩
-- 文章详情页 5 秒轮询，两阶段各自落库后前端即可看到；识别完成清空遮罩并通知刷新
-- **自动解析开关（`AUTO_PARSE`）**：默认关闭（`0`）。控制 LLM 类后台解析（媒体描述、标签/实体/标题提取）。上传接口与评论的文档附件（txt/md/docx/xlsx/pptx/pdf）文本提取为纯本地解析，请求返回后由后台任务异步执行并置 `processing` 标志，不受开关影响；关闭时媒体描述与标签/实体提取跳过，文章编辑器的附件仍保留"待解析"占位符。手动 reprocess 端点不受开关影响
+手动重新解析按「层面（文章/评论）× 目标（内容/附件）」划分，各入口语义独立：
+
+| 层面 | 入口 | 端点 | 行为 |
+|------|------|------|------|
+| 文章内容 | 详情页 🧠 重新解析（仅创建人，处理中灰显） | `POST /api/articles/{id}/recognize` | 重建分块/嵌入 + 重新提取标签/实体（用户标签保留合并，实体按新结果覆盖）。**不触碰附件** |
+| 文章附件 | 附件卡片 🔄（仅创建人） | `POST /api/articles/{id}/reprocess/{safe_name}` | 重新解析该附件（媒体替换式写入）并重新提取标签/实体 |
+| 文章全部附件 | 仅 API | `POST /api/articles/{id}/reprocess` | 重新解析全部附件并重新提取标签/实体 |
+| 评论内容 | 评论操作区 🧠（评论人或文章创建人） | `POST /api/articles/{id}/comments/{cid}/reprocess` | **只针对内容**：重建评论分块/嵌入 + 重新提取标签/实体。不触碰附件 |
+| 评论附件 | 附件卡片 🔄（评论人或文章创建人） | `POST /api/articles/{id}/comments/{cid}/reprocess/{safe_name}` | **只针对该附件**：重新解析并替换写入正文，随后重建评论分块/嵌入。不重新提取标签/实体 |
+
+实现要点：
+
+- **评论内容重解析**（`_bg_comment_reextract`）：旧实体贡献先从文章实体中扣除（`_subtract_comment_from_article`），再合并新提取结果，避免实体重复累计；评论自身已有标签保留合并
+- **评论附件重解析**（`_bg_comment_attachment_reprocess`）：媒体用替换式写入（`_replace_media_tag_with_desc` 替换含该文件的媒体标签行并清理同名重复标签，避免旧描述堆积）；文档仅当占位符仍在时替换。正文变化后重建评论分块 + 嵌入，保持 Q&A 检索索引新鲜。端点校验 `safe_name` 属于该评论（含 legacy 单附件字段），防止把不属于该评论的文件解析进正文
+- 解析状态追踪：`processing` 字段两阶段——`"processing:{safe_name}"`（读取中：文本提取）→ `"recognizing"`/`"recognizing:{safe_name}"`（解析中：LLM 识别）→ 完成清空。文档上传后文本提取与识别结果分两步落库
+- 前端 AttachmentGallery 根据 processing 字段匹配附件，分别显示"读取中…"/"解析中…"遮罩；文章详情页与评论列表各 5 秒轮询，两阶段各自落库后前端即可看到；识别完成清空遮罩并通知刷新
+- **自动解析开关（`AUTO_PARSE`）**：默认关闭（`0`）。控制 LLM 类后台解析（媒体描述、标签/实体/标题提取）。上传接口与评论的文档附件（txt/md/docx/xlsx/pptx/pdf）文本提取为纯本地解析，请求返回后由后台任务异步执行并置 `processing` 标志，不受开关影响；关闭时媒体描述与标签/实体提取跳过，文章编辑器的附件仍保留"待解析"占位符。手动 reprocess/recognize 端点不受开关影响
 - **分段 LLM 提取（v2.0）**：标签/实体/关系提取基于向量分块逐段进行——每段最多 2000 字符、最多 10 段；每段完成后立即落库（逐段落库），后续段失败时已保存的结果不受影响。各段结果按「名称+类型」（实体）/ 五元组（关系）去重合并。详见 §9.9
 
 ### 9.8 权限控制体系（v1.3+）
 
 所有创建人判断基于 mTLS 证书 CN 中的 18 位身份证号：
 
-| 资源 | 创建人记录 | 修改权限 | 删除权限 |
-|------|-----------|---------|---------|
-| 文章 | created_by | 仅创建人 | 仅创建人 |
-| 评论 | created_by | 仅评论人 | 评论人或文章创建人 |
-| 实体 | entities JSON 中的 created_by | 实体创建人或文章创建人 | 同左 |
-| 实体附加信息 | EntityInfo.created_by | 仅创建人 | 仅创建人 |
-| 分类 | created_by | 仅创建人 | 仅创建人 |
+| 资源 | 创建人记录 | 修改权限 | 删除权限 | 重新解析权限 |
+|------|-----------|---------|---------|------------|
+| 文章 | created_by | 仅创建人 | 仅创建人 | 仅创建人 |
+| 评论 | created_by | 仅评论人 | 评论人或文章创建人 | 评论人或文章创建人 |
+| 实体 | entities JSON 中的 created_by | 实体创建人或文章创建人 | 同左 | — |
+| 实体附加信息 | EntityInfo.created_by | 仅创建人 | 仅创建人 | — |
+| 分类 | created_by | 仅创建人 | 仅创建人 | — |
 
 - 前端通过身份证号比对隐藏非创建人的编辑/删除按钮
 - 后端 403 兜底拦截，错误详情区分权限错误与认证错误（认证 403 触发登录跳转，权限 403 仅弹 toast）
@@ -1085,6 +1114,19 @@ async for seg_tags, seg_entities in extract_chunks_iter(texts):
 - 嵌入失败时分块行保留（`embedding=None`），提取不受影响；检索时走关键词兜底
 - 评论分块以 `comment.{id}.{i}` 索引存储，喂给提取时剥离 `[评论] ` 前缀
 - 文档提取（`extract_chunks_iter`）是异步生成器，调用方需用计数器迭代（`enumerate()` 不支持异步生成器）
+
+### 9.10 安全加固（v2.1）
+
+2026-09 全面审查后修复的安全问题（详见代码注释）：
+
+| 修复 | 位置 | 说明 |
+|------|------|------|
+| **证书签名验证** | `auth.py` `verify_client_cert_pem` + `main.py` MediaAuthMiddleware | 此前 `X-Client-Cert` 头的 CN 被无条件信任，任意自签证书可伪造身份。现在先 `openssl verify`（CA 级信任 + `-partial_chain` + `-no_check_time`）再解析 CN；媒体文件路由同样验证 |
+| **画廊 XSS 防护** | `AttachmentGallery.tsx` `isSafeMediaSrc` | 正则提取正文媒体 src 后白名单校验（站点相对路径 / http/https），拦截 `javascript:`、`data:`、`//evil.com`——此前下载链接可构造 `javascript:` URL 执行脚本 |
+| **编辑保存竞态** | `EditorModal.tsx` `loadingArticle` | 文章异步加载完成前禁用保存按钮，防止空 title/content 覆盖原文 |
+| **文件名转义** | `upload.py` `parse_image/parse_video/parse_media`、`qa.py` 回退答案 | 用户文件名拼进正文前一律 `html.escape`，堵住 `<script>.txt` 类文件名注入 |
+| **SVG / 媒体响应头** | `main.py` `serve_media` | 所有响应加 `X-Content-Type-Options: nosniff`；非媒体类型（html/txt）强制 `Content-Disposition: attachment`；SVG 保持 inline 但加 `CSP: sandbox`（直开导航时禁脚本） |
+| **媒体替换式写入** | `upload.py`/`articles.py`/`comments.py`（见 §9.3、§9.7） | reprocess 不再追加堆积旧描述/转录段 |
 
 ---
 
@@ -1209,7 +1251,7 @@ interface AppContextValue {
 
 | 类别 | 措施 | 位置 |
 |------|------|------|
-| **mTLS 认证** | nginx 8443 TLS 终止：`optional_no_ca` 请求客户端证书但不验证链，证书 PEM 经 `X-Client-Cert` 头传递，应用层解析 CN 识别身份 | `nginx/mtls.conf`, `auth.py` |
+| **mTLS 认证** | nginx 8443 TLS 终止：`optional_no_ca` 只请求证书，证书 PEM 经 `X-Client-Cert` 头传递；后端 `openssl verify -no_check_time -partial_chain -CAfile certs/ca.crt` 验证签名（CA 级信任：RootCA/JSCA 签发的所有人），再 `checkend` 校验叶子有效期，最后解析 CN 识别身份 | `nginx/mtls.conf`, `auth.py` |
 | **直连兼容** | 开发模式 uvicorn 单端口 8000 (CERT_OPTIONAL)，`auth.py` 从 TLS peercert 提取 CN（双模式：peercert 直连 / X-Client-Cert 头） | `main.py`, `auth.py` |
 | **证书吊销** | 已完全移除 — 服务器证书不含 CRL 分发点（`gen_server.py` 签发），CRL 分发端点已删除 | `main.py`, `run.py` |
 | **应用白名单** | `ALLOWED_CERT_SUBJECTS` 控制允许的证书 CN（空 = 全部允许） | `auth.py`, `config.py` |
@@ -1217,7 +1259,7 @@ interface AppContextValue {
 | **SHA-1 兼容** | `run.py` SSL 兼容补丁：`VERIFY_X509_PARTIAL_CHAIN` + 强制 TLS 1.2 + 显式套件列表 (`@SECLEVEL=0`)；nginx 同样限制 TLS 1.2 + 套件 | `run.py`, `nginx/mtls.conf` |
 | **路径穿越** | 文件名净化 + `/api/media/` 端点 `Path.resolve()` 范围校验 | `upload.py`, `main.py` |
 | **文件大小** | 500MB 上传限制 / 50MB 问答文件限制 | `upload.py`, `qa.py` |
-| **XSS** | HTML/SVG 文件强制 `Content-Disposition: attachment`；D3 `innerHTML` 使用 `esc()` 转义；QA 回答经 rehype-sanitize 消毒 | `main.py`, `useD3ForceGraph.ts`, `QA.tsx` |
+| **XSS** | 非媒体类型（html/txt）强制 `Content-Disposition: attachment`；SVG inline 但加 `CSP: sandbox`；媒体响应统一 `nosniff`；文件名进正文前 `html.escape`；画廊 src 协议白名单；D3 `innerHTML` 使用 `esc()` 转义；QA 回答经 rehype-sanitize 消毒 | `main.py`, `upload.py`, `AttachmentGallery.tsx`, `useD3ForceGraph.ts`, `QA.tsx` |
 | **UUID 校验** | 路径参数通过 `uuid.UUID()` 验证 | `articles.py`, `entities.py` |
 | **SQL 注入** | SQLAlchemy ORM 参数化查询 | 全后端 |
 | **错误泄露** | 错误信息写入文章内容（用户可见）而非静默丢失 | `upload.py` |
@@ -1228,22 +1270,27 @@ interface AppContextValue {
 | **竞态保护** | `ensure_embeddings` 使用 `asyncio.Lock` 防止并发重复计算 | `qa.py` |
 | **闭包内存** | 后台任务不捕获 `content_bytes`，改为从磁盘重新读取 | `upload.py` |
 
-### 12.2 三层访问控制模型
+### 12.2 四层访问控制模型
 
 ```
 第一层 TLS（nginx 8443）
-  └─ 服务器出示证书（浏览器验证链）；客户端证书被请求但不验证链
-  └─ optional_no_ca → 支持任意 CA 签发、任意签名算法的客户端证书
+  └─ 服务器出示证书（浏览器验证链）；客户端证书被请求（optional_no_ca 不验证链）
   └─ （含国密 U-Key 证书：浏览器经 Windows 证书库出示）
       ↓
-第二层 应用白名单（ALLOWED_CERT_SUBJECTS）
+第二层 签名验证（auth.py verify_client_cert_pem）
+  └─ openssl verify -no_check_time -partial_chain -CAfile certs/ca.crt
+  └─ CA 级信任：RootCA/JSCA/项目 CA 签发的所有证书通过；伪造自签证书拒绝
+  └─ checkend 0 单独校验叶子有效期（-no_check_time 不查任何时间）
+  └─ 验证失败 → 401 "Client certificate is required"
+      ↓
+第三层 应用白名单（ALLOWED_CERT_SUBJECTS）
   └─ auth.py 解析身份：peercert (直连模式) 或 X-Client-Cert 头 (nginx 反代模式)
   └─ verify_client_cert 依赖挂在 api_router 上
   └─ 空列表 = 全部放行；非空 = CN 精确匹配才放行
   └─ 不匹配 → 401 "Client certificate is not authorized"
   └─ 未出示证书 → 401 → 浏览器重新协商 → 弹出证书选择框
       ↓
-第三层 资源权限（created_by 身份证号比对）
+第四层 资源权限（created_by 身份证号比对）
   └─ 文章：仅创建人可编辑/删除
   └─ 评论：仅评论人可编辑/删除（文章创建人可删评论）
   └─ 实体：实体创建人或文章创建人
@@ -1420,9 +1467,9 @@ docker compose up -d --build
 
 - 多阶段构建：静态 ffmpeg 二进制（`mwader/static-ffmpeg:7.0`，替代 apt 版 ~450MB）→ Node 18 构建前端（`vite build` 输出到 `backend/static`）→ Python 3.11-slim 运行时（OpenCV headless）
 - 数据持久化：本机目录绑定挂载 — `./data`（SQLite）/ `./uploads`（上传文件）
-- **环境变量**：单一配置文件 — 仓库根目录 `.env`（Docker 挂载为 `/app/.env`，本地开发由 `config.py` 显式加载）—— 修改后 `docker compose restart` 即生效
+- **环境变量**：模型参数（KEY/BASE/MODEL）、超时、开关、白名单**统一在仓库根目录 `.env`**（Docker 挂载为 `/app/.env`，本地开发由 `config.py` 显式加载），docker-compose 不做覆盖
 - **证书**：`./certs:/certs:ro` 只读挂载（镜像不含证书，启动必须提供）；SSL 路径使用容器内绝对路径（`/certs/server.crt` 等）；nginx 容器挂载同一目录（`/etc/nginx/certs`）
-- 修改根目录 `.env` 后执行 `docker compose restart` 即生效（无需重建；`.env` 挂载 + `load_dotenv()` 在进程启动时读取）
+- 修改 `.env` 后执行 `docker compose restart` 即生效（`.env` 挂载 + `load_dotenv()` 在进程启动时读取）；**修改 `docker-compose.yml` 则需 `docker compose up -d` 重建容器**（容器创建时 bake 的环境变量不会随 restart 刷新，且 `load_dotenv` 不覆盖已存在的环境变量）
 - 环境变量优先级：容器环境（Dockerfile `ENV`）> `/app/.env` 文件（`load_dotenv` 不覆盖已存在的环境变量）
 - `run.py` 支持 `HOST` / `SSL_CERTFILE` / `SSL_KEYFILE` / `SSL_CA_CERTS` 环境变量覆盖
 
@@ -1480,7 +1527,17 @@ openssl pkcs12 -export -in client.crt -inkey client.key -out client.p12 -passout
 
 > CRL 吊销机制已完全移除（服务器证书不含 CRL 分发点、分发端点已删除）。如未来需要恢复，见 §12.3。
 
-> 客户端证书不必由本项目 CA 签发 — nginx `optional_no_ca` 不验证链，支持第三方 CA 及国密 U-Key 证书；身份识别由应用层白名单完成。
+**第三方证书 / 国密 U-Key（CA 级信任，v2.1）**：
+
+客户端证书不必由本项目 CA 签发。后端按 **CA 级信任** 验证签名（`openssl verify -no_check_time -partial_chain -CAfile certs/ca.crt`）：
+
+- `certs/ca.crt` 现含 3 张信任证书：项目自签 CA、RootCA（江苏省 CA 根）、JSCA（中间 CA，2024-08-20 已过期）
+- `-partial_chain`：链中任一证书命中信任列表即通过；`-no_check_time`：容忍 JSCA 过期；叶子有效期由 `checkend 0` 单独校验
+- **信任语义**：RootCA/JSCA/项目 CA 签发的所有证书均可登录（身份 = CN）；伪造自签证书被拒
+- 新增其他第三方 CA：把其根/中间证书（PEM）追加进 `certs/ca.crt` 即可，立即生效（每请求实时读取，bind mount 无需重启容器）
+- ⚠️ `gen_server.py` 重新生成 CA 会覆盖 `ca.crt`，追加的第三方证书需重新追加
+
+> 开发模式注意：`python -m app.main` 直连时 TLS 握手层（uvicorn）是标准链验证，过期中间 CA 的 Ukey 证书会在握手阶段失败——生产链路（nginx + 头验证）不受影响。
 
 ### 14.4 注意事项
 
@@ -1544,10 +1601,13 @@ DELETE /api/articles/:id                   删除文章
 GET    /api/articles/:id/download          下载附件
 POST   /api/articles/:id/reprocess         重新解析全部附件
 POST   /api/articles/:id/reprocess/:name   重新解析单个附件
+POST   /api/articles/:id/recognize         重新解析文章文本内容
 GET    /api/articles/:id/comments          评论列表
 POST   /api/articles/:id/comments          创建评论 (支持附件)
 PUT    /api/articles/:id/comments/:cid     更新评论
 DELETE /api/articles/:id/comments/:cid     删除评论
+POST   /api/articles/:id/comments/:cid/reprocess        重新解析评论内容
+POST   /api/articles/:id/comments/:cid/reprocess/:name  重新解析评论单个附件
 GET    /api/categories                     分类列表
 POST   /api/categories                     创建分类
 PUT    /api/categories/:id                 更新分类

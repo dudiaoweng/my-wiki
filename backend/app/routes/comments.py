@@ -351,6 +351,194 @@ async def _bg_comment_process(
         db2.close()
 
 
+def _replace_media_tag_with_desc(full_text: str, storage_name: str, desc: str) -> str:
+    """将正文中含 storage_name 的媒体标签行替换为新的解析结果（desc 自带媒体标签）。
+
+    重新解析会反复执行：替换式写入避免旧描述/重复标签在正文中越堆越多。
+    """
+    lines = full_text.split('\n')
+    new_lines: list[str] = []
+    replaced = False
+    for line in lines:
+        if storage_name in line and ('<img' in line or '<video' in line or '<audio' in line):
+            if not replaced:
+                new_lines.append(desc)
+                replaced = True
+            # 其余同名媒体标签行删除（旧解析可能重复追加过）
+        else:
+            new_lines.append(line)
+    if not replaced:
+        new_lines.append(desc)
+    return '\n'.join(new_lines)
+
+
+async def _bg_comment_reextract(
+    comment_id: str, article_id: str,
+) -> None:
+    """Background: 评论内容重新解析——重建分块/嵌入并重新提取标签/实体（不触碰附件）。"""
+    db2 = SessionLocal()
+    try:
+        comment = db2.query(Comment).filter(Comment.id == comment_id).first()
+        if not comment:
+            return
+        article = db2.query(Article).filter(Article.id == article_id).first()
+        if not article:
+            return
+
+        # Step A: 重建评论分块 + 嵌入（提取与 Q&A 检索共用同一套切分）
+        await _embed_comment_content(comment, db2)
+
+        # Step B: 重新提取标签/实体——旧贡献先从文章实体扣除，避免重复累计
+        comment = db2.query(Comment).filter(Comment.id == comment_id).first()
+        if not comment:
+            return
+        article = db2.query(Article).filter(Article.id == article_id).first()
+        if not article:
+            return
+        _subtract_comment_from_article(article, comment)
+        comment.entities = None
+        db2.commit()
+
+        try:
+            cur_tags = json.loads(comment.tags) if comment.tags else []
+            if not isinstance(cur_tags, list):
+                cur_tags = []
+            chunk_rows = get_comment_chunks(db2, comment_id)
+            texts = [r.chunk_text.removeprefix("[评论] ") for r in chunk_rows]
+            seg_idx = 0
+            async for seg_tags, seg_entities in extract_chunks_iter(texts):
+                if seg_tags:
+                    cur_tags = merge_tags(cur_tags, seg_tags)
+                    comment.tags = json.dumps(cur_tags, ensure_ascii=False)
+                if isinstance(seg_entities, dict) and seg_entities:
+                    now_str = utcnow().isoformat()
+                    for e in seg_entities.get("entities", []):
+                        if not e.get("created_by"):
+                            e["created_by"] = comment.created_by or ""
+                            e["created_at"] = now_str
+                    cur_entities = json.loads(comment.entities) if comment.entities else None
+                    merged_entities = merge_entities(cur_entities, seg_entities)
+                    comment.entities = (
+                        json.dumps(merged_entities, ensure_ascii=False) if merged_entities else None
+                    )
+                    _merge_entities_into_article(article, seg_entities)
+                    # 块级实体标注：该段提取结果写入对应评论分块
+                    if seg_idx < len(chunk_rows):
+                        chunk_rows[seg_idx].entities = json.dumps(seg_entities, ensure_ascii=False)
+                # 逐段落库
+                db2.commit()
+                seg_idx += 1
+        except Exception as e:
+            logger.warning(f"[BG_COMMENT_REEXTRACT] LLM extraction failed: {e}")
+
+        comment = db2.query(Comment).filter(Comment.id == comment_id).first()
+        if not comment:
+            return
+        comment.processing = None
+        db2.commit()
+        invalidate_graph_cache()
+        logger.info("[BG_COMMENT_REEXTRACT] comment %s reextract complete", comment_id)
+    except Exception as e:
+        logger.warning(f"[BG_COMMENT_REEXTRACT] Failed: {e}")
+        try:
+            comment = db2.query(Comment).filter(Comment.id == comment_id).first()
+            if comment:
+                comment.processing = None
+                db2.commit()
+        except Exception:
+            pass
+    finally:
+        db2.close()
+
+
+async def _bg_comment_attachment_reprocess(
+    comment_id: str, article_id: str, file_info: dict,
+) -> None:
+    """Background: 单个附件重新解析——只重解析该附件并替换写入正文，
+    随后重建评论分块/嵌入（正文已变化）；不重新提取标签/实体。"""
+    db2 = SessionLocal()
+    try:
+        comment = db2.query(Comment).filter(Comment.id == comment_id).first()
+        if not comment:
+            return
+        article = db2.query(Article).filter(Article.id == article_id).first()
+        if not article:
+            return
+
+        full_text = comment.content or ""
+        ext = Path(file_info["filename"]).suffix.lower()
+        escaped_name = html.escape(file_info["filename"], quote=True)
+        storage_name = Path(file_info["storage_path"]).name
+
+        # ── 解析该附件（替换式写入，不重复追加）──
+        if ext in DOCUMENT_EXTENSIONS:
+            # 文档文本提取为纯本地解析。占位符仍在（此前从未成功提取）时替换；
+            # 否则正文已含提取文本，不重复追加。
+            try:
+                if ext in TEXT_EXTENSIONS:
+                    with open(file_info["storage_path"], "rb") as f:
+                        parsed = parse_text_from_bytes(f.read())
+                elif ext in WORD_EXTENSIONS:
+                    parsed = await asyncio.to_thread(parse_docx, file_info["storage_path"])
+                elif ext in EXCEL_EXTENSIONS and ext != '.csv':
+                    parsed = await asyncio.to_thread(parse_xlsx, file_info["storage_path"])
+                elif ext in PPT_EXTENSIONS:
+                    parsed = await asyncio.to_thread(parse_pptx, file_info["storage_path"])
+                elif ext in PDF_EXTENSIONS:
+                    parsed = await asyncio.to_thread(parse_pdf, file_info["storage_path"])
+                else:
+                    parsed = ""
+                if parsed:
+                    placeholder = f'<div data-attachment="{escaped_name}"'
+                    idx = full_text.find(placeholder)
+                    if idx >= 0:
+                        end_idx = full_text.find('</div>', idx)
+                        if end_idx >= 0:
+                            full_text = full_text[:idx] + parsed + full_text[end_idx + 6:]
+            except Exception as e:
+                logger.warning(f"[BG_COMMENT_ATTACH] Document parsing failed for {file_info['filename']}: {e}")
+        elif ext in IMAGE_EXTENSIONS:
+            try:
+                desc = await parse_image(file_info["storage_path"], file_info["filename"])
+                full_text = _replace_media_tag_with_desc(full_text, storage_name, desc)
+            except Exception as e:
+                logger.warning(f"[BG_COMMENT_ATTACH] Image description failed for {file_info['filename']}: {e}")
+        elif ext in VIDEO_EXTENSIONS:
+            try:
+                desc = await parse_video(file_info["storage_path"], file_info["filename"])
+                full_text = _replace_media_tag_with_desc(full_text, storage_name, desc)
+            except Exception as e:
+                logger.warning(f"[BG_COMMENT_ATTACH] Video description failed for {file_info['filename']}: {e}")
+        elif ext in AUDIO_EXTENSIONS:
+            try:
+                with open(file_info["storage_path"], "rb") as f:
+                    audio_bytes = f.read()
+                desc = await parse_media(audio_bytes, file_info["filename"], file_info["content_type"])
+                full_text = _replace_media_tag_with_desc(full_text, storage_name, desc)
+            except Exception as e:
+                logger.warning(f"[BG_COMMENT_ATTACH] Audio transcription failed for {file_info['filename']}: {e}")
+        # 其他类型跳过（无对应解析器）
+
+        comment.content = full_text
+        comment.processing = None
+        db2.commit()
+
+        # 正文已变化 → 重建评论分块 + 嵌入，保持 Q&A 检索索引新鲜
+        await _embed_comment_content(comment, db2)
+        logger.info("[BG_COMMENT_ATTACH] comment %s attachment reprocess complete: %s", comment_id, file_info["filename"])
+    except Exception as e:
+        logger.warning(f"[BG_COMMENT_ATTACH] Failed: {e}")
+        try:
+            comment = db2.query(Comment).filter(Comment.id == comment_id).first()
+            if comment:
+                comment.processing = None
+                db2.commit()
+        except Exception:
+            pass
+    finally:
+        db2.close()
+
+
 # ─── Routes ──────────────────────────────────────────
 
 
@@ -671,6 +859,122 @@ async def update_comment(
             need_extract=content_changed or bool(uploaded_files),
         ))
 
+    return comment
+
+
+@router.post("/{comment_id}/reprocess", response_model=CommentResponse)
+async def reprocess_comment(
+    article_id: str = PathParam(..., max_length=36),
+    comment_id: str = PathParam(..., max_length=36),
+    db: Session = Depends(get_db),
+    cert: CertInfo = Depends(get_client_cert),
+):
+    """对评论内容重新解析：重建分块/嵌入并重新提取标签/实体（不触碰附件）。
+
+    评论作者或文章作者可用。
+    """
+    user_cn = cert.display_name or ""
+
+    article = db.query(Article).filter(Article.id == article_id).first()
+    if not article:
+        raise HTTPException(status_code=404, detail="Article not found")
+
+    comment = (
+        db.query(Comment)
+        .filter(Comment.id == comment_id, Comment.article_id == article_id)
+        .first()
+    )
+    if not comment:
+        raise HTTPException(status_code=404, detail="Comment not found")
+
+    if comment.created_by != user_cn and article.created_by != user_cn:
+        raise HTTPException(status_code=403, detail="只有评论作者或文章作者可以重新解析该评论")
+
+    if comment.processing:
+        raise HTTPException(status_code=409, detail="评论正在处理中，请稍候")
+
+    if not (comment.content or "").strip():
+        raise HTTPException(status_code=400, detail="评论没有文本内容，无法解析")
+
+    comment.processing = "recognizing"
+    db.commit()
+
+    asyncio.create_task(_bg_comment_reextract(comment.id, article_id))
+    return comment
+
+
+@router.post("/{comment_id}/reprocess/{safe_name}", response_model=CommentResponse)
+async def reprocess_comment_attachment(
+    article_id: str = PathParam(..., max_length=36),
+    comment_id: str = PathParam(..., max_length=36),
+    safe_name: str = PathParam(...),
+    db: Session = Depends(get_db),
+    cert: CertInfo = Depends(get_client_cert),
+):
+    """重新解析评论的单个附件（只针对该附件，不重新提取标签/实体）。
+
+    评论作者或文章作者可用。
+    """
+    user_cn = cert.display_name or ""
+
+    article = db.query(Article).filter(Article.id == article_id).first()
+    if not article:
+        raise HTTPException(status_code=404, detail="Article not found")
+
+    comment = (
+        db.query(Comment)
+        .filter(Comment.id == comment_id, Comment.article_id == article_id)
+        .first()
+    )
+    if not comment:
+        raise HTTPException(status_code=404, detail="Comment not found")
+
+    if comment.created_by != user_cn and article.created_by != user_cn:
+        raise HTTPException(status_code=403, detail="只有评论作者或文章作者可以重新解析该评论")
+
+    if comment.processing:
+        raise HTTPException(status_code=409, detail="评论正在处理中，请稍候")
+
+    # Validate safe_name to prevent path traversal
+    if "/" in safe_name or "\\" in safe_name or ".." in safe_name:
+        raise HTTPException(status_code=400, detail="Invalid file name")
+
+    # 附件归属校验：safe_name 必须在该评论的附件列表中（含 legacy 单附件字段），
+    # 避免把不属于该评论的文件解析进正文
+    try:
+        attachments = json.loads(comment.attachments) if comment.attachments else []
+    except (json.JSONDecodeError, TypeError):
+        attachments = []
+    known_paths = {
+        str(a.get("path", ""))
+        for a in (attachments if isinstance(attachments, list) else [])
+        if isinstance(a, dict)
+    }
+    if comment.attachment_path:
+        known_paths.add(comment.attachment_path)
+    if safe_name not in known_paths:
+        raise HTTPException(status_code=404, detail="Attachment not found in this comment")
+
+    storage_path = UPLOAD_DIR / safe_name
+    if not storage_path.exists():
+        raise HTTPException(status_code=404, detail="Attachment not found")
+
+    # 从 attachments JSON 找回原始文件名与类型
+    original_name = safe_name
+    content_type = ""
+    for a in attachments if isinstance(attachments, list) else []:
+        if a.get("path") == safe_name:
+            original_name = a.get("name") or safe_name
+            content_type = a.get("type", "")
+            break
+
+    comment.processing = f"processing:{safe_name}"
+    db.commit()
+
+    asyncio.create_task(_bg_comment_attachment_reprocess(
+        comment.id, article_id,
+        {"filename": original_name, "content_type": content_type, "storage_path": str(storage_path)},
+    ))
     return comment
 
 

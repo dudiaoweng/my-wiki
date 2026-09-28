@@ -253,7 +253,14 @@ button.tag:hover {
   transition: all var(--transition-fast);
 }
 
-.btn:hover { background: var(--c-surface); }
+.btn:hover:not(:disabled) { background: var(--c-surface); }
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+}
 
 .btnPrimary {
   background: var(--c-accent);

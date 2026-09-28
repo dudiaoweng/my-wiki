@@ -231,9 +231,13 @@ const COLLAPSE_CHARS = 500;
 function CommentBody({
   comment,
   rehypePlugins,
+  processing,
+  onReprocess,
 }: {
   comment: Comment;
   rehypePlugins: any[];
+  processing?: string | null;
+  onReprocess?: (item: MediaItem) => void | Promise<void>;
 }) {
   const mediaItems = buildCommentMediaItems(comment);
   const displayContent = mediaItems.length > 0
@@ -260,7 +264,13 @@ function CommentBody({
           {expanded ? '收起' : '展开全文'}
         </button>
       )}
-      {mediaItems.length > 0 && <AttachmentGallery items={mediaItems} />}
+      {mediaItems.length > 0 && (
+        <AttachmentGallery
+          items={mediaItems}
+          processing={processing}
+          onReprocess={onReprocess}
+        />
+      )}
     </>
   );
 }
@@ -501,6 +511,30 @@ export function CommentSection({
     });
   };
 
+  const handleReprocess = async (comment: Comment) => {
+    try {
+      await api.reprocessComment(articleId, comment.id);
+      showToast('已开始重新解析评论内容', 'success');
+      await reloadComments();  // 拉取 processing 状态，触发既有 5s 轮询
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : '重新解析失败';
+      showToast(msg, 'error');
+    }
+  };
+
+  const handleReprocessAttachment = async (comment: Comment, item: MediaItem) => {
+    const safeName = item.src.split('/').pop()?.split('?')[0];
+    if (!safeName) return;
+    try {
+      await api.reprocessCommentAttachment(articleId, comment.id, safeName);
+      showToast(`已开始重新解析「${item.name}」`, 'success');
+      await reloadComments();  // 拉取 processing:{safe_name}，附件卡片显示解析遮罩
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : '重新解析失败';
+      showToast(msg, 'error');
+    }
+  };
+
   const removeFile = (index: number) => {
     setFiles((prev) => prev.filter((_, i) => i !== index));
   };
@@ -599,6 +633,13 @@ export function CommentSection({
                     <div className={styles.itemActions}>
                       <button
                         className={styles.actionBtn}
+                        onClick={() => handleReprocess(comment)}
+                        title="重新解析评论内容（标签/实体）"
+                      >
+                        🧠
+                      </button>
+                      <button
+                        className={styles.actionBtn}
                         onClick={() => handleEdit(comment)}
                         title="编辑"
                       >
@@ -664,7 +705,14 @@ export function CommentSection({
                   </div>
                 ) : (
                   <>
-                    <CommentBody comment={comment} rehypePlugins={commentRehypePlugins} />
+                    <CommentBody
+                      comment={comment}
+                      rehypePlugins={commentRehypePlugins}
+                      processing={comment.processing}
+                      onReprocess={canModify
+                        ? (item) => handleReprocessAttachment(comment, item)
+                        : undefined}
+                    />
                   </>
                 )}
               </div>

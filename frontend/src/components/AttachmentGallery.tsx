@@ -27,6 +27,20 @@ function getFileIcon(filename: string): string {
   }
 }
 
+/** 只允许站点相对路径（/api/media/ 等）或 http(s) 绝对地址，
+ *  拦截 javascript:/data: 等危险协议与 //evil.com 协议相对地址（存储型 XSS 防护）。 */
+function isSafeMediaSrc(src: string): boolean {
+  if (!src) return false;
+  if (src.startsWith('//')) return false;
+  if (src.startsWith('/')) return true;
+  try {
+    const u = new URL(src);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 /** Extract media tags from article content + document attachment info. */
 export function useAttachments(
   content: string,
@@ -45,7 +59,7 @@ export function useAttachments(
       const tagName = m[1].toLowerCase();
       const src = (tag.match(/src="([^"]*)"/i) ?? [])[1] || '';
       const alt = (tag.match(/alt="([^"]*)"/i) ?? [])[1] || '';
-      const poster = (tag.match(/poster="([^"]*)"/i) ?? [])[1] || undefined;
+      let poster = (tag.match(/poster="([^"]*)"/i) ?? [])[1] || undefined;
       const name = alt || src.split('/').pop() || tagName;
 
       // Record position for removal
@@ -62,7 +76,8 @@ export function useAttachments(
       while (end < content.length && /\s/.test(content[end])) end++;
       toRemove.push({ start: m.index, end });
 
-      if (!src || seen.has(src)) continue;
+      if (!src || seen.has(src) || !isSafeMediaSrc(src)) continue;
+      if (poster && !isSafeMediaSrc(poster)) poster = undefined;
       seen.add(src);
       // Also deduplicate by poster URL (video thumbnail)
       if (poster && seen.has(poster)) continue;
@@ -265,7 +280,7 @@ export function AttachmentGallery({
                   </button>
                 )}
                 <a
-                  href={hasSrc ? `${item.src}?download=1` : `/api/articles/${articleId}/download`}
+                  href={hasSrc && isSafeMediaSrc(item.src) ? `${item.src}?download=1` : `/api/articles/${articleId}/download`}
                   download={item.name}
                   className={styles.dlBtn}
                   onClick={(e) => e.stopPropagation()}

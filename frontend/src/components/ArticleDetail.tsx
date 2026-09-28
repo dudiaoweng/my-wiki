@@ -206,6 +206,17 @@ export function ArticleDetailView({
     });
   };
 
+  const handleRecognize = async () => {
+    try {
+      const updated = await api.recognizeArticle(articleId);
+      setArticle(updated);  // processing 置为 "recognizing"，触发既有轮询刷新
+      showToast('已开始重新解析文章内容', 'success');
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '重新解析失败';
+      showToast(msg, 'error');
+    }
+  };
+
   return (
     <div className={styles.detail}>
       <div className={styles.topBar}>
@@ -266,6 +277,14 @@ export function ArticleDetailView({
           )}
           {isCreator && (
             <div className={styles.actions}>
+              <button
+                className={styles.btn}
+                onClick={handleRecognize}
+                disabled={isProcessing}
+                title="对文章文本内容重新解析：提取标签/实体、重建检索索引"
+              >
+                🧠 重新解析
+              </button>
               <button className={styles.btn} onClick={() => openEditor(article.id)}>✏️ 编辑</button>
               <button className={`${styles.btn} ${styles.btnDanger}`} onClick={handleDelete}>🗑 删除</button>
             </div>

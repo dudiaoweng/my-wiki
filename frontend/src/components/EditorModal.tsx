@@ -40,6 +40,7 @@ export function EditorModal() {
   const [attachments, setAttachments] = useState<File[]>([]);
   const [existingAttachments, setExistingAttachments] = useState<{name: string; type: string; thumbUrl?: string}[]>([]);
   const [saving, setSaving] = useState(false);
+  const [loadingArticle, setLoadingArticle] = useState(false);
 
   const titleRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -74,6 +75,7 @@ export function EditorModal() {
     setAttachments([]);
     setExistingAttachments([]);
     if (editorState.articleId) {
+      setLoadingArticle(true);
       api.getArticle(editorState.articleId).then((a) => {
         setTitle(a.title);
         setCategoryId(a.category_id ?? '');
@@ -165,8 +167,10 @@ export function EditorModal() {
           .trim();
         setContent(cleanContent);
         originalContentRef.current = cleanContent;
-      }).catch(() => showToast('Failed to load article', 'error'));
+      }).catch(() => showToast('Failed to load article', 'error'))
+        .finally(() => setLoadingArticle(false));
     } else {
+      setLoadingArticle(false);
       setTitle('');
       setCategoryId(searchParams.get('category') ?? '');
       setTags([]);
@@ -180,6 +184,8 @@ export function EditorModal() {
   if (!editorState) return null;
 
   const handleSave = async () => {
+    // 文章加载完成前 title/content 仍是空串，此时保存会覆盖原文
+    if (saving || loadingArticle) return;
     setSaving(true);
 
     try {
@@ -401,9 +407,9 @@ export function EditorModal() {
           <button
             className={`${styles.btn} ${styles.btnPrimary}`}
             onClick={handleSave}
-            disabled={saving}
+            disabled={saving || loadingArticle}
           >
-            {saving ? '保存中…' : (isEdit ? '更新' : '保存')}
+            {loadingArticle ? '加载中…' : saving ? '保存中…' : (isEdit ? '更新' : '保存')}
           </button>
         </div>
       </div>

@@ -156,6 +156,9 @@ export const api = {
   reprocessAttachment(articleId: string, safeName: string) {
     return request<Article>(`/articles/${articleId}/reprocess/${encodeURIComponent(safeName)}`, { method: 'POST' });
   },
+  recognizeArticle(id: string) {
+    return request<Article>(`/articles/${id}/recognize`, { method: 'POST' });
+  },
 
   // ── Categories ──
   getCategories() {
@@ -355,6 +358,12 @@ export const api = {
 
   deleteComment(articleId: string, commentId: string) {
     return request<void>(`/articles/${articleId}/comments/${commentId}`, { method: 'DELETE' });
+  },
+  reprocessComment(articleId: string, commentId: string) {
+    return request<Comment>(`/articles/${articleId}/comments/${encodeURIComponent(commentId)}/reprocess`, { method: 'POST' });
+  },
+  reprocessCommentAttachment(articleId: string, commentId: string, safeName: string) {
+    return request<Comment>(`/articles/${articleId}/comments/${encodeURIComponent(commentId)}/reprocess/${encodeURIComponent(safeName)}`, { method: 'POST' });
   },
 
   // ── Upload ──

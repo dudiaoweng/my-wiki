@@ -36,6 +36,37 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "embedding-3")
 # ── Q&A ──
 QA_TEMPERATURE = float(os.getenv("QA_TEMPERATURE", "0.4"))
 
+# ── 超时配置（秒）──
+# 各类模型调用的超时上限，可用环境变量覆盖；未设置或值非法时回退到代码默认值。
+# 本地模型加载较慢时可调大 LLM_TIMEOUT。
+def _env_float(name: str, default: float) -> float:
+    """读取环境变量为 float，未设置或非法值回退默认（保留默认值，避免启动崩溃）。"""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    """读取环境变量为 int，未设置或非法值回退默认。"""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+LLM_TIMEOUT = _env_float("LLM_TIMEOUT", 120.0)       # 文本 LLM：问答、分段实体提取、上传文档解析
+VISION_TIMEOUT = _env_float("VISION_TIMEOUT", 120.0) # 视觉模型：图片描述、视频分析
+ASR_TIMEOUT = _env_float("ASR_TIMEOUT", 120.0)       # 语音识别：音频转文字
+EMBEDDING_TIMEOUT = _env_float("EMBEDDING_TIMEOUT", 30.0)  # 嵌入模型：语义搜索
+FFMPEG_TIMEOUT = _env_int("FFMPEG_TIMEOUT", 60)      # ffmpeg 音视频转换（子进程）
+
 # ── 自动解析 ──
 # 控制 LLM 类后台解析（媒体描述、标签/实体/标题提取）。文档附件的文本提取
 # 是纯本地解析（不调用 LLM），始终自动执行，不受本开关影响。

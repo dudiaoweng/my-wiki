@@ -20,8 +20,9 @@
 ### 🔒 证书认证 (mTLS)
 - 双向 TLS 客户端证书验证，无需密码
 - 证书 CN 格式为 `[姓名] [18位身份证号]`，后端自动解析为 name/id_number
-- **生产架构**：nginx 反向代理 TLS 终止（`optional_no_ca` 请求证书不验证链）+ 应用层身份解析
-- **国密 U-Key 支持**：通过 Windows 证书库出示 U-Key 证书（Edge/Chrome 均可用）
+- **生产架构**：nginx 反向代理 TLS 终止（`optional_no_ca` 只请求证书）+ 后端签名验证（`openssl verify`）
+- **CA 级信任**：信任列表 `certs/ca.crt`（项目自签 CA + RootCA/JSCA）签发的所有证书均可登录；容忍过期中间 CA（`-no_check_time`），叶子证书过期仍拒绝（`checkend`）
+- **国密 U-Key 支持**：通过 Windows 证书库出示 U-Key 证书（Edge/Chrome 均可用），第三方 CA 签发证书经信任列表放行
 - **CRL**：已完全移除 — 服务器证书不含 CRL 分发点，CRL 分发端点已删除
 - **开发模式**：前端显示用户选择页，Vite 代理根据选择动态切换客户端证书
 - 顶栏右侧显示姓名，hover 显示完整身份证号
@@ -233,13 +234,9 @@ npm install
 
 ### 2. 配置环境变量
 
-在 `backend/` 下创建 `.env` 文件：
+在**仓库根目录**创建 `.env` 文件（复制 `.env.example` 改名即可）。Docker 部署与本地开发共用这一份，**模型参数（KEY / BASE / MODEL）统一在此配置**，docker-compose 不做任何覆盖：
 
 ```bash
-# ─── 基础设施 ───
-DATABASE_URL=sqlite:///./knowledge_base.db
-UPLOAD_DIR=./uploads
-
 # ─── LLM 文本模型 ───
 LLM_API_KEY=your-api-key-here
 LLM_API_BASE=https://open.bigmodel.cn/api/paas/v4
@@ -263,17 +260,16 @@ EMBEDDING_MODEL=embedding-3
 # ─── 问答 ───
 QA_TEMPERATURE=0.2
 
-# ─── TLS / mTLS 证书认证 ───
-SSL_CERTFILE=../certs/server.crt
-SSL_KEYFILE=../certs/server.key
-SSL_CA_CERTS=../certs/ca.crt
-# 白名单（逗号分隔的 subject DN；留空 = 允许所有证书）
-ALLOWED_CERT_SUBJECTS=/C=CN/ST=32/L=00/O=11/OU=00/CN=谢林 320100198001010010
+# ─── mTLS 白名单（逗号分隔的 subject DN；留空 = 放行信任列表签发的所有证书）───
+# ALLOWED_CERT_SUBJECTS=/C=CN/ST=32/L=00/O=11/OU=00/CN=谢林 320100198001010010
 ```
+
+> 路径类变量（DATABASE_URL / UPLOAD_DIR / SSL_*）不需要配置：容器由 Dockerfile `ENV` 提供，本地由代码默认值兜底。
+> 切回本地 llama-server 模型时，容器部署把 `*_API_BASE` 改为 `http://host.docker.internal:8080`（本地开发用 `localhost:8080`），`.env.example` 中留有注释示例。
 
 ### 3. 导入客户端证书
 
-生产模式（含 Docker）下浏览器需要出示客户端证书（8443 端口 nginx 入口，`optional_no_ca` 请求但不验证链，应用层解析身份）。
+生产模式（含 Docker）下浏览器需要出示客户端证书（8443 端口 nginx 入口，`optional_no_ca` 请求证书，签名验证由后端完成）。
 
 **证书文件**（密码均为 `123456`）：
 
@@ -310,6 +306,21 @@ ALLOWED_CERT_SUBJECTS=/C=CN/ST=32/L=00/O=11/OU=00/CN=谢林 320100198001010010
 | 2 个以上 | 弹出选择框供用户选择身份 |
 
 **SHA-1 签名证书兼容**：`run.py` SSL 兼容补丁与 nginx 均强制 TLS 1.2 + 显式套件（`@SECLEVEL=0`），可接受 SHA-1 签名的客户端证书（Chrome/Edge 109+ 浏览器端不再支持）。
+
+**第三方证书 / 国密 U-Key**（如江苏 CA 签发的 Ukey 证书）：
+
+后端按 **CA 级信任** 验证签名：`openssl verify -no_check_time -partial_chain -CAfile certs/ca.crt`。信任列表默认含项目自签 CA 与 RootCA/JSCA（江苏省 CA 链）。新增第三方 CA 的步骤：
+
+1. 从 U-Key 导出证书公钥（`certmgr.msc` → 个人 → 证书 → 导出 → Base64 编码 `.cer`，**不导出私钥**）
+2. 把该 `.cer`（PEM 格式）追加进 `certs/ca.crt`：
+   ```bash
+   cat your-ukey.cer >> certs/ca.crt
+   ```
+3. 立即生效（后端每次请求实时读取，容器 bind mount 无需重启）
+4. 浏览器导入该 U-Key 驱动后，点「证书登录」即可选择 U-Key 证书
+
+> ⚠️ 重新生成项目 CA（`gen_server.py`）会覆盖 `certs/ca.crt`，追加的第三方证书会丢失，需重新追加。
+> 签名验证可容忍中间 CA 过期（`-no_check_time`），但**叶子证书过期仍会被拒绝**（`checkend` 校验）。
 
 开发模式无需导入 — Vite 代理直接使用 `certs/` 目录下的证书文件连接后端。
 
@@ -352,13 +363,13 @@ docker compose up -d --build
 - 多阶段构建：静态 ffmpeg 二进制 → Node 构建前端 → Python slim 运行时（OpenCV headless）
 - **双容器架构**：my-wiki（应用）+ nginx（mTLS TLS 终止）
 - 数据持久化：本机目录绑定挂载（`./data` SQLite / `./uploads` 上传文件）
-- **环境变量**：直接在 `docker-compose.yml` 的 `environment` 区块配置（LLM 密钥 + SSL 路径 + 白名单）
+- **环境变量**：统一在仓库根目录 `.env`（模型参数、超时、开关、白名单），docker-compose 不做覆盖
 - **证书挂载**：`./certs:/certs:ro`（镜像不含证书，启动必须提供）
-- 修改根目录 `.env` 后执行 `docker compose restart` 即可生效（无需重建容器/镜像）
+- 修改根目录 `.env` 后执行 `docker compose restart` 即可生效（无需重建容器/镜像；若修改了 `docker-compose.yml` 则需 `docker compose up -d` 重建容器）
 
 > 生产模式使用双端口架构：
 > - **8000**（HTTPS，CERT_NONE）：仅展示登录页，不请求客户端证书
-> - **8443**（nginx mTLS 入口）：`optional_no_ca` 请求客户端证书但不验证链，应用层解析身份 — 支持国密 U-Key 等任意证书
+> - **8443**（nginx mTLS 入口）：`optional_no_ca` 请求客户端证书，签名验证与 CA 级信任由后端完成 — 支持国密 U-Key 等第三方 CA 证书
 > - 上传上限 500MB：nginx `client_max_body_size` 与后端 `MAX_UPLOAD_BYTES` 需保持一致
 
 ### 5. 访问
@@ -547,9 +558,10 @@ id, entity_name, name, content, created_by, created_at, updated_at
 
 ### mTLS 证书认证（nginx 反代架构）
 - 证书 CN 格式为 `[姓名] [18位身份证号]`（如 `谢林 320100198601010018`），后端自动解析为 `name` 和 `id_number`
-- **nginx 8443**：`optional_no_ca` 请求客户端证书但**不验证链**（支持任意 CA 签发、任意算法的证书）
-- **应用层身份解析**：nginx 将证书 PEM 通过 `X-Client-Cert` 头（URL 转义）传递，FastAPI 用 openssl 解析 CN
-- **国密 U-Key 支持**：浏览器通过 Windows 证书库出示 U-Key 证书（Edge/Chrome 可用）
+- **nginx 8443**：`optional_no_ca` 只**请求**客户端证书（不验证，验证由后端做）
+- **后端签名验证**：nginx 将证书 PEM 通过 `X-Client-Cert` 头（URL 转义）传递，后端 `openssl verify -no_check_time -partial_chain -CAfile certs/ca.crt` 验证签名后才解析 CN
+- **CA 级信任**：`certs/ca.crt` 信任列表（项目自签 CA + RootCA/JSCA）签发的所有证书均可登录；容忍过期中间 CA；叶子证书过期拒绝（`checkend`）
+- **国密 U-Key 支持**：浏览器通过 Windows 证书库出示 U-Key 证书（Edge/Chrome 可用），第三方 CA 证书经信任列表放行
 - **CRL**：已完全移除 — 服务器证书不含 CRL 分发点（由 `certs/gen_server.py` 签发），CRL 分发端点已删除
 - **开发模式**：Vite 代理中间件根据 `X-Dev-User` 请求头动态选择客户端证书
 - 顶栏右侧显示姓名，hover 显示完整身份证号
@@ -558,16 +570,19 @@ id, entity_name, name, content, created_by, created_at, updated_at
 #### 客户端证书验证流程
 
 ```
-浏览器出示证书（任意 CA/算法）
-  → nginx 8443（TLS 终止，optional_no_ca 不验证）
+浏览器出示证书
+  → nginx 8443（TLS 终止，optional_no_ca 只请求不验证）
   → X-Client-Cert 头（URL 转义 PEM）
-  → FastAPI 解析 CN → 白名单检查 → 身份识别
+  → FastAPI openssl verify 签名验证（CA 级信任，-no_check_time -partial_chain）
+  → checkend 叶子有效期校验
+  → 解析 CN → 白名单检查 → 身份识别
 ```
 
-### 三层访问控制
-1. **TLS 层**（nginx 8443）：服务器出示证书（浏览器验证）；客户端证书被请求但不验证链（`optional_no_ca`）
-2. **应用白名单**（`ALLOWED_CERT_SUBJECTS`）：空 = 全部允许；非空 = 仅 CN 精确匹配的证书可访问 `/api/*`
-3. **资源权限**：文章/评论/实体/分类基于 `created_by` 身份证号比对，仅创建人可修改/删除
+### 四层访问控制
+1. **TLS 层**（nginx 8443）：服务器出示证书（浏览器验证）；客户端证书被请求（`optional_no_ca` 不验证链，交给下一层）
+2. **签名验证**（后端）：`openssl verify` 按 CA 级信任验签——伪造自签证书在此被拒（401）
+3. **应用白名单**（`ALLOWED_CERT_SUBJECTS`）：空 = 全部允许；非空 = 仅 CN 精确匹配的证书可访问 `/api/*`
+4. **资源权限**：文章/评论/实体/分类基于 `created_by` 身份证号比对，仅创建人可修改/删除
 
 ### 开发用户注册表
 

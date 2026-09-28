@@ -16,6 +16,7 @@ from app.config import (
     LLM_API_KEY, LLM_API_BASE, LLM_MODEL,
     VISION_API_KEY, VISION_API_BASE, VISION_MODEL,
     ASR_API_KEY, ASR_API_BASE, ASR_MODEL,
+    LLM_TIMEOUT, VISION_TIMEOUT, ASR_TIMEOUT, FFMPEG_TIMEOUT,
     UPLOAD_DIR as UPLOAD_DIR_STR,
     AUTO_PARSE,
 )
@@ -140,9 +141,10 @@ async def parse_image(file_path: str, original_name: str) -> str:
 
     storage_name = Path(file_path).name
     img_tag = f'<img src="/api/media/{storage_name}" alt="{html.escape(original_name, quote=True)}" style="max-width:100%;height:auto;display:block;border-radius:4px">'
+    original_esc = html.escape(original_name)
 
     if not VISION_API_KEY:
-        return f"{img_tag}\n\n# 图片：{original_name}\n\n> 未配置视觉模型 API，无法自动描述图片内容。请手动添加。"
+        return f"{img_tag}\n\n# 图片：{original_esc}\n\n> 未配置视觉模型 API，无法自动描述图片内容。请手动添加。"
 
     # Read and encode image
     with open(file_path, "rb") as f:
@@ -158,7 +160,7 @@ async def parse_image(file_path: str, original_name: str) -> str:
     mime = mime_map.get(ext, 'image/png')
 
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=VISION_TIMEOUT) as client:
             resp = await client.post(
                 f"{VISION_API_BASE.rstrip('/')}/chat/completions",
                 headers={
@@ -190,18 +192,28 @@ async def parse_image(file_path: str, original_name: str) -> str:
             if resp.status_code == 200:
                 data = resp.json()
                 desc = data["choices"][0]["message"]["content"].strip()
-                return f"{img_tag}\n\n# 图片描述：{original_name}\n\n{desc}"
+                return f"{img_tag}\n\n# 图片描述：{original_esc}\n\n{desc}"
             else:
                 logger.warning("Image description API returned %d: %s", resp.status_code, resp.text[:200])
     except Exception as e:
         logger.warning("Image description failed: %s", e)
 
-    return f"{img_tag}\n\n# 图片：{original_name}\n\n> 图片描述生成失败。请手动添加文章内容。"
+    return f"{img_tag}\n\n# 图片：{original_esc}\n\n> 图片描述生成失败。请手动添加文章内容。"
 
 
-async def parse_media(content_bytes: bytes, filename: str, content_type: str) -> str:
-    """Handle audio — try ASR transcription, surface errors in content."""
+async def parse_media(content_bytes: bytes, filename: str, content_type: str, storage_name: str = "") -> str:
+    """Handle audio — try ASR transcription, surface errors in content.
+
+    返回完整媒体描述（含 <audio> 标签）。调用方用 _replace_media_placeholder
+    替换原占位标签行，避免多次 reprocess 时旧结果在正文中越堆越多。
+    """
     name_no_ext = Path(filename).stem.replace('_', ' ').replace('-', ' ')
+    name_esc = html.escape(name_no_ext)
+    filename_esc = html.escape(filename)
+    audio_tag = (
+        f'<audio controls src="/api/media/{storage_name}" style="width:100%"></audio>'
+        if storage_name else ""
+    )
 
     logger.info(f"[AUDIO] parse_media called: filename={filename}, size={len(content_bytes)}, ASR_API_KEY={'set' if ASR_API_KEY else 'NOT SET'}")
     if ASR_API_KEY:
@@ -213,20 +225,20 @@ async def parse_media(content_bytes: bytes, filename: str, content_type: str) ->
                 if result.startswith("ERROR:"):
                     err_msg = result[len("ERROR:"):].strip()
                     return (
-                        f"# 音频：{name_no_ext}\n\n"
+                        f"{audio_tag}\n\n# 音频：{name_esc}\n\n"
                         f"> ⚠️ 语音识别失败：{err_msg}\n\n"
-                        f"> 文件名：{filename}\n"
+                        f"> 文件名：{filename_esc}\n"
                         f"> 类型：{content_type}"
                     )
-                return result
+                return f"{audio_tag}\n\n{result}" if audio_tag else result
         except Exception:
             pass
 
     # Fallback
     return (
-        f"# 音频：{name_no_ext}\n\n"
-        f"该音频文件记录了{name_no_ext}相关的内容。\n\n"
-        f"> 文件名：{filename}\n"
+        f"{audio_tag}\n\n# 音频：{name_esc}\n\n"
+        f"该音频文件记录了{name_esc}相关的内容。\n\n"
+        f"> 文件名：{filename_esc}\n"
         f"> 类型：{content_type}\n"
         f"> 注意：无法自动转写此音频的内容。请手动添加描述。"
     )
@@ -245,14 +257,15 @@ async def parse_video(file_path: str, original_name: str) -> str:
     poster_src = f"/api/media/{poster_name}"
     video_tag = f'<video controls src="/api/media/{storage_name}" poster="{poster_src}" style="width:100%;max-width:100%"></video>'
     name_no_ext = Path(original_name).stem.replace('_', ' ').replace('-', ' ')
+    name_esc = html.escape(name_no_ext)
 
     if not VISION_API_KEY:
-        return f"{video_tag}\n\n# 视频：{name_no_ext}\n\n> 未配置视觉模型 API，无法自动描述视频内容。"
+        return f"{video_tag}\n\n# 视频：{name_esc}\n\n> 未配置视觉模型 API，无法自动描述视频内容。"
 
     # ── Extract key frames ──
     cap = cv2.VideoCapture(file_path)
     if not cap.isOpened():
-        return f"{video_tag}\n\n# 视频：{name_no_ext}\n\n> 无法打开视频文件。"
+        return f"{video_tag}\n\n# 视频：{name_esc}\n\n> 无法打开视频文件。"
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
@@ -288,7 +301,7 @@ async def parse_video(file_path: str, original_name: str) -> str:
     cap.release()
 
     if not frames_b64:
-        return f"{video_tag}\n\n# 视频：{name_no_ext}\n\n> 无法从视频中提取画面。"
+        return f"{video_tag}\n\n# 视频：{name_esc}\n\n> 无法从视频中提取画面。"
 
     # ── Send frames to vision model ──
     n_frames = len(frames_b64)
@@ -307,7 +320,7 @@ async def parse_video(file_path: str, original_name: str) -> str:
         })
 
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=VISION_TIMEOUT) as client:
             resp = await client.post(
                 f"{VISION_API_BASE.rstrip('/')}/chat/completions",
                 headers={
@@ -329,7 +342,7 @@ async def parse_video(file_path: str, original_name: str) -> str:
                 data = resp.json()
                 desc = data["choices"][0]["message"]["content"].strip()
                 logger.info(f"[VIDEO] Vision model response ({len(desc)} chars): {desc[:150]}")
-                return f"{video_tag}\n\n# 视频内容描述：{name_no_ext}\n\n{desc}"
+                return f"{video_tag}\n\n# 视频内容描述：{name_esc}\n\n{desc}"
             else:
                 logger.info(f"[VIDEO] Vision API returned {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
@@ -338,8 +351,8 @@ async def parse_video(file_path: str, original_name: str) -> str:
     # Fallback: if vision model fails
     return (
         f"{video_tag}\n\n"
-        f"# 视频：{name_no_ext}\n\n"
-        f"该视频文件记录了{name_no_ext}相关的内容（时长约 {duration:.0f} 秒）。\n\n"
+        f"# 视频：{name_esc}\n\n"
+        f"该视频文件记录了{name_esc}相关的内容（时长约 {duration:.0f} 秒）。\n\n"
         f"> 视频内容自动识别失败。请手动添加描述。"
     )
 
@@ -403,7 +416,7 @@ def _convert_to_mono_wav(audio_bytes: bytes, orig_ext: str) -> bytes | None:
             ],
             input=audio_bytes,
             capture_output=True,
-            timeout=60,
+            timeout=FFMPEG_TIMEOUT,
         )
         if result.returncode != 0:
             stderr = result.stderr.decode('utf-8', errors='replace')[:300]
@@ -421,7 +434,9 @@ def _convert_to_mono_wav(audio_bytes: bytes, orig_ext: str) -> bytes | None:
 
 
 async def transcribe_media_from_bytes(content: bytes, filename: str, content_type: str) -> str:
-    """Transcribe audio via Zhipu ASR model (GLM-ASR-2512).
+    """Transcribe audio via ASR model (OpenAI-compatible /audio/transcriptions).
+
+    Supports Zhipu GLM-ASR-2512 and local llama-server Qwen3-ASR.
 
     Returns the transcribed text on success, or an error message string
     prefixed with "ERROR:" on failure (so the caller can surface it).
@@ -439,7 +454,7 @@ async def transcribe_media_from_bytes(content: bytes, filename: str, content_typ
 
     # ── Zhipu ASR endpoint ──
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=ASR_TIMEOUT) as client:
             resp = await client.post(
                 f"{ASR_API_BASE.rstrip('/').replace('/chat/completions', '')}/audio/transcriptions",
                 headers={"Authorization": f"Bearer {ASR_API_KEY}"},
@@ -449,17 +464,19 @@ async def transcribe_media_from_bytes(content: bytes, filename: str, content_typ
             if resp.status_code == 200:
                 data = resp.json()
                 text = data.get("text", "")
+                # llama.cpp 的 Qwen3-ASR 输出带 "language <语种><asr_text>" 前缀，循环剥掉避免污染正文
+                text = re.sub(r'^(?:(?:language\s+\w+|<\w+>)\s*)+', '', text or '')
                 if text and text.strip():
-                    logger.info(f"[ASR] GLM-ASR-2512 success: {text[:150]}")
+                    logger.info(f"[ASR] {ASR_MODEL} success: {text[:150]}")
                     return f"# 音频转录\n\n{text}"
-                return "ERROR: GLM-ASR-2512 返回了空文本。"
+                return f"ERROR: {ASR_MODEL} 返回了空文本。"
             else:
                 err_detail = resp.text[:300]
-                logger.info(f"[ASR] GLM-ASR-2512 returned {resp.status_code}: {err_detail}")
-                return f"ERROR: GLM-ASR-2512 识别失败（HTTP {resp.status_code}）：{err_detail}"
+                logger.info(f"[ASR] {ASR_MODEL} returned {resp.status_code}: {err_detail}")
+                return f"ERROR: {ASR_MODEL} 识别失败（HTTP {resp.status_code}）：{err_detail}"
     except Exception as e:
-        logger.info(f"[ASR] GLM-ASR-2512 error: {e}")
-        return f"ERROR: GLM-ASR-2512 调用异常：{e}"
+        logger.info(f"[ASR] {ASR_MODEL} error: {e}")
+        return f"ERROR: {ASR_MODEL} 调用异常：{e}"
 
 
 # ─── LLM helpers ───────────────────────────────────
@@ -509,7 +526,7 @@ async def generate_title(text: str) -> str:
 
     try:
         logger.info(f"[TITLE] Calling LLM model={LLM_MODEL} with {len(context)} chars of context...")
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=LLM_TIMEOUT) as client:
             resp = await client.post(
                 f"{LLM_API_BASE.rstrip('/')}/chat/completions",
                 headers={
@@ -622,7 +639,7 @@ async def upload_file(
             f'border:1px solid var(--c-border);margin:8px 0">📎 {escaped_name}（读取中…）</div>'
         )
     else:
-        raw_text = f"# {file.filename}\n\n不支持的文件格式。文件已作为附件保存。"
+        raw_text = f"# {escaped_name}\n\n不支持的文件格式。文件已作为附件保存。"
 
     # 3. Add persistent doc-attachment marker for non-media files (so the frontend
     #    can uniquely identify each file, even when multiple share the same name).
@@ -723,8 +740,10 @@ async def upload_file(
                     # Re-read from disk to avoid capturing content_bytes in closure
                     with open(file_path, "rb") as f:
                         audio_bytes = f.read()
-                    desc = await parse_media(audio_bytes, file.filename, file.content_type or "")
-                    full_text = raw_text + "\n\n" + desc
+                    desc = await parse_media(audio_bytes, file.filename, file.content_type or "", safe_name)
+                    # desc 自带 <audio> 标签：替换占位标签行而非追加，避免重复堆积
+                    audio_tag = f'<audio controls src="/api/media/{safe_name}" style="width:100%"></audio>'
+                    full_text = raw_text.replace(audio_tag, desc)
 
             # ── 向量分块先行：提取与 Q&A 检索共用同一套切分 ──
             from app.routes.qa import rebuild_article_chunks, embed_chunk_rows, get_article_chunks
