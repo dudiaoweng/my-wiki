@@ -1020,6 +1020,39 @@ def fallback_keyword_search(db, question, top_k=5):
 </marker>
 ```
 
+### 9.5.1 知识图谱增强搜索
+
+图谱不做图数据库查询，而是通过「实体标签写入向量分块（召回前）→ 附加信息注入 LLM 上下文（召回后）→ 图谱导航与实体筛选（人机交互）」三条路径增强搜索：
+
+**路径一：图谱节点 → 文章搜索（图 → 文）**
+
+实体节点的 `url` 指向 `/articles?search={name}`（`graph.py`）——点击图谱中的实体节点即按实体名对文章标题+正文做 ILIKE 搜索。前端文章列表还支持图谱节点选择（`selectedGraphNodeIds`，按 `entity:{name}::{type}` / `article:{id}` / `category:{id}` 匹配）与实体面板选择（`name::type` 精确匹配）**组合叠加的本地筛选**（`ArticleList.tsx`）。
+
+**路径二：实体标签写入向量分块，提升召回（召回前）**
+
+手动添加实体时（`entities.py` `add_entity`），把 `[实体: 名称 (类型)]` 标签行追加到所有提及该实体的分块文本末尾（无分块提及时挂到第一个分块或新建 `entity_tag` 块），随后 `_schedule_embedding_recompute()` 异步重算受影响分块的 embedding。效果：用户问句措辞与正文不一致时，只要命中实体名，向量相似度即可匹配到带标签的块——实体标注相当于给检索打了可控的「锚点」。实体改名/删除时同步维护分块标签行并重嵌入（`rename_entity` / `remove_entity`）。
+
+**路径三：实体附加信息同步分块 + QA 注入（召回后）**
+
+- `_sync_entity_info_to_chunks()`（`entities.py`）：`EntityInfo`（实体附加信息）增删改时，把 `[实体信息: 实体名 | 条目名: 内容]` 行同步到所有提及该实体的分块并重嵌入（先剥离旧行再写入，避免堆积）
+- `_collect_entity_info()`（`qa.py`）：问答时收集「问题中出现的实体名（扫全库 EntityInfo 表）+ 检索命中文章的实体」，查出其附加信息，格式化为「## 实体附加信息（知识图谱）」段注入 LLM 上下文——向量检索先筛出相关块，图谱信息再补充精确事实
+
+**前端跨文实体定位**：选中实体后，文章正文与评论中该实体的所有出现位置用 rehype 插件（`createEntityHighlightPlugin`）高亮，`useEntityOccurrences` 统计次数并支持逐个跳转（`EntityOccurrenceBar`）。
+
+完整链路：
+
+```
+LLM 提取实体/关系 ──► Article.entities + 块级标注
+        │
+        ├──► 图谱可视化（graph.py）──► 点击实体节点 ──► /articles?search=实体名
+        │
+        ├──► 实体标签/附加信息写入分块 + 重嵌入 ──► 提升向量召回
+        │
+        ├──► QA 检索后 _collect_entity_info 注入 LLM 上下文
+        │
+        └──► 前端实体面板筛选 + 正文高亮定位（name::type 精确匹配）
+```
+
 ### 9.6 响应式布局
 
 | 断点 | 布局 | 侧边栏 | 文章列表 | 实体面板 |
