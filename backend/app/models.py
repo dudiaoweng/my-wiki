@@ -86,7 +86,7 @@ class ArticleChunk(Base):
     article_id = Column(String, ForeignKey("articles.id", ondelete="CASCADE"), nullable=False, index=True)
     chunk_index = Column(String, nullable=False)  # e.g. "0", "1", "1.2"
     chunk_text = Column(Text, nullable=False)
-    embedding = Column(Text, nullable=True)  # JSON array of floats
+    # 向量只存 Qdrant（Qdrant 为向量唯一存储）；SQLite 仅保留分块元数据
     entities = Column(Text, nullable=True)  # JSON：该块提取到的实体/关系（块级标注）
 
     article = relationship("Article", back_populates="chunks")

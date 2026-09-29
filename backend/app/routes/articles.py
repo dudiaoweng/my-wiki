@@ -25,6 +25,7 @@ from app.routes.upload import (
 )
 from app.routes.qa import _extract_video_thumbnail
 from app.utils import read_upload_limited, MAX_UPLOAD_BYTES, delete_uploaded_files
+from app import vector_store
 import uuid
 
 logger = logging.getLogger(__name__)
@@ -157,7 +158,7 @@ async def _bg_extract(article_id: str, user_tags: list[str], need_title: bool) -
         # ── 向量分块先行：提取与 Q&A 检索共用同一套切分 ──
         from app.routes.qa import rebuild_article_chunks, embed_chunk_rows, get_article_chunks
         if (art.content or "").strip():
-            chunk_rows = rebuild_article_chunks(db2, article_id, art.content or "")
+            chunk_rows = await rebuild_article_chunks(db2, article_id, art.content or "")
             await embed_chunk_rows(db2, chunk_rows)
 
         # Run tag/entity extraction（基于向量分块逐段提取、逐段落库）and title generation concurrently
@@ -342,7 +343,7 @@ async def _bg_attachment_enhance(
         # ── 向量分块先行：提取与 Q&A 检索共用同一套切分 ──
         from app.routes.qa import rebuild_article_chunks, embed_chunk_rows, get_article_chunks
         if full_text.strip():
-            chunk_rows = rebuild_article_chunks(db2, article_id, full_text)
+            chunk_rows = await rebuild_article_chunks(db2, article_id, full_text)
             await embed_chunk_rows(db2, chunk_rows)
 
         # Step B: Generate title + extract tags/entities（基于向量分块逐段提取、逐段落库）
@@ -1083,6 +1084,7 @@ def delete_article(
 
     db.delete(article)
     db.commit()
+    vector_store.schedule_delete_by_article(article_id)  # 清理该文章全部分块点（含评论）
     delete_uploaded_files(attachment_files)
 
     # Clean up entity_infos that no longer appear in any article

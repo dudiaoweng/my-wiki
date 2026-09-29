@@ -1,8 +1,25 @@
 services:
+  qdrant:
+    image: qdrant/qdrant:v1.19.1   # 钉死版本，勿用 latest
+    container_name: my-wiki-qdrant
+    ports:
+      - "6333:6333"   # REST API；本地开发后端直连此端口
+    volumes:
+      - ./data/qdrant:/qdrant/storage   # 向量数据持久化（data/ 已 gitignore）
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bash", "-c", ":> /dev/tcp/127.0.0.1/6333"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
   my-wiki:
     image: my-wiki
     build: .
     container_name: my-wiki
+    depends_on:
+      qdrant:
+        condition: service_healthy
     ports:
       - "8000:8000"   # 登录页（HTTPS，无需客户端证书）
     volumes:
@@ -12,7 +29,8 @@ services:
       - ./certs:/certs:ro
       # 环境变量文件挂载（已 gitignore；模板见 .env.example）
       # 后端启动时 load_dotenv() 读取 /app/.env —— 修改后 docker compose restart 即生效
-      # 模型参数（API_BASE/MODEL/KEY）统一在 .env 中配置，此处不做任何覆盖
+      # 模型参数与 QDRANT_URL 统一在 .env 中配置，此处不做任何覆盖
+      # （Docker 部署 .env 中 QDRANT_URL=http://qdrant:6333，指向上方 qdrant 服务）
       - ./.env:/app/.env:ro
     restart: unless-stopped
 

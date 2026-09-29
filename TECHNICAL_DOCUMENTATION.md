@@ -1,6 +1,6 @@
 # 知识库系统 — 技术文档
 
-> **版本**: 2.0 | **最后更新**: 2026-09-02 | **作者**: dudiaoweng
+> **版本**: 2.2 | **最后更新**: 2026-09-28 | **作者**: dudiaoweng
 
 ---
 
@@ -31,7 +31,7 @@
 - 💬 **文章评论** — 评论 CRUD，支持多附件、内容纳入智能问答；仅评论人可编辑/删除
 - 🔐 **权限控制** — 基于身份证号的创建人验证，文章/评论/实体/分类均受保护
 - 📤 **文件上传解析** — 支持 .txt / .md / .docx / .xlsx / .pptx / .pdf / 图片 / 音视频；文档文本异步提取（读取中→解析中两阶段），自动通过 LLM 提取标题、实体和关系（分段提取、逐段落库）
-- 🔍 **智能搜索** — 基于向量嵌入 (embedding) 的语义搜索 + 关键词降级搜索
+- 🔍 **智能搜索** — 基于 Qdrant 向量检索的语义搜索
 - 🤖 **智能问答 (RAG)** — 检索增强生成，结合知识库文章和实体附加信息回答用户问题
 - 🕸️ **知识图谱** — D3.js 力导向图，展示文章-分类-实体之间的关系网络
 - 🏷️ **实体管理** — LLM 自动提取实体+关系（实体以「名称+类型」为标识），支持附加信息（类别+内容），用于增强知识图谱和 Q&A 上下文
@@ -134,7 +134,7 @@ my-wiki/
 ├── nginx/                       # nginx 反向代理配置
 │   └── mtls.conf                # 8443 TLS 终止 (optional_no_ca)
 ├── Dockerfile                   # 多阶段构建 (静态 ffmpeg → Node 前端构建 → Python 运行时)
-├── docker-compose.yml           # 双容器编排 (my-wiki + nginx)
+├── docker-compose.yml           # 三容器编排 (my-wiki + qdrant + nginx)
 ├── .dockerignore
 └── .claude/                     # Claude Code 配置
     ├── agents/code-reviewer.md  # 代码审查 Agent
@@ -154,7 +154,9 @@ my-wiki/
 | **Uvicorn** | 0.34.0 | ASGI 服务器 |
 | **SQLAlchemy** | 2.0.36 | ORM，数据库抽象 |
 | **Pydantic** | 2.10.3 | 数据验证与序列化 |
-| **SQLite** | 3.x | 嵌入式数据库 |
+| **SQLite** | 3.x | 嵌入式数据库（数据真相源） |
+| **Qdrant** | 1.19.1 | 向量数据库（语义检索索引，见 §9.1） |
+| **qdrant-client** | 1.19.0 | Qdrant Python 异步客户端 |
 | **httpx** | 0.28.1 | 异步 HTTP 客户端 (LLM API 调用) |
 | **python-multipart** | — | 文件上传解析 |
 | **python-docx** | — | Word 文档解析 |
@@ -163,7 +165,7 @@ my-wiki/
 | **PyPDF2** | — | PDF 文档解析 |
 | **python-dotenv** | — | 环境变量加载 |
 | **nginx** | 1.25 | 反向代理：mTLS TLS 终止 (`optional_no_ca`) |
-| **Docker** | — | 容器化部署 (docker compose 双容器) |
+| **Docker** | — | 容器化部署 (docker compose 三容器) |
 
 ### 2.2 前端
 
@@ -207,6 +209,12 @@ my-wiki/
 > 任何兼容 OpenAI API 格式的服务均可替换使用。未配置独立密钥时自动回退到 LLM 配置。
 > 所有配置统一在 `app/config.py` 中管理，各模块通过 `from app.config import ...` 引用。
 > **模型参数统一在仓库根目录 `.env` 配置**（docker-compose 不做覆盖）。项目当前默认智谱云端（open.bigmodel.cn）；备选本地 llama-server（`http://host.docker.internal:8080`，容器部署）在 `.env` 中以注释形式给出，ASR/Embedding 的本地模型坑见 §9.1 / §9.3。
+
+### 2.4 外部基础设施服务
+
+| 服务 | 用途 | 配置前缀 | 说明 |
+|------|------|---------|------|
+| **Qdrant** | 向量检索（语义搜索） | `QDRANT_` | 统一在 `.env` 配置：Docker 部署 `http://qdrant:6333`（compose 网络服务名）；本地开发 `http://localhost:6333`。SQLite 保存分块元数据（真相源），Qdrant 为向量唯一存储与检索索引（详见 §9.1） |
 
 ---
 
@@ -301,9 +309,9 @@ my-wiki/
 └──────────────┘  │    │ category_id (FK,IDX) │◄─┘    │   CASCADE)   │
                   └───►│   → Category         │       │ chunk_index  │
                        │ tags (JSON TEXT)     │       │ chunk_text   │
-                       │ entities (JSON TEXT) │       │ embedding    │
+                       │ entities (JSON TEXT) │       │ entities     │
                        │ created_at           │       │   (JSON TEXT)│
-                       │ updated_at (IDX)     │       │ entities     │
+                       │ updated_at (IDX)     │       │              │
                        │ attachment_path      │       │   (JSON TEXT)│
                        │ attachment_name      │       └──────────────┘
                        │ attachment_type      │       ┌──────────────┐
@@ -376,8 +384,9 @@ my-wiki/
 | `article_id` | VARCHAR(36) | FK→articles, ON DELETE CASCADE, INDEX | 所属文章 |
 | `chunk_index` | VARCHAR | NOT NULL | 分块序号 (如 "0", "1") |
 | `chunk_text` | TEXT | NOT NULL | 分块文本内容 |
-| `embedding` | TEXT | NULLABLE | 向量嵌入 (JSON 浮点数组，嵌入失败时为 NULL 但分块行保留) |
 | `entities` | TEXT | NULLABLE | 块级实体标注 (JSON 对象，分段提取时逐段落库) |
+
+> v2.2 起无 `embedding` 列：向量只存 Qdrant（point id = 分块 id，payload 含 article_id/chunk_index/chunk_text）。旧库由 `init_db()` 迁移执行 `ALTER TABLE article_chunks DROP COLUMN embedding` 删除。
 
 #### `entity_infos` — 实体附加信息
 
@@ -879,12 +888,16 @@ const notifyArticleSaved = useCallback(() => {
 ```python
 def chunk_article(content: str) -> list[str]:
     # 0. 移除 HTML 注释 (<!-- doc-attachment --> 等附件标记是元数据, 不产生分块)
-    # 1. 按 Markdown 标题分割 (##, ###)
+    # 1. 按 Markdown 标题分割 (##, ###)（标题边界不重叠）
     # 2. 长段落按双换行分割
     # 3. 超长段落按单换行分割
-    # 4. 超长行按字符数硬截断 (2000 字符)
-    # 保证每块不超过 MAX_CHUNK_CHARS
+    # 4. 超长行按字符数硬截断 (MAX_CHUNK_CHARS，.env 可配置，默认 512)
+    # 5. 滑动重叠 (CHUNK_OVERLAP，.env 可配置，默认 100)：基础切分按
+    #    MAX_CHUNK_CHARS - OVERLAP 进行，块 i 开头前置块 i-1 尾部 OVERLAP 字符
+    # 保证每块不超过 MAX_CHUNK_CHARS；重叠只作用于段内（不跨标题边界）
 ```
+
+分块参数均可在 `.env` 配置：`MAX_CHUNK_CHARS`（默认 512）、`CHUNK_OVERLAP`（默认 100）。改动后需执行 `backend/rebuild_chunks.py` 一次性全量重建存量分块（旧分块保持旧粒度，新旧并存的检索质量会不一致）。
 
 #### 词嵌入生成
 
@@ -892,7 +905,7 @@ def chunk_article(content: str) -> list[str]:
 async def get_embedding(text: str) -> list[float]:
     # POST {base}/embeddings
     # 模型: embedding-3（云端）/ bge-m3-Q4_K_M（本地 llama-server）
-    # 文本截断 2000 字符
+    # 文本截断 2000 字符（问题上限；分块本身 ≤ 512）
     # 返回浮点向量
 ```
 
@@ -906,21 +919,29 @@ async def ensure_embeddings(db, force=False):
     async with _embedding_lock:
         # 1. 增量检测: 对比缓存计数与 Article 总数
         # 2. 仅对缺失 chunk 的文章计算嵌入
-        # 3. force=True 时删除旧 chunk 重新计算全部
+        # 3. force=True 时删除旧 chunk 重新计算全部（先清 Qdrant 点）
+        # 4. 每篇文章 commit 后同步 upsert 到 Qdrant（best-effort）
 ```
 
-#### 语义搜索
+**Qdrant 存储架构（v2.2）**：SQLite（`article_chunks` 表）保存**分块元数据**（chunk_text、块级实体标注）作为真相源；**向量只存 Qdrant**——point id = 分块 uuid，payload = `{article_id, chunk_index, chunk_text}`（entities 不入 payload，检索命中后回查 DB 行取块级标注）。所有写入路径（`embed_chunk_rows` / `ensure_embeddings` / 评论重建 / 实体标签重嵌入）计算向量后直接 upsert；删除路径（文章/评论删除、分块重建）同步删点或经线程池调度删除；Qdrant 掉线时写入只 log 不阻塞（缺失的分块由下次启动同步重算补齐），检索则直接失败（见下）。`init_db()` 迁移已对旧库执行 `DROP COLUMN embedding`。
+
+**启动同步（`sync_qdrant`）**：lifespan 中 fire-and-forget（幂等，双 uvicorn 只跑一次），Qdrant 连不上时重试 5×30s 后放弃、服务器照常启动。流程：集合就绪（维度按 `QDRANT_VECTOR_SIZE`，与嵌入模型实际输出不符时以首个新向量自动纠正重建）→ `ensure_embeddings` 建缺失分块 → 持锁差异同步（**DB 有而 Qdrant 无的分块 → 重算嵌入并 upsert**——Qdrant 卷丢失/集合重建时本步自动全量重建；Qdrant 有而 DB 无 → 孤儿清理）。中断后重启再次执行同一差集，已 upsert 的分块不重算，天然幂等。
+
+#### 语义搜索（Qdrant）
 
 ```python
 async def semantic_search(db, question, top_k=5) -> list[tuple[float, Article, ArticleChunk | None]]:
-    # 1. ensure_embeddings(db)  — 增量计算缺失的嵌入 (asyncio.Lock 保护)
-    # 2. q_embedding = get_embedding(question)
-    # 3. 遍历所有 chunk，计算余弦相似度
-    # 4. 按文章去重，取 top_k
-    # 5. 所有嵌入计算失败 → fallback_keyword_search
+    # 1. ensure_embeddings(db)  — 新文章首次问答时懒建分块
+    # 2. q_embedding = get_embedding(question)  — 失败抛 EmbeddingError
+    # 3. vector_store.search(q_embedding, limit=50)  — Qdrant query_points
+    #    (Cosine 距离下 score 即相似度，越大越相关)
+    # 4. 按 point id 回查 ArticleChunk 行 —— 跳过 DB 已删的陈旧点（兜底），
+    #    每文章取最高分块去重，取 top_k
     # 返回值携带命中的分块行 (chunk) —— QASource.entities 取自该块的块级实体
-    # 标注，前端在来源卡片显示实体 chips；关键词兜底路径 chunk=None
+    # 标注，前端在来源卡片显示实体 chips
 ```
+
+**失败语义（完全依赖 Qdrant）**：不再有 SQLite 暴力比对 / 关键词兜底。Qdrant 不可用 → `VectorStoreError` → 问答返回「知识库向量检索服务（Qdrant）当前不可用…」；嵌入模型失败 → 「嵌入模型调用失败…」。写入路径不受影响（best-effort），下次启动同步补差。
 
 #### 实体信息增强
 
@@ -933,17 +954,6 @@ def _collect_entity_info(question, top_chunks, db) -> str:
     #    ## 实体附加信息（知识图谱）
     #    **实体名**:
     #      - 类别: 内容
-```
-
-#### 降级搜索
-
-当嵌入 API 不可用时，使用 CJK 双字母组 + 英文单词的简单关键词匹配:
-
-```python
-def fallback_keyword_search(db, question, top_k=5):
-    # CJK: 滑窗取相邻字符对 (如 "观察者模式" → ["观察", "察者", "者模", "模式"])
-    # EN: 取 >=2 字母的单词
-    # 标题匹配权重 3.0, 内容匹配权重 1.0
 ```
 
 ### 9.2 文件上传解析
@@ -1037,6 +1047,30 @@ def fallback_keyword_search(db, question, top_k=5):
 - `_sync_entity_info_to_chunks()`（`entities.py`）：`EntityInfo`（实体附加信息）增删改时，把 `[实体信息: 实体名 | 条目名: 内容]` 行同步到所有提及该实体的分块并重嵌入（先剥离旧行再写入，避免堆积）
 - `_collect_entity_info()`（`qa.py`）：问答时收集「问题中出现的实体名（扫全库 EntityInfo 表）+ 检索命中文章的实体」，查出其附加信息，格式化为「## 实体附加信息（知识图谱）」段注入 LLM 上下文——向量检索先筛出相关块，图谱信息再补充精确事实
 
+**路径四：实体直召（`entity_recall`，图谱确定性召回）**
+
+向量检索的补充路径——embedding 对专有名词不敏感时（如「汤和干了什么」的最佳匹配块相似度仅 0.388，被旧阈值 0.4 过滤），用实体名这条**确定性信号**兜底召回：
+
+```
+问句 ──子串匹配──► 知识图谱实体名（全库文章 entities JSON）
+                      │
+                      ▼
+               含该实体的文章 ──► chunk_text 含实体名的分块（每文章一条）
+                      │
+                      ▼
+               与向量结果按文章去重合并（向量命中优先；直召块给保底分
+               ENTITY_RECALL_SCORE=0.5，且**不经过 QA_MIN_RELEVANCE 阈值过滤**）
+                      │
+                      ▼
+               sources 展示 + 实体附加信息注入 + LLM 上下文
+```
+
+要点：
+- 实体名长度 ≥ 2 防单字噪声；子串匹配不要求分词
+- 直召是确定性匹配（实体名出现在分块文本中），不受阈值限制——调高 `QA_MIN_RELEVANCE` 也不会切断此路径
+- 与向量结果按文章去重：向量已命中（分数达标）的文章不再重复直召
+- 相关度阈值默认 0.3（`QA_MIN_RELEVANCE`，可环境变量调节）：embedding-3（2048 维）对真实匹配块分数普遍在 0.3-0.42，0.4 会漏掉有效结果；噪声块通常 < 0.27
+
 **前端跨文实体定位**：选中实体后，文章正文与评论中该实体的所有出现位置用 rehype 插件（`createEntityHighlightPlugin`）高亮，`useEntityOccurrences` 统计次数并支持逐个跳转（`EntityOccurrenceBar`）。
 
 完整链路：
@@ -1047,6 +1081,8 @@ LLM 提取实体/关系 ──► Article.entities + 块级标注
         ├──► 图谱可视化（graph.py）──► 点击实体节点 ──► /articles?search=实体名
         │
         ├──► 实体标签/附加信息写入分块 + 重嵌入 ──► 提升向量召回
+        │
+        ├──► QA 实体直召（entity_recall）──► 向量未命中时按实体名兜底召回
         │
         ├──► QA 检索后 _collect_entity_info 注入 LLM 上下文
         │
@@ -1094,7 +1130,7 @@ LLM 提取实体/关系 ──► Article.entities + 块级标注
 - 解析状态追踪：`processing` 字段两阶段——`"processing:{safe_name}"`（读取中：文本提取）→ `"recognizing"`/`"recognizing:{safe_name}"`（解析中：LLM 识别）→ 完成清空。文档上传后文本提取与识别结果分两步落库
 - 前端 AttachmentGallery 根据 processing 字段匹配附件，分别显示"读取中…"/"解析中…"遮罩；文章详情页与评论列表各 5 秒轮询，两阶段各自落库后前端即可看到；识别完成清空遮罩并通知刷新
 - **自动解析开关（`AUTO_PARSE`）**：默认关闭（`0`）。控制 LLM 类后台解析（媒体描述、标签/实体/标题提取）。上传接口与评论的文档附件（txt/md/docx/xlsx/pptx/pdf）文本提取为纯本地解析，请求返回后由后台任务异步执行并置 `processing` 标志，不受开关影响；关闭时媒体描述与标签/实体提取跳过，文章编辑器的附件仍保留"待解析"占位符。手动 reprocess/recognize 端点不受开关影响
-- **分段 LLM 提取（v2.0）**：标签/实体/关系提取基于向量分块逐段进行——每段最多 2000 字符、最多 10 段；每段完成后立即落库（逐段落库），后续段失败时已保存的结果不受影响。各段结果按「名称+类型」（实体）/ 五元组（关系）去重合并。详见 §9.9
+- **分段 LLM 提取（v2.0）**：标签/实体/关系提取基于向量分块逐段进行——每段最多 512 字符、段数不设上限；每段完成后立即落库（逐段落库），后续段失败时已保存的结果不受影响。各段结果按「名称+类型」（实体）/ 五元组（关系）去重合并。详见 §9.9
 
 ### 9.8 权限控制体系（v1.3+）
 
@@ -1113,7 +1149,7 @@ LLM 提取实体/关系 ──► Article.entities + 块级标注
 
 ### 9.9 分段提取与块级实体标注（v2.0）
 
-**问题背景**：单次 LLM 提取受上下文长度限制（默认截断 2000 字符），长文档后半部分的实体/关系会丢失。
+**问题背景**：单次 LLM 提取受上下文长度限制（默认截断 512 字符），长文档后半部分的实体/关系会丢失。
 
 **方案 A — 单一分段来源**：提取与语义搜索共用同一套向量分块（`article_chunks` 表）。上传/评论/附件重解析在提取前统一调用 `rebuild_article_chunks()` 重建分块并嵌入，随后从分块行读取文本逐段提取——不再重复切分逻辑，保证「检索到的块」与「提取用的段」一一对应。
 
@@ -1142,9 +1178,9 @@ async for seg_tags, seg_entities in extract_chunks_iter(texts):
 **块级标注的下游应用**：`semantic_search()` 返回命中的分块行，`QASource.entities`（经 `parse_chunk_entities(chunk)` 解析）随检索结果返回前端，QA 回答的来源卡片显示实体 chips（`🏷 实体名`），用户可直观看到检索依据。
 
 **限制与容错**：
-- 每段 ≤ 2000 字符、最多 10 段（超出部分不提取）
+- 每段 ≤ 512 字符、段数不设上限（全部分段处理；长文档提取调用量随段数线性增长）
 - `merge_tags`（标签按名称去重）/ `merge_entities`（实体按名称+类型、关系按五元组去重）合并各段结果
-- 嵌入失败时分块行保留（`embedding=None`），提取不受影响；检索时走关键词兜底
+- 嵌入失败时分块行保留（无向量点），提取不受影响；下次启动同步重算补齐
 - 评论分块以 `comment.{id}.{i}` 索引存储，喂给提取时剥离 `[评论] ` 前缀
 - 文档提取（`extract_chunks_iter`）是异步生成器，调用方需用计数器迭代（`enumerate()` 不支持异步生成器）
 
@@ -1414,6 +1450,8 @@ npm run preview      # 预览生产构建
 # 后端
 python -m app.main                      # 开发模式 (8000 HTTPS + CERT_OPTIONAL, 热重载)
 python run.py                           # 生产模式 (双端口: 8000/8444)
+python rebuild_chunks.py                # 一次性全量重建分块（改 MAX_CHUNK_CHARS 后执行）
+                                        #   : 按新规则重切 → 回填实体标签/附加信息行 → 重嵌入 → Qdrant 同步
 ```
 
 ### 13.4 添加新功能
@@ -1477,18 +1515,19 @@ export CORS_ORIGINS="https://your-domain.com"
 
 ### 14.2 部署方案
 
-**方案 A: Docker Compose（推荐，v1.9 双容器）**
+**方案 A: Docker Compose（推荐，v2.2 三容器）**
 
 ```bash
 docker compose up -d --build
 # 8000 登录页 / 8443 mTLS 应用
 ```
 
-**双容器架构：**
+**三容器架构：**
 
 | 容器 | 镜像 | 职责 |
 |------|------|------|
 | `my-wiki` | 多阶段构建（静态 ffmpeg → Node 18 → Python 3.11-slim） | 后端双端口服务（8000 HTTPS 登录页 / 8444 应用） |
+| `my-wiki-qdrant` | `qdrant/qdrant:v1.19.1`（钉死版本） | 向量检索索引（REST 6333），启动懒迁移自动同步 |
 | `my-wiki-nginx` | `nginx:1.25` | 8443 TLS 终止（`optional_no_ca`） |
 
 ```
@@ -1496,10 +1535,12 @@ docker compose up -d --build
   ├─ :8000  HTTPS ──────────────► my-wiki:8000   (登录页, CERT_NONE)
   └─ :8443  HTTPS + 客户端证书 ──► nginx ── HTTP ─► my-wiki:8444  (应用)
                                   (TLS 终止, X-Client-Cert 头)
+my-wiki ── QDRANT_URL ──► qdrant:6333 (向量检索)
 ```
 
 - 多阶段构建：静态 ffmpeg 二进制（`mwader/static-ffmpeg:7.0`，替代 apt 版 ~450MB）→ Node 18 构建前端（`vite build` 输出到 `backend/static`）→ Python 3.11-slim 运行时（OpenCV headless）
-- 数据持久化：本机目录绑定挂载 — `./data`（SQLite）/ `./uploads`（上传文件）
+- 数据持久化：本机目录绑定挂载 — `./data`（SQLite + Qdrant 向量数据 `./data/qdrant`）/ `./uploads`（上传文件）
+- **Qdrant 连接**：统一在 `.env` 中配置 `QDRANT_URL`——Docker 部署用 `http://qdrant:6333`（compose 网络按服务名解析），本地开发用 `http://localhost:6333`；`my-wiki` 经 `depends_on: qdrant (service_healthy)` 保证 Qdrant 先就绪
 - **环境变量**：模型参数（KEY/BASE/MODEL）、超时、开关、白名单**统一在仓库根目录 `.env`**（Docker 挂载为 `/app/.env`，本地开发由 `config.py` 显式加载），docker-compose 不做覆盖
 - **证书**：`./certs:/certs:ro` 只读挂载（镜像不含证书，启动必须提供）；SSL 路径使用容器内绝对路径（`/certs/server.crt` 等）；nginx 容器挂载同一目录（`/etc/nginx/certs`）
 - 修改 `.env` 后执行 `docker compose restart` 即生效（`.env` 挂载 + `load_dotenv()` 在进程启动时读取）；**修改 `docker-compose.yml` 则需 `docker compose up -d` 重建容器**（容器创建时 bake 的环境变量不会随 restart 刷新，且 `load_dotenv` 不覆盖已存在的环境变量）
@@ -1509,8 +1550,11 @@ docker compose up -d --build
 **方案 B: 本机运行**
 
 ```bash
+# Qdrant（二选一）：
+#   docker compose up -d qdrant            # compose 只起向量库
+#   docker run -d -p 6333:6333 -v <本机路径>:/qdrant/storage qdrant/qdrant:v1.19.1
 cd frontend && npm run build          # 构建前端 → backend/static/
-cd backend && .venv\Scripts\python run.py
+cd backend && .venv\Scripts\python run.py   # 本地开发：.env 中 QDRANT_URL 切换为 http://localhost:6333
 ```
 
 `run.py` 启动双端口服务：

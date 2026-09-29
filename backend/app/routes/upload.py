@@ -748,7 +748,7 @@ async def upload_file(
             # ── 向量分块先行：提取与 Q&A 检索共用同一套切分 ──
             from app.routes.qa import rebuild_article_chunks, embed_chunk_rows, get_article_chunks
             if full_text.strip():
-                chunk_rows = rebuild_article_chunks(db2, article_id, full_text)
+                chunk_rows = await rebuild_article_chunks(db2, article_id, full_text)
                 await embed_chunk_rows(db2, chunk_rows)
 
             # Step C: 标签/实体提取（LLM，AUTO_PARSE 控制）——基于向量分块逐段提取、逐段落库

@@ -10,6 +10,7 @@ from app.dependencies import get_db
 from app.models import Article, ArticleChunk, EntityInfo
 from app.auth import get_client_cert, CertInfo
 from app.routes.graph import invalidate_graph_cache
+from app import vector_store
 import asyncio
 
 logger = logging.getLogger(__name__)
@@ -91,16 +92,20 @@ def _schedule_embedding_recompute(chunks: list):
             db_chunks = db2.query(ArticleChunk).filter(
                 ArticleChunk.id.in_(chunk_ids)
             ).all()
+            # 向量只存 Qdrant：计算后直接 upsert（payload 携带更新后的 chunk_text）
+            points = []
             for ch in db_chunks:
                 try:
                     vec = await get_embedding(ch.chunk_text)
-                    ch.embedding = json.dumps(vec)
+                    points.append(vector_store.make_point(
+                        ch.id, vec, ch.article_id, ch.chunk_index, ch.chunk_text,
+                    ))
                 except Exception:
                     logger.warning("Failed to compute embedding for chunk %s", ch.id, exc_info=True)
-            db2.commit()
+            if points:
+                await vector_store.upsert_chunks(points)
         except Exception:
             logger.warning("Background embedding recompute failed", exc_info=True)
-            db2.rollback()
         finally:
             db2.close()
 
@@ -186,13 +191,15 @@ async def add_entity(body: EntityAddRequest, db: Session = Depends(get_db),
                 chunks[0].chunk_text = chunks[0].chunk_text.rstrip() + tag_line
                 matched_chunks.append(chunks[0])
             else:
-                # Article has no chunks yet — create one for the entity
-                db.add(ArticleChunk(
+                # Article has no chunks yet — create one for the entity；
+                # 向量由下方 _schedule_embedding_recompute 计算并写入 Qdrant
+                tag_chunk = ArticleChunk(
                     article_id=article.id,
                     chunk_index="entity_tag",
                     chunk_text=f"[实体标签] {name} ({etype})",
-                    embedding=None,
-                ))
+                )
+                db.add(tag_chunk)
+                matched_chunks.append(tag_chunk)
 
         all_matched_chunks.extend(matched_chunks)
 

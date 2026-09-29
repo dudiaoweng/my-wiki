@@ -28,6 +28,7 @@ from starlette.responses import FileResponse, HTMLResponse, RedirectResponse, JS
 from app.database import init_db, SessionLocal
 from app.models import Category, Article, Comment
 from app.routes import articles, categories, tags, entities, stats, graph, qa, upload, comments
+from app import vector_store
 from app.config import UPLOAD_DIR as UPLOAD_DIR_STR
 from app.auth import verify_client_cert, get_client_cert, verify_client_cert_pem, CertInfo
 
@@ -175,7 +176,11 @@ async def lifespan(app: FastAPI):
     seed_database()
     _cleanup_qa_temp_files()
     _reset_stale_processing()
+    # 启动懒迁移：SQLite 分块 → Qdrant（fire-and-forget，不阻塞启动；
+    # _start_qdrant_sync 幂等，run.py 双 uvicorn 共用 app 时只跑一次）
+    qa._start_qdrant_sync()
     yield
+    await vector_store.close()
 
 def _cleanup_qa_temp_files():
     upload_dir = Path(UPLOAD_DIR_STR)

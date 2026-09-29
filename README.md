@@ -36,7 +36,7 @@
 ### 🤖 AI 能力（需配置 LLM API）
 - **标签提取**：自动从文章内容提取概念标签
 - **实体识别**：仅提取具有具体名称的实体（人物/组织/地点/事件/产品/作品）及其关系，泛化概念归入标签；实体以「名称+类型」为标识（同名不同类型视为不同实体），关系两端携带类型
-- **分段提取**：长文档按向量分块分段提取（每段 2000 字符、最多 10 段），逐段落库——段级失败不丢失已解析结果；提取与语义搜索共用同一套分块
+- **分段提取**：长文档按向量分块分段提取（每段 512 字符、重叠 100、段数不设上限），逐段落库——段级失败不丢失已解析结果；提取与语义搜索共用同一套分块
 - **文档解析两阶段**：上传/评论的文档附件文本提取为本地解析、后台异步执行（读取中…），LLM 识别（标签/实体/关系）紧随其后（解析中…），由 `AUTO_PARSE` 开关控制
 - **图片描述**：上传图片自动用视觉模型生成描述
 - **视频分析**：提取关键帧，通过视觉模型生成视频内容描述
@@ -188,7 +188,7 @@ my-wiki/
 ├── nginx/                         # nginx mTLS 反向代理配置
 │   └── mtls.conf                  # TLS 终止 + optional_no_ca + X-Client-Cert 头
 ├── Dockerfile                     # 多阶段构建（静态 ffmpeg → Node 前端 → Python 运行时）
-├── docker-compose.yml             # 双容器编排（my-wiki + nginx）
+├── docker-compose.yml             # 三容器编排（my-wiki + qdrant + nginx）
 ├── .env.example                   # 环境变量模板（复制为 .env 使用，已 gitignore）
 ├── .dockerignore
 └── README.md
@@ -361,8 +361,9 @@ docker compose up -d --build
 ```
 
 - 多阶段构建：静态 ffmpeg 二进制 → Node 构建前端 → Python slim 运行时（OpenCV headless）
-- **双容器架构**：my-wiki（应用）+ nginx（mTLS TLS 终止）
-- 数据持久化：本机目录绑定挂载（`./data` SQLite / `./uploads` 上传文件）
+- **三容器架构**：my-wiki（应用）+ qdrant（向量检索，`qdrant/qdrant:v1.19.1`）+ nginx（mTLS TLS 终止）
+- 数据持久化：本机目录绑定挂载（`./data` SQLite + Qdrant 向量数据 / `./uploads` 上传文件）
+- **Qdrant 连接**：统一在 `.env` 中配置 `QDRANT_URL`——Docker 部署 `http://qdrant:6333`（compose 网络服务名），本地开发 `http://localhost:6333`（`docker compose up -d qdrant` 单独起向量库即可）
 - **环境变量**：统一在仓库根目录 `.env`（模型参数、超时、开关、白名单），docker-compose 不做覆盖
 - **证书挂载**：`./certs:/certs:ro`（镜像不含证书，启动必须提供）
 - 修改根目录 `.env` 后执行 `docker compose restart` 即可生效（无需重建容器/镜像；若修改了 `docker-compose.yml` 则需 `docker compose up -d` 重建容器）
@@ -535,12 +536,13 @@ processing, created_by, updated_by, created_at, updated_at
 ```
 - 关联文章，级联删除；支持多附件
 
-### ArticleChunk (文章分块 + 向量)
+### ArticleChunk (文章分块)
 ```
-id, article_id, chunk_index, chunk_text, embedding (JSON数组), entities (JSON对象)
+id, article_id, chunk_index, chunk_text, entities (JSON对象)
 ```
 - 评论内容以 `comment.{id}.{i}` 索引分块纳入
 - `entities` 为块级实体标注：分段提取时逐段落库，检索命中时随来源返回前端
+- **向量不存 SQLite**：embedding 只存 Qdrant（point id = 分块 id，payload 含 article_id/chunk_index/chunk_text），SQLite 仅保留分块元数据
 
 ### EntityInfo (实体附加信息)
 ```
@@ -623,7 +625,7 @@ const DEV_USERS = [
 - 涵盖：标签/实体提取、图片/视频描述、标题生成、问答系统提示
 
 ### LLM 集成
-- 标签/实体提取：共享 `app/llm_extract.py`（60s 超时 + 2 次重试 + JSON 容错解析）；长文档分段提取（`extract_chunks_iter`，每段 2000 字符、最多 10 段），结果按「名称+类型」/ 关系五元组去重合并，逐段落库
+- 标签/实体提取：共享 `app/llm_extract.py`（60s 超时 + 2 次重试 + JSON 容错解析）；长文档分段提取（`extract_chunks_iter`，每段 512 字符、段数不设上限），结果按「名称+类型」/ 关系五元组去重合并，逐段落库
 - 上传文件：异步提取（通过 `asyncio.to_thread` 桥接同步函数）+ 后台渐进增强
 - 文章编辑：仅内容变更时触发提取
 - 标题生成：基于内容理解合成标题（非句子提取），温度 0.7，8000 字符上下文
@@ -638,11 +640,12 @@ const DEV_USERS = [
 
 ### 向量搜索 (RAG)
 - 文章先上传显示，后台 LLM 增强（标题/内容/标签/实体）完成后才计算嵌入
-- 文章按 Markdown 标题分段（附件标记 HTML 注释不参与分块），每段调用 embedding API 生成向量；嵌入失败时分块行保留，检索走关键词兜底
-- 分块是唯一分段来源：语义搜索与 LLM 分段提取共用 `article_chunks` 表
+- 文章按 Markdown 标题分段（附件标记 HTML 注释不参与分块），每段调用 embedding API 生成向量**写入 Qdrant**；嵌入失败时分块行保留，下次启动同步重算补齐
+- 分块是唯一分段来源：语义搜索与 LLM 分段提取共用 `article_chunks` 表；分块参数（`MAX_CHUNK_CHARS`/`CHUNK_OVERLAP`）在 `.env` 配置，改动后执行 `backend/rebuild_chunks.py` 全量重建
 - 增量计算（`asyncio.Lock` 保护 + 记录已处理文章数）
-- 问答时计算 query 向量与所有 chunk 的余弦相似度，返回命中的分块行及其块级实体标注
-- LLM 不可用时自动降级为关键词匹配（CJK 双字母组 + 英文单词）
+- 问答时经 Qdrant `query_points` 检索（Cosine 相似度，阈值 `QA_MIN_RELEVANCE` 默认 0.3），按 point id 回查分块行返回命中的块级实体标注
+- **图谱实体直召**：问句中的实体名直接定位提及该实体的分块（确定性匹配，不受向量阈值限制），与向量结果按文章去重合并
+- 检索完全依赖 Qdrant：Qdrant 不可用 / 嵌入模型失败时问答返回明确错误提示（无关键词兜底）
 
 ### 文章内搜索
 - 使用 rehype 插件在渲染的 HTML 文本节点中高亮匹配项

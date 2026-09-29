@@ -117,12 +117,13 @@ def extract_tags_and_entities(text: str, max_chars: int = 2000) -> tuple[list[st
     return tags, entities
 
 
-async def extract_chunks_iter(segments: list[str], max_chars: int = 2000, max_segments: int = 10):
+async def extract_chunks_iter(segments: list[str], max_chars: int = 2000, max_segments: int | None = None):
     """分段提取的异步迭代器：每段完成后立即 yield (tags, entities_dict)。
 
     分段列表由调用方提供（向量分块 ArticleChunk），提取与 Q&A 检索共用同一
     套切分。调用方可在每段 yield 后立即落库（逐段落库）——后续段失败时已
     保存的结果不受影响。未配置 API key 或无分段时不产出任何结果。
+    max_segments 为 None 时不设段数上限（全部分段处理）。
     """
     if not LLM_API_KEY:
         logger.info("LLM extraction skipped: no LLM_API_KEY configured")
@@ -130,7 +131,7 @@ async def extract_chunks_iter(segments: list[str], max_chars: int = 2000, max_se
     if not segments:
         return
 
-    if len(segments) > max_segments:
+    if max_segments is not None and len(segments) > max_segments:
         logger.info(
             "LLM chunked extraction: %d segments, only first %d processed",
             len(segments), max_segments,

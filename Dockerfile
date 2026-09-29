@@ -49,7 +49,8 @@ COPY --from=frontend-build /build/backend/static ./static
 # SQLite 数据 + 上传文件持久化
 VOLUME ["/app/data", "/app/uploads"]
 
-# 默认值 — 实际运行时由挂载的 /app/.env 覆盖（config.py load_dotenv 加载）
+# 默认值 — 实际运行时由挂载的 /app/.env 覆盖（config.py load_dotenv 加载）。
+# QDRANT_URL 统一在 .env 中配置（Docker 用 http://qdrant:6333、本地开发用 localhost）
 ENV DATABASE_URL=sqlite:////app/data/knowledge_base.db \
     UPLOAD_DIR=/app/uploads \
     HOST=0.0.0.0 \

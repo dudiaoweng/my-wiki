@@ -2,7 +2,6 @@ import asyncio
 import html
 import json
 import logging
-import math
 import os
 import re
 import uuid
@@ -14,12 +13,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, joinedload
 from app.dependencies import get_db
 from app.models import Article, ArticleChunk, Comment, EntityInfo
+from app import vector_store
 from app.config import (
     LLM_API_KEY, LLM_API_BASE, LLM_MODEL,
     VISION_API_KEY, VISION_API_BASE, VISION_MODEL,
     ASR_API_KEY, ASR_API_BASE, ASR_MODEL,
     EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL,
-    QA_TEMPERATURE,
+    QA_TEMPERATURE, QA_MIN_RELEVANCE, MAX_CHUNK_CHARS, CHUNK_OVERLAP,
     LLM_TIMEOUT, VISION_TIMEOUT, ASR_TIMEOUT, EMBEDDING_TIMEOUT, FFMPEG_TIMEOUT,
     UPLOAD_DIR as UPLOAD_DIR_STR,
 )
@@ -80,7 +80,11 @@ class QAResponse(BaseModel):
 
 # ─── Embedding helpers ─────────────────────────────
 
-MAX_CHUNK_CHARS = 2000  # Keep chunks within embedding model token limits
+class EmbeddingError(Exception):
+    """嵌入模型调用失败（无法获得查询/分块向量）。"""
+
+
+# MAX_CHUNK_CHARS 从 app.config 导入（.env 可配置，默认 512）
 
 def chunk_article(content: str) -> list[str]:
     """Split article into chunks by markdown headings, then by size.
@@ -97,8 +101,8 @@ def chunk_article(content: str) -> list[str]:
         section = section.strip()
         if not section:
             continue
-        # Split long sections into sub-chunks
-        chunks.extend(_split_long_text(section, MAX_CHUNK_CHARS))
+        # Split long sections into sub-chunks（重叠只作用于段内，不跨标题边界）
+        chunks.extend(_split_long_text(section, MAX_CHUNK_CHARS, CHUNK_OVERLAP))
 
     # Ensure we have at least one chunk
     if not chunks:
@@ -107,35 +111,43 @@ def chunk_article(content: str) -> list[str]:
     return chunks
 
 
-def _split_long_text(text: str, max_chars: int) -> list[str]:
-    """Split text into chunks of at most max_chars, trying to break at natural boundaries."""
+def _split_long_text(text: str, max_chars: int, overlap: int = 0) -> list[str]:
+    """Split text into chunks of at most max_chars, trying to break at natural boundaries.
+
+    overlap > 0 时相邻分块共享尾部字符（滑动窗口语义）：基础切分按
+    max_chars - overlap 进行，块 i 开头前置块 i-1 的尾部 overlap 字符，
+    保证块总长仍 ≤ max_chars。
+    """
+    overlap = max(0, min(overlap, max_chars // 2))  # 防参数滥用
     if len(text) <= max_chars:
         return [text]
+
+    base_limit = max_chars - overlap - 1  # 预留重叠空间（-1 为前置重叠时的 '\n' 分隔符）
 
     result: list[str] = []
     # First try splitting by double newlines (paragraphs)
     paragraphs = text.split('\n\n')
     current = ''
     for para in paragraphs:
-        if len(current) + len(para) + 2 <= max_chars:
+        if len(current) + len(para) + 2 <= base_limit:
             current = (current + '\n\n' + para).strip()
         else:
             if current:
                 result.append(current)
             # If a single paragraph is still too long, split by single newlines
-            if len(para) > max_chars:
+            if len(para) > base_limit:
                 lines = para.split('\n')
                 sub = ''
                 for line in lines:
-                    if len(sub) + len(line) + 1 <= max_chars:
+                    if len(sub) + len(line) + 1 <= base_limit:
                         sub = (sub + '\n' + line).strip()
                     else:
                         if sub:
                             result.append(sub)
                         # If a single line is too long, hard split by char count
-                        if len(line) > max_chars:
-                            for i in range(0, len(line), max_chars):
-                                result.append(line[i:i + max_chars])
+                        if len(line) > base_limit:
+                            for i in range(0, len(line), base_limit):
+                                result.append(line[i:i + base_limit])
                         else:
                             sub = line
                 if sub:
@@ -144,6 +156,13 @@ def _split_long_text(text: str, max_chars: int) -> list[str]:
                 current = para
     if current:
         result.append(current)
+
+    # 重叠后处理：块 i 开头前置块 i-1 的尾部 overlap 字符
+    if overlap and len(result) > 1:
+        overlapped = [result[0]]
+        for prev, cur in zip(result, result[1:]):
+            overlapped.append((prev[-overlap:] + '\n' + cur).strip())
+        result = overlapped
 
     return result
 
@@ -179,16 +198,6 @@ async def get_embedding(text: str) -> list[float]:
         return data["data"][0]["embedding"]
 
 
-def cosine_similarity(a: list[float], b: list[float]) -> float:
-    """Compute cosine similarity between two vectors."""
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
-
-
 # Track last-known article count to skip repeated ensure_embeddings scans
 _embedded_article_count: int | None = None
 _embedding_lock = asyncio.Lock()
@@ -212,29 +221,27 @@ async def ensure_embeddings(db: Session, force: bool = False):
             articles = db.query(Article).all()
 
         for article in articles:
-            # For force mode: delete old chunks first
+            # For force mode: delete old chunks first（先清 Qdrant 点再删行）
             if force:
+                await vector_store.delete_by_article(article.id)
                 db.query(ArticleChunk).filter(ArticleChunk.article_id == article.id).delete()
+
+            # 本次循环内计算成功的 (chunk_row, vector) 对——向量只写 Qdrant，不落 SQLite
+            embedded_pairs: list[tuple[ArticleChunk, list[float]]] = []
 
             # Chunk and embed article content
             chunks = chunk_article(article.content)
             for i, chunk_text in enumerate(chunks):
+                row = ArticleChunk(
+                    article_id=article.id,
+                    chunk_index=str(i),
+                    chunk_text=chunk_text,
+                )
+                db.add(row)
                 try:
-                    vec = await get_embedding(chunk_text)
-                    db.add(ArticleChunk(
-                        article_id=article.id,
-                        chunk_index=str(i),
-                        chunk_text=chunk_text,
-                        embedding=json.dumps(vec),
-                    ))
+                    embedded_pairs.append((row, await get_embedding(chunk_text)))
                 except Exception:
                     logger.warning("Failed to embed chunk %s of article %s", i, article.id, exc_info=True)
-                    db.add(ArticleChunk(
-                        article_id=article.id,
-                        chunk_index=str(i),
-                        chunk_text=chunk_text,
-                        embedding=None,
-                    ))
 
             # Chunk and embed comments
             comments = db.query(Comment).filter(
@@ -252,99 +259,206 @@ async def ensure_embeddings(db: Session, force: bool = False):
                 comment_chunks = chunk_article(clean_comment)
                 for i, chunk_text in enumerate(comment_chunks):
                     idx = f"comment.{c.id[:8]}.{i}"
+                    row = ArticleChunk(
+                        article_id=article.id,
+                        chunk_index=idx,
+                        chunk_text=f"[评论] {chunk_text}",
+                    )
+                    db.add(row)
                     try:
-                        vec = await get_embedding(chunk_text)
-                        db.add(ArticleChunk(
-                            article_id=article.id,
-                            chunk_index=idx,
-                            chunk_text=f"[评论] {chunk_text}",
-                            embedding=json.dumps(vec),
-                        ))
+                        embedded_pairs.append((row, await get_embedding(chunk_text)))
                     except Exception:
-                        db.add(ArticleChunk(
-                            article_id=article.id,
-                            chunk_index=idx,
-                            chunk_text=f"[评论] {chunk_text}",
-                            embedding=None,
-                        ))
+                        logger.warning(
+                            "Failed to embed comment chunk %s of article %s", idx, article.id, exc_info=True,
+                        )
 
             db.commit()
+
+            # 同步写入 Qdrant（best-effort；失败的分块无向量，启动同步会重算补上）
+            if embedded_pairs:
+                await vector_store.upsert_chunks([
+                    vector_store.make_point(
+                        r.id, vec, r.article_id, r.chunk_index, r.chunk_text,
+                    )
+                    for r, vec in embedded_pairs
+                ])
 
         # Update cache
         _embedded_article_count = db.query(Article).count()
 
 
+# ─── 启动懒迁移：SQLite → Qdrant ──────────────────
+
+_sync_started = False
+_QDRANT_SYNC_RETRIES = 5
+_QDRANT_SYNC_RETRY_DELAY = 30.0  # 秒
+
+
+def _start_qdrant_sync() -> None:
+    """lifespan 调用：fire-and-forget，幂等（run.py 双 uvicorn 共用 app → lifespan 跑两次）。"""
+    global _sync_started
+    if _sync_started:
+        return
+    _sync_started = True
+    asyncio.get_running_loop().create_task(sync_qdrant())
+
+
+async def sync_qdrant() -> None:
+    """启动时同步 SQLite 分块 → Qdrant（Qdrant 是向量的唯一存储）。
+
+    Qdrant 缺失的分块重新计算嵌入并 upsert；Qdrant 多出的点（DB 已删）
+    为孤儿 → 清理。Qdrant 连不上时最多重试数次后放弃——服务器照常启动，
+    问答返回 Qdrant 错误文案；下次启动重新同步。幂等：中断后重启再次执行
+    同一差集（已 upsert 的分块不重算）。
+    """
+    from app.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        # 1. 集合就绪（维度按 QDRANT_VECTOR_SIZE；与嵌入模型实际输出不符时，
+        #    以首个新向量的维度自动纠正重建）
+        col_dim: int | None = None
+        for attempt in range(_QDRANT_SYNC_RETRIES):
+            try:
+                col_dim = await vector_store.ensure_collection(None)
+                break
+            except vector_store.VectorStoreError:
+                logger.warning(
+                    "Qdrant 连接失败（第 %d/%d 次），%ds 后重试…",
+                    attempt + 1, _QDRANT_SYNC_RETRIES, _QDRANT_SYNC_RETRY_DELAY,
+                )
+                await asyncio.sleep(_QDRANT_SYNC_RETRY_DELAY)
+        if col_dim is None:
+            logger.error("Qdrant 启动同步放弃：服务不可用（问答将返回错误提示）")
+            return
+
+        # 2. 无分块文章建分块（含嵌入+upsert；勿持 _embedding_lock 调用——Lock 不可重入）
+        await ensure_embeddings(db)
+
+        # 3. 差异同步：DB 有而 Qdrant 无的分块 → 重算嵌入并 upsert
+        #    （Qdrant 卷丢失/重建集合时，本步自动全量重建）
+        try:
+            have = await vector_store.list_existing_ids()
+        except vector_store.VectorStoreError as e:
+            logger.error("Qdrant 差异同步失败：%s", e)
+            return
+
+        db_ids = {r[0] for r in db.query(ArticleChunk.id).all()}
+        missing_ids = sorted(db_ids - have)
+
+        async with _embedding_lock:
+            upserted = 0
+            dim_corrected = False  # 每次同步最多纠正一次集合维度
+            # 分块批量处理，避免 SQLite IN 子句超出 999 绑定变量上限
+            start = 0
+            while start < len(missing_ids):
+                batch = missing_ids[start:start + 500]
+                points = []
+                restart = False
+                for ch in db.query(ArticleChunk).filter(ArticleChunk.id.in_(batch)).all():
+                    try:
+                        vec = await get_embedding(ch.chunk_text)
+                    except Exception:
+                        logger.warning(
+                            "Sync embed failed for chunk %s of article %s",
+                            ch.chunk_index, ch.article_id, exc_info=True,
+                        )
+                        continue
+                    if len(vec) != col_dim:
+                        if not dim_corrected:
+                            # 嵌入模型实际维度与配置不符 → 以实际维度重建集合
+                            logger.warning(
+                                "嵌入模型输出维度 %d 与集合维度 %d 不符，重建集合",
+                                len(vec), col_dim,
+                            )
+                            col_dim = await vector_store.ensure_collection(len(vec))
+                            have = await vector_store.list_existing_ids()
+                            # 集合已重建为空：缺失集扩大为全部 DB 分块，从头重跑
+                            missing_ids = sorted(db_ids - have)
+                            restart = True
+                            dim_corrected = True
+                        else:
+                            logger.error(
+                                "嵌入维度仍不符（%d != %d），跳过 chunk %s",
+                                len(vec), col_dim, ch.id,
+                            )
+                        break
+                    points.append(vector_store.make_point(
+                        ch.id, vec, ch.article_id, ch.chunk_index, ch.chunk_text,
+                    ))
+                if restart:
+                    start = 0
+                    continue
+                if points:
+                    await vector_store.upsert_chunks(points)
+                    upserted += len(points)
+                start += 500
+
+        # 4. 孤儿清理：Qdrant 有而 DB 无的点
+        orphans = have - db_ids
+        if orphans:
+            await vector_store.delete_points(list(orphans))
+
+        logger.info(
+            "Qdrant sync complete: %d upserted, %d orphans removed",
+            upserted, len(orphans),
+        )
+    except Exception:
+        logger.warning("Qdrant 启动同步异常", exc_info=True)
+    finally:
+        db.close()
+
+
+# 候选检索数：去重后取 top_k；约为 top_k 的 10 倍以容忍同文章多块命中
+SEARCH_LIMIT = 50
+
+
 async def semantic_search(db: Session, question: str, top_k: int = 5) -> list[tuple[float, Article, ArticleChunk | None]]:
     """
-    Semantic search using embeddings.
-    Returns list of (score, article, chunk) — chunk 为命中的分块行（含块级实体标注）；
-    关键词兜底路径无分块行时为 None。
+    Semantic search via Qdrant.
+
+    Returns list of (score, article, chunk) — chunk 为命中的分块行（含块级实体标注）。
+    检索路径严格依赖 Qdrant：失败抛 VectorStoreError / EmbeddingError，由调用方降级。
     """
-    # Ensure all articles have embeddings
+    # Ensure all articles have embeddings（新文章首次问答时懒建分块并写入 Qdrant）
     await ensure_embeddings(db)
 
     # Get question embedding
     try:
         q_embedding = await get_embedding(question)
-    except Exception:
-        # Fallback to keyword search if embedding API fails
-        return fallback_keyword_search(db, question, top_k)
+    except Exception as e:
+        raise EmbeddingError(f"嵌入模型调用失败：{e}") from e
 
-    # Compare against all chunks with embeddings
-    chunks = db.query(ArticleChunk).options(joinedload(ArticleChunk.article)).filter(ArticleChunk.embedding.isnot(None)).all()
-    if not chunks:
-        return fallback_keyword_search(db, question, top_k)
+    # Qdrant 检索（Cosine 距离下 score 即相似度，越大越相关）
+    hits = await vector_store.search(q_embedding, limit=SEARCH_LIMIT)
+    if not hits:
+        return []
+
+    # 按 point id 回查分块行：跳过 DB 中已删除的陈旧点；每文章取最高分块去重
+    ids = [h.id for h in hits]
+    score_by_id = {h.id: h.score for h in hits}
+    rows = (
+        db.query(ArticleChunk)
+        .options(joinedload(ArticleChunk.article))
+        .filter(ArticleChunk.id.in_(ids))
+        .all()
+    )
+    rows_by_id = {r.id: r for r in rows}
 
     results: list[tuple[float, Article, ArticleChunk]] = []
     seen_articles: set[str] = set()
-
-    for chunk in chunks:
-        try:
-            vec = json.loads(chunk.embedding)  # type: ignore
-        except (json.JSONDecodeError, TypeError):
+    for pid in ids:
+        row = rows_by_id.get(pid)
+        if not row or not row.article:
+            continue  # 陈旧点兜底：文章/分块已删 → 跳过（下次启动孤儿清理清除）
+        if row.article.id in seen_articles:
             continue
-        score = cosine_similarity(q_embedding, vec)
-        results.append((score, chunk.article, chunk))
-
-    # Sort by score descending, take top results per article
-    results.sort(key=lambda x: x[0], reverse=True)
-    deduped: list[tuple[float, Article, ArticleChunk]] = []
-    for score, article, chunk in results:
-        if article.id not in seen_articles:
-            seen_articles.add(article.id)
-            deduped.append((score, article, chunk))
-        if len(deduped) >= top_k:
+        seen_articles.add(row.article.id)
+        results.append((score_by_id[pid], row.article, row))
+        if len(results) >= top_k:
             break
 
-    return deduped
-
-
-def fallback_keyword_search(db: Session, question: str, top_k: int = 5) -> list[tuple[float, Article, ArticleChunk | None]]:
-    """Fallback: simple keyword-based search when embeddings unavailable."""
-    articles = db.query(Article).all()
-    results: list[tuple[float, Article, ArticleChunk | None]] = []
-
-    # Tokenize: CJK bigrams + English words
-    tokens = set()
-    cjk = re.findall(r'[一-鿿]', question)
-    for i in range(len(cjk) - 1):
-        tokens.add(cjk[i] + cjk[i + 1])
-    tokens.update(re.findall(r'[a-zA-Z]{2,}', question.lower()))
-
-    for a in articles:
-        title_lower = a.title.lower()
-        content_lower = a.content.lower()
-        score = 0.0
-        for t in tokens:
-            if t in title_lower:
-                score += 3.0
-            if t in content_lower:
-                score += 1.0
-        if score > 0:
-            results.append((score, a, None))
-
-    results.sort(key=lambda x: x[0], reverse=True)
-    return results[:top_k]
+    return results
 
 
 def get_excerpt(content: str, max_len: int = 200) -> str:
@@ -355,8 +469,17 @@ def get_excerpt(content: str, max_len: int = 200) -> str:
 
 # ─── 向量分块共享助手（提取与 Q&A 检索共用同一套切分） ───
 
-def rebuild_article_chunks(db: Session, article_id: str, content: str) -> list[ArticleChunk]:
-    """删除文章正文分块后按最终内容重建（embedding 由调用方或 ensure_embeddings 补充）。"""
+async def rebuild_article_chunks(db: Session, article_id: str, content: str) -> list[ArticleChunk]:
+    """删除文章正文分块后按最终内容重建（embedding 由调用方或 ensure_embeddings 补充）。
+
+    async：删除 DB 行前收集旧 id，commit 后同步清理 Qdrant 点（best-effort）。
+    """
+    old_ids = [
+        r[0] for r in db.query(ArticleChunk.id).filter(
+            ArticleChunk.article_id == article_id,
+            ~ArticleChunk.chunk_index.like("comment.%"),
+        ).all()
+    ]
     db.query(ArticleChunk).filter(
         ArticleChunk.article_id == article_id,
         ~ArticleChunk.chunk_index.like("comment.%"),
@@ -364,24 +487,34 @@ def rebuild_article_chunks(db: Session, article_id: str, content: str) -> list[A
     rows: list[ArticleChunk] = []
     for i, text in enumerate(chunk_article(content)):
         rows.append(ArticleChunk(
-            article_id=article_id, chunk_index=str(i), chunk_text=text, embedding=None,
+            article_id=article_id, chunk_index=str(i), chunk_text=text,
         ))
     db.add_all(rows)
     db.commit()
+    if old_ids:
+        await vector_store.delete_points(old_ids)
     return rows
 
 
 async def embed_chunk_rows(db: Session, chunks: list[ArticleChunk]) -> None:
-    """对分块逐条计算嵌入（best-effort，失败保留 None）。"""
+    """对分块逐条计算嵌入并写入 Qdrant（向量只存 Qdrant，不落 SQLite）。
+
+    best-effort：嵌入失败的分块没有向量，启动同步会重算补上。
+    """
+    points = []
     for ch in chunks:
         try:
             vec = await get_embedding(ch.chunk_text)
-            ch.embedding = json.dumps(vec)
+            points.append(vector_store.make_point(
+                ch.id, vec, ch.article_id, ch.chunk_index, ch.chunk_text,
+            ))
         except Exception:
             logger.warning(
                 "Failed to embed chunk %s of article %s", ch.chunk_index, ch.article_id, exc_info=True,
             )
-    db.commit()
+    db.commit()  # 兜底提交分块行（多数调用方已提交）
+    if points:
+        await vector_store.upsert_chunks(points)
 
 
 def get_article_chunks(db: Session, article_id: str) -> list[ArticleChunk]:
@@ -819,23 +952,60 @@ async def ask_question(body: QARequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Question cannot be empty")
 
     # 1. Semantic search (skip if knowledge base disabled)
-    MIN_RELEVANCE = 0.4
+    MIN_RELEVANCE = QA_MIN_RELEVANCE
 
     if body.kb_enabled:
-        top_chunks = await semantic_search(db, question)
-        sources = [
-            QASource(
+        try:
+            top_chunks = await semantic_search(db, question)
+        except vector_store.VectorStoreError:
+            return QAResponse(
+                answer="抱歉，知识库向量检索服务（Qdrant）当前不可用，无法检索知识库。请稍后重试，或检查 Qdrant 服务是否已启动。",
+                sources=[],
+            )
+        except EmbeddingError:
+            return QAResponse(
+                answer="抱歉，嵌入模型调用失败，无法进行语义检索。请稍后重试。",
+                sources=[],
+            )
+
+        # 图谱实体直召补充：问句中含知识图谱实体名时，把提及该实体的分块
+        # 作为候选——确定性匹配（实体名出现在分块文本中），不经过向量相似度
+        # 阈值过滤；与向量结果按文章去重（向量命中优先）
+        recalled = entity_recall(db, question)
+        merged = list(top_chunks)
+        have_articles = {a.id for _, a, _ in merged}
+        for item in recalled:
+            if item[1].id not in have_articles:
+                have_articles.add(item[1].id)
+                merged.append(item)
+
+        def _make_source(score: float, a: Article, c: ArticleChunk | None) -> QASource:
+            return QASource(
                 article_id=a.id,
                 title=a.title,
-                excerpt=get_excerpt(chunk.chunk_text if chunk else ""),
+                excerpt=get_excerpt(c.chunk_text if c else ""),
                 relevance=round(score, 3),
-                entities=parse_chunk_entities(chunk),
+                entities=parse_chunk_entities(c),
             )
-            for score, a, chunk in top_chunks
-            if score >= MIN_RELEVANCE
-        ]
-        entity_info_text = _collect_entity_info(question, top_chunks, db)
-        relevant_chunks = [(s, a, c) for s, a, c in top_chunks if s >= MIN_RELEVANCE]
+
+        # 来源与上下文：向量命中（阈值过滤）+ 实体直召（不受阈值限制）
+        sources: list[QASource] = []
+        relevant_chunks: list[tuple[float, Article, ArticleChunk | None]] = []
+        seen_articles: set[str] = set()
+        for score, a, c in top_chunks:
+            if score < MIN_RELEVANCE:
+                continue
+            seen_articles.add(a.id)
+            sources.append(_make_source(score, a, c))
+            relevant_chunks.append((score, a, c))
+        for _, a, c in recalled:
+            if a.id in seen_articles:
+                continue  # 向量已命中该文章，直召跳过
+            seen_articles.add(a.id)
+            sources.append(_make_source(ENTITY_RECALL_SCORE, a, c))
+            relevant_chunks.append((ENTITY_RECALL_SCORE, a, c))
+
+        entity_info_text = _collect_entity_info(question, merged, db)
     else:
         top_chunks = []
         sources = []
@@ -965,6 +1135,67 @@ async def call_llm(
                 # Take the last part of reasoning as it's closest to the conclusion
                 content = reasoning
         return content
+
+
+# 实体直召保底分数：实体名直接出现在分块文本中属于确定性匹配信号，
+# 高于默认 MIN_RELEVANCE（0.3），低于典型向量命中（0.9+）
+ENTITY_RECALL_SCORE = 0.5
+
+
+def _collect_all_entity_names(db: Session) -> set[str]:
+    """收集知识图谱全部实体名（文章 entities JSON）。"""
+    names: set[str] = set()
+    for (ent_str,) in db.query(Article.entities).filter(Article.entities.isnot(None)).all():
+        try:
+            ent_data = json.loads(ent_str)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for e in ent_data.get("entities", []):
+            name = e.get("name", "")
+            if name:
+                names.add(name)
+    return names
+
+
+def entity_recall(
+    db: Session,
+    question: str,
+) -> list[tuple[float, Article, ArticleChunk]]:
+    """图谱实体直召：问句中的实体名 → 含该实体的文章 → 提及该实体的分块。
+
+    与向量检索互补的确定性路径：即使 embedding 对专有名词不敏感
+    （相似度低于阈值），只要问句中出现知识图谱里的实体名，就能定位到
+    相关分块。返回 (保底分数, 文章, 分块) 列表，每篇文章最多一条。
+    """
+    # 问句中出现的知识图谱实体名（长度 ≥ 2 防单字噪声；子串匹配不要求分词）
+    hit_names = [
+        n for n in _collect_all_entity_names(db)
+        if len(n) >= 2 and n in question
+    ]
+    if not hit_names:
+        return []
+
+    # 文章级匹配：哪些文章包含问句命中的实体
+    matched: list[tuple[Article, list[str]]] = []
+    for a in db.query(Article).filter(Article.entities.isnot(None)).all():
+        try:
+            ent_data = json.loads(a.entities)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        ent_names = {e.get("name", "") for e in ent_data.get("entities", [])}
+        hits = [n for n in hit_names if n in ent_names]
+        if hits:
+            matched.append((a, hits))
+
+    # 分块级匹配：提及实体名的分块，每篇文章取第一条
+    results: list[tuple[float, Article, ArticleChunk]] = []
+    for a, hits in matched:
+        chunks = db.query(ArticleChunk).filter(ArticleChunk.article_id == a.id).all()
+        for ch in chunks:
+            if any(n in ch.chunk_text for n in hits):
+                results.append((ENTITY_RECALL_SCORE, a, ch))
+                break
+    return results
 
 
 def _collect_entity_info(

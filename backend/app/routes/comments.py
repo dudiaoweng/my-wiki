@@ -25,6 +25,7 @@ from app.routes.upload import (
 )
 from app.routes.qa import _extract_video_thumbnail, get_comment_chunks
 from app.utils import read_upload_limited, MAX_UPLOAD_BYTES, delete_uploaded_files
+from app import vector_store
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +166,12 @@ async def _embed_comment_content(comment, db) -> None:
     try:
         from app.routes.qa import chunk_article, embed_chunk_rows
 
-        # Delete old chunks for this comment
+        # Delete old chunks for this comment（先收集 id，commit 后清理 Qdrant 点）
+        old_ids = [
+            r[0] for r in db.query(ArticleChunk.id).filter(
+                ArticleChunk.chunk_index.like(f"comment.{comment.id[:8]}.%")
+            ).all()
+        ]
         db.query(ArticleChunk).filter(
             ArticleChunk.chunk_index.like(f"comment.{comment.id[:8]}.%")
         ).delete()
@@ -183,11 +189,12 @@ async def _embed_comment_content(comment, db) -> None:
                 article_id=comment.article_id,
                 chunk_index=f"comment.{comment.id[:8]}.{i}",
                 chunk_text=f"[评论] {chunk_text}",
-                embedding=None,
             ))
         db.add_all(rows)
         db.commit()
-        await embed_chunk_rows(db, rows)
+        if old_ids:
+            await vector_store.delete_points(old_ids)
+        await embed_chunk_rows(db, rows)  # 新块经此自动 upsert 到 Qdrant
     except Exception:
         logger.warning("[EMBED_COMMENT] Failed to embed comment %s", comment.id, exc_info=True)
 
@@ -1006,8 +1013,13 @@ def delete_comment(
 
     # Subtract comment's contributions from article entities
     _subtract_comment_from_article(article, comment)
-    # Clean up comment chunks from embedding index
+    # Clean up comment chunks from embedding index（Qdrant 点同步清理）
     from app.models import ArticleChunk
+    old_chunk_ids = [
+        r[0] for r in db.query(ArticleChunk.id).filter(
+            ArticleChunk.chunk_index.like(f"comment.{comment.id[:8]}.%")
+        ).all()
+    ]
     db.query(ArticleChunk).filter(
         ArticleChunk.chunk_index.like(f"comment.{comment.id[:8]}.%")
     ).delete()
@@ -1028,6 +1040,7 @@ def delete_comment(
 
     db.delete(comment)
     db.commit()
+    vector_store.schedule_delete_points(old_chunk_ids)
     delete_uploaded_files(attachment_files)
 
     invalidate_graph_cache()

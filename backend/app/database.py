@@ -43,6 +43,12 @@ def init_db():
                 conn.exec_driver_sql(f"ALTER TABLE article_chunks ADD COLUMN {col} TEXT")
             except Exception:
                 pass  # Column already exists
+        # v2.2 向量迁移至 Qdrant：删除 article_chunks.embedding 列（向量只存 Qdrant，
+        # 需 SQLite ≥ 3.35 支持 DROP COLUMN；失败仅告警，不影响启动——旧列保留无害）
+        try:
+            conn.exec_driver_sql("ALTER TABLE article_chunks DROP COLUMN embedding")
+        except Exception:
+            pass  # 列不存在（新库）或 SQLite 版本不支持
         for col in ["created_by"]:
             try:
                 conn.exec_driver_sql(f"ALTER TABLE entity_infos ADD COLUMN {col} TEXT")

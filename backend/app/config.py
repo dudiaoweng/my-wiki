@@ -67,6 +67,21 @@ ASR_TIMEOUT = _env_float("ASR_TIMEOUT", 120.0)       # 语音识别：音频转�
 EMBEDDING_TIMEOUT = _env_float("EMBEDDING_TIMEOUT", 30.0)  # 嵌入模型：语义搜索
 FFMPEG_TIMEOUT = _env_int("FFMPEG_TIMEOUT", 60)      # ffmpeg 音视频转换（子进程）
 
+# 检索结果的最低相关度阈值（Cosine 相似度，越大越相关）。
+# embedding-3（2048 维）对真实匹配块的分数普遍在 0.3-0.42，0.4 会漏掉有效结果；
+# 默认 0.3 兼顾召回与噪声过滤（噪声块通常 < 0.27）。
+QA_MIN_RELEVANCE = _env_float("QA_MIN_RELEVANCE", 0.3)
+
+# 分块大小上限（字符）：检索/提取共用的向量分块切分粒度。
+# 512 ≈ 500-800 token，兼顾嵌入质量与检索精度；改动后需执行
+# backend/rebuild_chunks.py 一次性全量重建存量分块。
+MAX_CHUNK_CHARS = _env_int("MAX_CHUNK_CHARS", 512)
+
+# 分块重叠（字符）：相邻分块共享的尾部字符数，缓解语义在块边界被切断。
+# 块总长仍 ≤ MAX_CHUNK_CHARS（基础切分按 MAX_CHUNK_CHARS - OVERLAP 进行）。
+# 改动后同样需执行 rebuild_chunks.py 全量重建。
+CHUNK_OVERLAP = _env_int("CHUNK_OVERLAP", 100)
+
 # ── 自动解析 ──
 # 控制 LLM 类后台解析（媒体描述、标签/实体/标题提取）。文档附件的文本提取
 # 是纯本地解析（不调用 LLM），始终自动执行，不受本开关影响。
@@ -77,6 +92,15 @@ AUTO_PARSE = os.getenv("AUTO_PARSE", "0") == "1"
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./knowledge_base.db")
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "./uploads")
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "https://localhost:5173")
+
+# ── Qdrant 向量数据库（语义检索）──
+# 统一在 .env 中配置：Docker 部署用 http://qdrant:6333（compose 网络服务名），
+# 本地开发用 http://localhost:6333（代码默认值）。
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
+QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "my_wiki_chunks")
+QDRANT_VECTOR_SIZE = _env_int("QDRANT_VECTOR_SIZE", 1024)  # embedding-3 / bge-m3 均为 1024 维
+QDRANT_TIMEOUT = _env_float("QDRANT_TIMEOUT", 10.0)
 
 # ── TLS / mTLS ──
 # 证书固定放在仓库根目录 certs/ 下；默认值锚定到仓库根目录，与启动时 cwd 无关

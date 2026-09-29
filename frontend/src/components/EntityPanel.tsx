@@ -587,7 +587,15 @@ export function EntityPanel({
                         : `类型：${ent.type}`}
                     >
                       <span style={{ fontSize: 14, flexShrink: 0 }}>{entityIcon(ent.type)}</span>
-                      <span className={styles.tagName} style={{ color: '#7D5DA9' }}>{ent.name}</span>
+                      <span
+                        className={styles.tagName}
+                        style={{ color: '#7D5DA9' }}
+                        title={`名称：${ent.name}\n类型：${ent.type}${(ent as any).created_by
+                          ? `\n创建人：${(ent as any).created_by?.replace(/\s+\d{18}$/, '') ?? '未知'}`
+                          : ''}`}
+                      >
+                        {ent.name}
+                      </span>
                       <span style={{ fontSize: 10, color: 'var(--c-text-muted)', marginLeft: 4, flexShrink: 0 }}>{ent.type}</span>
                     </button>
                     {canModifyEntity(ent) && (
