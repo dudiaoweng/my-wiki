@@ -83,7 +83,14 @@ export function EntityGraphPopover({
     const name = editName.trim();
     if (!name) return;
     try {
-      await api.updateEntity(entityName, name !== entityName ? name : undefined, editType);
+      const nameChanged = name !== entityName;
+      // 改名走 /rename（级联 EntityInfo 附加信息与 chunk 标签行）；只改类型走 /update
+      if (nameChanged) {
+        await api.renameEntity(entityName, name);
+      }
+      if (editType) {
+        await api.updateEntity(nameChanged ? name : entityName, undefined, editType);
+      }
       showToast(`实体已更新`, 'success');
       setEditing(false);
       onRefresh();

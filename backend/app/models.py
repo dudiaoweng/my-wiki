@@ -37,7 +37,8 @@ class Article(Base):
     content = Column(Text, nullable=False, default="")
     category_id = Column(String, ForeignKey("categories.id", ondelete="SET NULL"), nullable=True, index=True)
     tags = Column(Text, nullable=False, default="[]")
-    entities = Column(Text, nullable=True, default=None)  # LLM 提取的实体+关系 JSON
+    # 实体/关系已迁移至 Neo4j（v2.3）：实体节点 + 提及边 + 关系边只存 Neo4j，
+    # 文章接口的 entities 字段由 neo4j_store 组装后挂在 ORM 实例临时属性上
     processing = Column(Text, nullable=True, default=None)  # "processing" | None(completed)
     created_by = Column(String(200), nullable=True, default=None)   # CN from client cert
     updated_by = Column(String(200), nullable=True, default=None)   # CN from client cert
@@ -62,7 +63,7 @@ class Comment(Base):
     article_id = Column(String, ForeignKey("articles.id", ondelete="CASCADE"), nullable=False, index=True)
     content = Column(Text, nullable=False, default="")
     tags = Column(Text, nullable=False, default="[]")         # JSON array — LLM 提取的标签
-    entities = Column(Text, nullable=True, default=None)      # LLM 提取的实体+关系 JSON
+    # 实体/关系已迁移至 Neo4j（v2.3）：评论的贡献以 MENTIONS/RELATES 边的 source='comment:<id>' 标识
     processing = Column(Text, nullable=True, default=None)    # "processing" | None(completed)
     attachments = Column(Text, nullable=True, default=None)   # JSON array: [{path, name, type}, ...]
     attachment_path = Column(String, nullable=True)            # legacy — kept for backward compat
@@ -86,8 +87,9 @@ class ArticleChunk(Base):
     article_id = Column(String, ForeignKey("articles.id", ondelete="CASCADE"), nullable=False, index=True)
     chunk_index = Column(String, nullable=False)  # e.g. "0", "1", "1.2"
     chunk_text = Column(Text, nullable=False)
-    # 向量只存 Qdrant（Qdrant 为向量唯一存储）；SQLite 仅保留分块元数据
-    entities = Column(Text, nullable=True)  # JSON：该块提取到的实体/关系（块级标注）
+    # 向量只存 Qdrant（Qdrant 为向量唯一存储）；SQLite 仅保留分块文本。
+    # 实体归属唯一存 Neo4j；QA 来源卡片的实体 chips 由 Neo4j 实体名与
+    # chunk_text 子串匹配即时派生（v2.3 移除块级实体标注快照列）
 
     article = relationship("Article", back_populates="chunks")
 

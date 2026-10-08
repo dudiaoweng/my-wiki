@@ -118,7 +118,14 @@ export function EntityPanel({
     const name = editEntityName.trim();
     if (!name || !editingEntityName) return;
     try {
-      await api.updateEntity(editingEntityName, name !== editingEntityName ? name : undefined, editEntityType);
+      const nameChanged = name !== editingEntityName;
+      // 改名走 /rename（级联 EntityInfo 附加信息与 chunk 标签行）；只改类型走 /update
+      if (nameChanged) {
+        await api.renameEntity(editingEntityName, name);
+      }
+      if (editEntityType) {
+        await api.updateEntity(nameChanged ? name : editingEntityName, undefined, editEntityType);
+      }
       showToast(`实体「${editingEntityName}」已更新`, 'success');
       setEditingEntityName(null);
       setEditingEntityType(null);

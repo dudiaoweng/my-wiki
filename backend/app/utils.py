@@ -41,7 +41,8 @@ def delete_uploaded_files(names) -> None:
     values).  Each is resolved and verified to sit inside the upload directory
     before deletion.
     """
-    upload_dir = Path(os.getenv("UPLOAD_DIR", "./uploads"))
+    from app.config import UPLOAD_DIR
+    upload_dir = Path(UPLOAD_DIR)
     root = upload_dir.resolve()
     for name in names:
         if not name:

@@ -225,6 +225,12 @@ button.tag:hover {
   filter: brightness(0.95);
 }
 
+/* 标签内容导航选中态（与正文 tag-highlight 蓝色呼应） */
+.tagActive {
+  background: rgba(80, 180, 255, 0.35) !important;
+  outline: 1px solid rgba(60, 150, 255, 0.5);
+}
+
 /* ── Actions ── */
 
 .actions {

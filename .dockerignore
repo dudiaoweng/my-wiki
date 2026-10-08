@@ -15,16 +15,14 @@ backend/__pycache__
 backend/**/__pycache__
 backend/*.pyc
 backend/knowledge_base.db
-backend/uploads/
 backend/.output.log
 
 # Node
 frontend/node_modules
 frontend/dist
 
-# Docker 数据目录（本机绑定挂载，不进构建上下文）
+# 数据目录（本机绑定挂载，v2.3 起统一：数据库 + 上传 + Qdrant + Neo4j）
 data/
-uploads/
 
 # 证书产物（vite.config.ts 只需 .crt/.key，p12/jks/csr 等分发文件无需进构建）
 certs/*.p12

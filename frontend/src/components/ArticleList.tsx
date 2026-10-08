@@ -50,6 +50,8 @@ export function ArticleList() {
 
   // Entity highlight (for article content highlighting via rehype plugin)
   const [highlightEntity, setHighlightEntity] = useState<string | null>(null);
+  // Tag content navigation（标签词高亮，与实体互斥）
+  const [highlightTag, setHighlightTag] = useState<string | null>(null);
 
   const categoryName = categoryId
     ? categories.find((c) => c.id === categoryId)?.name ?? '分类'
@@ -285,6 +287,7 @@ export function ArticleList() {
               setSelectedArticleIds(new Set([id]));
               setSelectedEntities(new Set());
               setHighlightEntity(null);
+              setHighlightTag(null);
             };
             return (
               <ArticleDetailInline
@@ -295,7 +298,15 @@ export function ArticleList() {
                 nextArticleId={nextId}
                 onNavigate={handleNavigate}
                 selectedEntity={highlightEntity}
-                onEntitySelect={(name) => setHighlightEntity(name)}
+                onEntitySelect={(name) => {
+                  setHighlightEntity(name);
+                  if (name) setHighlightTag(null);  // 实体与标签互斥
+                }}
+                selectedTag={highlightTag}
+                onTagClick={(tag) => {
+                  setHighlightTag((prev) => (prev === tag ? null : tag));
+                  setHighlightEntity(null);
+                }}
                 actionsInTopBar
               />
             );

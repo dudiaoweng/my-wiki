@@ -47,12 +47,13 @@ COPY --from=frontend-build /build/backend/static ./static
 # 注：certs 不复制进镜像 — 运行时通过 -v ./certs:/app/certs:ro 挂载
 
 # SQLite 数据 + 上传文件持久化
-VOLUME ["/app/data", "/app/uploads"]
+VOLUME ["/app/data"]
 
 # 默认值 — 实际运行时由挂载的 /app/.env 覆盖（config.py load_dotenv 加载）。
 # QDRANT_URL 统一在 .env 中配置（Docker 用 http://qdrant:6333、本地开发用 localhost）
+# 数据统一在 /app/data（数据库 + 上传文件，compose 挂载 ./data:/app/data）
 ENV DATABASE_URL=sqlite:////app/data/knowledge_base.db \
-    UPLOAD_DIR=/app/uploads \
+    UPLOAD_DIR=/app/data/uploads \
     HOST=0.0.0.0 \
     SSL_KEYFILE=/certs/server.key \
     SSL_CERTFILE=/certs/server.crt \

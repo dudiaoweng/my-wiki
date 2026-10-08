@@ -7,15 +7,14 @@
 4. embed_chunk_rows —— 重算嵌入并写入 Qdrant
 评论分块经 _embed_comment_content 同样重建；最后 sync_qdrant 做差异清理。
 
-注意：块级实体标注（chunk.entities）随旧分块边界作废（文章级 entities 保留），
-重切后需对文章重新解析（🧠 重新解析）才会重新生成块级标注。
+注意：文章级实体在 Neo4j，不受重建影响；QA 来源卡片的实体 chips 由 Neo4j
+实体名与 chunk_text 即时派生，无需按分块保存快照（v2.3 起）。
 
 用法：在 backend/ 目录下执行
     .venv/Scripts/python.exe rebuild_chunks.py
 """
 
 import asyncio
-import json
 import logging
 from pathlib import Path
 import sys
@@ -30,15 +29,17 @@ from app.routes.qa import rebuild_article_chunks, embed_chunk_rows, sync_qdrant 
 from app.routes.comments import _embed_comment_content  # noqa: E402
 from app.routes.entities import _sync_entity_info_to_chunks  # noqa: E402
 from app import vector_store  # noqa: E402
+from app import neo4j_store  # noqa: E402
+from app.neo4j_store import Neo4jStoreError  # noqa: E402
 
 
 def _reapply_entity_tags(db, article: Article) -> None:
-    """回填实体标签行：重新切分后 chunk_text 丢失了 [实体: …] 标签。"""
-    if not article.entities:
-        return
+    """回填实体标签行：重新切分后 chunk_text 丢失了 [实体: …] 标签。
+    实体列表来自 Neo4j（唯一存储）；不可用时跳过（警告）。"""
     try:
-        ent_data = json.loads(article.entities)
-    except (json.JSONDecodeError, TypeError):
+        ent_data = neo4j_store.get_entities_for_articles_sync([article.id]).get(article.id)
+    except Neo4jStoreError as e:
+        logging.warning("  [!] 实体查询失败（Neo4j 不可用），跳过标签回填: %s", e)
         return
     entities = ent_data.get("entities", []) if isinstance(ent_data, dict) else []
     if not entities:
@@ -76,14 +77,12 @@ async def main() -> None:
         for i, a in enumerate(articles, 1):
             await rebuild_article_chunks(db, a.id, a.content or "")
             _reapply_entity_tags(db, a)
-            # 回填实体附加信息行（含评论分块）
-            if a.entities:
-                try:
-                    ent_data = json.loads(a.entities)
-                    for e in ent_data.get("entities", []):
-                        _sync_entity_info_to_chunks(e.get("name", ""), db)
-                except (json.JSONDecodeError, TypeError):
-                    pass
+            # 回填实体附加信息行（含评论分块）——实体名来自 Neo4j
+            try:
+                for name in neo4j_store.get_entity_names_mentioned_in_sync(a.id):
+                    await _sync_entity_info_to_chunks(name, db)
+            except Neo4jStoreError as e:
+                logging.warning("  [!] 实体名查询失败（Neo4j 不可用），跳过信息行回填: %s", e)
             body = (
                 db.query(ArticleChunk)
                 .filter(
@@ -111,6 +110,7 @@ async def main() -> None:
         except Exception:
             pass
         await vector_store.close()
+        await neo4j_store.close()
 
 
 if __name__ == "__main__":

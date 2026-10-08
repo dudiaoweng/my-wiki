@@ -44,7 +44,9 @@ interface ArticleDetailViewProps {
   selectedEntity?: string | null;
   /** Called when user selects or clears an entity. */
   onEntitySelect?: (name: string | null) => void;
-  /** Called when user clicks a tag (page mode navigates to tag filter). */
+  /** Selected tag for content navigation highlight（与实体同机制，选中即高亮导航）. */
+  selectedTag?: string | null;
+  /** Called when user clicks a tag（选中/取消，触发内容导航）. */
   onTagClick?: (tag: string) => void;
   /** Show edit/delete buttons in top bar instead of at page bottom. */
   actionsInTopBar?: boolean;
@@ -52,7 +54,7 @@ interface ArticleDetailViewProps {
 
 export function ArticleDetailView({
   articleId, onBack, prevArticleId, nextArticleId, onNavigate,
-  selectedEntity, onEntitySelect, onTagClick, actionsInTopBar,
+  selectedEntity, onEntitySelect, selectedTag, onTagClick, actionsInTopBar,
 }: ArticleDetailViewProps) {
   const { openEditor, requestConfirm, notifyArticleSaved, articleVersion, userIdNumber } = useApp();
   const { showToast } = useToast();
@@ -118,25 +120,28 @@ export function ArticleDetailView({
   const MAX_PREVIEW_CHARS = 3000;
   const isLong = cleanContent.length > MAX_PREVIEW_CHARS;
 
-  const entityToHighlight = selectedEntity ?? null;
+  // 内容导航高亮词：标签优先（选中标签清空实体，反之亦然，由父级保证）
+  const highlightTerm = selectedTag ?? selectedEntity ?? null;
+  const highlightClass = selectedTag ? 'tag-highlight' : 'entity-highlight';
+  const highlightActiveClass = selectedTag ? 'tag-highlight-active' : 'entity-highlight-active';
 
   const [searchQuery, setSearchQuery] = useState('');
   const deferredSearchQuery = useDeferredValue(searchQuery);
 
   const highlightPlugin = useMemo(
-    () => createEntityHighlightPlugin(entityToHighlight),
-    [entityToHighlight],
+    () => createEntityHighlightPlugin(highlightTerm, 0, highlightClass),
+    [highlightTerm, highlightClass],
   );
 
   const articleEntityOccurrenceCount = useMemo(() => {
-    if (!entityToHighlight || !cleanContent) return 0;
-    const escaped = entityToHighlight.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (!highlightTerm || !cleanContent) return 0;
+    const escaped = highlightTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const regex = new RegExp(escaped, 'gi');
     let count = 0;
     regex.lastIndex = 0;
     while (regex.exec(cleanContent) !== null) count++;
     return count;
-  }, [cleanContent, entityToHighlight]);
+  }, [cleanContent, highlightTerm]);
 
   const searchTerm = deferredSearchQuery.trim();
   const searchPlugin = useMemo(
@@ -154,7 +159,7 @@ export function ArticleDetailView({
     activeIndex: activeOccurrenceIndex,
     occurrences,
     scrollToOccurrence,
-  } = useEntityOccurrences(cleanContent, entityToHighlight, commentTexts);
+  } = useEntityOccurrences(cleanContent, highlightTerm, commentTexts, highlightActiveClass);
 
   const contentLength = useMemo(() => cleanContent.length, [cleanContent]);
   const {
@@ -318,8 +323,10 @@ export function ArticleDetailView({
         <div className={styles.tags}>
           {article.tags.map((t) => (
             onTagClick ? (
-              <button key={t} className={styles.tag} onClick={() => onTagClick(t)}
-                title={`查看所有标记为「${t}」的文章`}>{t}</button>
+              <button key={t}
+                className={`${styles.tag}${t === selectedTag ? ` ${styles.tagActive}` : ''}`}
+                onClick={() => onTagClick(t)}
+                title={t === selectedTag ? '取消内容导航' : `内容导航：定位文中所有「${t}」（再点取消）`}>{t}</button>
             ) : (
               <span key={t} className={styles.tag}>{t}</span>
             )
@@ -374,20 +381,26 @@ export function ArticleDetailView({
 
       <CommentSection
         articleId={articleId}
-        selectedEntity={entityToHighlight}
+        selectedEntity={highlightTerm}
+        highlightClassName={highlightClass}
         entityOccurrenceOffset={articleEntityOccurrenceCount}
         onCommentTextsChange={setCommentTexts}
       />
 
-      {entityToHighlight && occurrenceCount > 0 && (
+      {highlightTerm && occurrenceCount > 0 && (
         <EntityOccurrenceBar
-          entityName={entityToHighlight}
-          entityType={article.entities?.entities?.find((e) => e.name === entityToHighlight)?.type}
+          entityName={highlightTerm}
+          entityType={selectedTag
+            ? undefined
+            : article.entities?.entities?.find((e) => e.name === highlightTerm)?.type}
           totalCount={occurrenceCount}
           activeIndex={activeOccurrenceIndex}
           occurrences={occurrences}
           onNavigate={scrollToOccurrence}
-          onClose={() => onEntitySelect?.(null)}
+          onClose={() => {
+            if (selectedTag) onTagClick?.(selectedTag);
+            else onEntitySelect?.(null);
+          }}
         />
       )}
     </div>

@@ -70,6 +70,21 @@ body {
   outline-offset: 1px;
 }
 
+/* ─── Tag occurrence highlighting（与实体同机制，颜色区分） ─── */
+.tag-highlight {
+  background: rgba(80, 180, 255, 0.25);
+  border-radius: 3px;
+  padding: 0 2px;
+  transition: background var(--transition-fast);
+  scroll-margin-top: 80px;
+}
+
+.tag-highlight-active {
+  background: rgba(60, 150, 255, 0.5);
+  outline: 2px solid rgba(60, 150, 255, 0.35);
+  outline-offset: 1px;
+}
+
 /* ─── Search result highlighting ─── */
 .search-highlight {
   background: rgba(255, 200, 50, 0.4);

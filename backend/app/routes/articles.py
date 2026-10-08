@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import desc
 from app.dependencies import get_db
 from app.database import SessionLocal
-from app.models import Article, Category, Comment, EntityInfo, utcnow
+from app.models import Article, Category, Comment, EntityInfo
 from app.schemas import ArticleCreate, ArticleUpdate, ArticleResponse, ArticleListItem, CommentSummary
 from app.auth import get_client_cert, CertInfo
 from app.llm_extract import extract_chunks_iter, merge_tags, merge_entities
@@ -19,20 +19,23 @@ from app.config import AUTO_PARSE
 from app.routes.upload import (
     generate_title,
     parse_text_from_bytes, parse_docx, parse_xlsx, parse_pptx, parse_pdf,
-    parse_image, parse_video, parse_media,
+    parse_image, parse_video, parse_media, to_markdown,
     TEXT_EXTENSIONS, WORD_EXTENSIONS, EXCEL_EXTENSIONS, PPT_EXTENSIONS,
     PDF_EXTENSIONS, IMAGE_EXTENSIONS, AUDIO_EXTENSIONS, VIDEO_EXTENSIONS,
 )
 from app.routes.qa import _extract_video_thumbnail
 from app.utils import read_upload_limited, MAX_UPLOAD_BYTES, delete_uploaded_files
 from app import vector_store
+from app import neo4j_store
+from app.neo4j_store import Neo4jStoreError
+from app.config import UPLOAD_DIR as UPLOAD_DIR_STR
 import uuid
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/articles", tags=["articles"])
 
 MAX_PAGE_SIZE = 200
-UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads"))
+UPLOAD_DIR = Path(UPLOAD_DIR_STR)
 
 
 def _validate_article_id(article_id: str) -> None:
@@ -47,16 +50,15 @@ def _validate_article_id(article_id: str) -> None:
             raise HTTPException(status_code=400, detail="Invalid article ID format")
 
 
-def _annotate_entity_creator(entities: dict | None, creator: str) -> dict | None:
-    """Add created_by and created_at to each entity item in the LLM output."""
-    if not isinstance(entities, dict):
-        return entities
-    now = utcnow().isoformat()
-    for e in entities.get("entities", []):
-        if not e.get("created_by"):
-            e["created_by"] = creator
-            e["created_at"] = now
-    return entities
+def _attach_entities(article: Article) -> None:
+    """组装文章实体数据挂 ORM 临时属性（Neo4j 唯一存储，dict 直通响应模型
+    validator）；不可用时降级 None（前端容忍），文章数据本身照常返回。"""
+    try:
+        ent_map = neo4j_store.get_entities_for_articles_sync([article.id])
+    except Neo4jStoreError as e:
+        logger.warning("Article entities assembly failed (Neo4j unavailable): %s", e)
+        ent_map = {}
+    article.entities = ent_map.get(article.id)
 
 
 @router.get("", response_model=list[ArticleListItem])
@@ -85,6 +87,17 @@ def list_articles(
         q = q.filter(Article.tags.like(f'%"{tag}"%'))
 
     articles = q.offset(skip).limit(limit).all()
+
+    # 实体数据组装（Neo4j 唯一存储）：批量查询，结果挂 ORM 临时属性直通响应模型；
+    # Neo4j 不可用时降级 entities=None（前端容忍），文章列表照常返回
+    if articles:
+        try:
+            ent_map = neo4j_store.get_entities_for_articles_sync([a.id for a in articles])
+        except Neo4jStoreError as e:
+            logger.warning("Article entities assembly failed (Neo4j unavailable): %s", e)
+            ent_map = {}
+        for a in articles:
+            a.entities = ent_map.get(a.id)
 
     # Batch-fetch comment counts and latest comments
     article_ids = [a.id for a in articles]
@@ -144,6 +157,7 @@ def get_article(
     article = db.query(Article).filter(Article.id == article_id).first()
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
+    _attach_entities(article)
     return article
 
 
@@ -169,15 +183,11 @@ async def _bg_extract(article_id: str, user_tags: list[str], need_title: bool) -
         try:
             chunk_rows = get_article_chunks(db2, article_id)
             texts = [r.chunk_text for r in chunk_rows]
-            seg_idx = 0
             async for seg_tags, seg_entities in extract_chunks_iter(texts):
                 if seg_tags:
                     cur_tags = merge_tags(cur_tags, seg_tags)
                 if seg_entities:
                     cur_entities = merge_entities(cur_entities, seg_entities)
-                    # 块级实体标注：该段提取结果写入对应分块
-                    if seg_idx < len(chunk_rows):
-                        chunk_rows[seg_idx].entities = json.dumps(seg_entities, ensure_ascii=False)
                 # 逐段落库（本任务串行使用 db2，无并发访问）
                 art = db2.query(Article).filter(Article.id == article_id).first()
                 if not art:
@@ -186,12 +196,19 @@ async def _bg_extract(article_id: str, user_tags: list[str], need_title: bool) -
                     merged_tags = list(dict.fromkeys([*user_tags, *cur_tags]))
                     art.tags = json.dumps(merged_tags, ensure_ascii=False)
                 if cur_entities:
-                    art.entities = json.dumps(
-                        _annotate_entity_creator(cur_entities, art.created_by or ""),
-                        ensure_ascii=False,
-                    )
+                    # Neo4j 写路径：覆盖本文章 body 来源的实体/关系边（保留评论贡献）；
+                    # 提取为空（cur_entities is None）时不动 Neo4j——保留旧实体（沿用旧行为）
+                    try:
+                        await neo4j_store.replace_article_mentions(
+                            article_id,
+                            cur_entities.get("entities", []),
+                            cur_entities.get("relations", []),
+                            source="body",
+                            creator=art.created_by or "",
+                        )
+                    except Neo4jStoreError as e:
+                        logger.error("[BG_EXTRACT] Neo4j entity write failed: %s", e)
                 db2.commit()
-                seg_idx += 1
         except Exception as e:
             logger.warning("[BG_EXTRACT] LLM extraction failed: %s", e)
 
@@ -287,6 +304,8 @@ async def _bg_attachment_enhance(
                         parsed = await _asyncio.to_thread(parse_pdf, uf["storage_path"])
                     else:
                         parsed = ""
+                    # 公文结构 → markdown（规则转换，正文一字不改；幂等）
+                    parsed = to_markdown(parsed, ext)
                     if parsed:
                         # Replace placeholder div with parsed text
                         placeholder = f'<div data-attachment="{escaped_name}"'
@@ -354,15 +373,11 @@ async def _bg_attachment_enhance(
         try:
             chunk_rows = get_article_chunks(db2, article_id)
             texts = [r.chunk_text for r in chunk_rows]
-            seg_idx = 0
             async for seg_tags, seg_entities in extract_chunks_iter(texts):
                 if seg_tags:
                     bg_tags = merge_tags(bg_tags, seg_tags)
                 if seg_entities:
                     bg_entities = merge_entities(bg_entities, seg_entities)
-                    # 块级实体标注：该段提取结果写入对应分块
-                    if seg_idx < len(chunk_rows):
-                        chunk_rows[seg_idx].entities = json.dumps(seg_entities, ensure_ascii=False)
                 # 逐段落库（本任务串行使用 db2，无并发访问）
                 art = db2.query(Article).filter(Article.id == article_id).first()
                 if not art:
@@ -372,12 +387,18 @@ async def _bg_attachment_enhance(
                     merged = list(dict.fromkeys([*existing_tags, *bg_tags]))
                     art.tags = json.dumps(merged, ensure_ascii=False)
                 if bg_entities:
-                    art.entities = json.dumps(
-                        _annotate_entity_creator(bg_entities, art.created_by or ""),
-                        ensure_ascii=False,
-                    )
+                    # Neo4j 写路径：覆盖本文章 body 来源的实体/关系边（保留评论贡献）
+                    try:
+                        await neo4j_store.replace_article_mentions(
+                            article_id,
+                            bg_entities.get("entities", []),
+                            bg_entities.get("relations", []),
+                            source="body",
+                            creator=art.created_by or "",
+                        )
+                    except Neo4jStoreError as e:
+                        logger.error("[BG_ATTACH] Neo4j entity write failed: %s", e)
                 db2.commit()
-                seg_idx += 1
         except Exception as e:
             logger.warning("[BG_ATTACH] LLM extraction failed: %s", e)
 
@@ -433,6 +454,15 @@ async def create_article(
         user_tags = []
     user_tags = list(dict.fromkeys(user_tags))  # dedup, preserve order
     user_title = title.strip()
+    # 编辑框内容也识别公文/法律结构并转 markdown（与文件解析路径同一转换器，
+    # 幂等——手写 markdown 不受影响）
+    content = to_markdown(content)
+
+    # 文章必须对应分类（v2.3 起强制）——校验前置，避免附件写盘后才失败
+    if not category_id:
+        raise HTTPException(status_code=400, detail="文章必须选择分类")
+    if not db.query(Category).filter(Category.id == category_id).first():
+        raise HTTPException(status_code=400, detail="分类不存在")
 
     # Handle file uploads
     attachment_path = None
@@ -504,9 +534,8 @@ async def create_article(
     article = Article(
         title=user_title or "无标题",
         content=initial_content,
-        category_id=category_id or None,
+        category_id=category_id,
         tags=json.dumps(user_tags, ensure_ascii=False),
-        entities=None,
         processing="processing" if AUTO_PARSE and (len(uploaded_files) > 0 or initial_content.strip()) else None,
         attachment_path=attachment_path,
         attachment_name=attachment_name,
@@ -526,6 +555,7 @@ async def create_article(
         # No files, just text content — lightweight background extraction
         asyncio.create_task(_bg_extract(article.id, user_tags, need_title=not user_title))
 
+    _attach_entities(article)
     return article
 
 
@@ -543,6 +573,9 @@ async def update_article(
 ):
     _validate_article_id(article_id)
     user_cn = cert.display_name or ""
+    # 编辑框内容也识别公文/法律结构并转 markdown（幂等；转换后的内容参与
+    # 下方 content_changed 比较——旧文章首次保存时原文与转换后不一致会触发更新）
+    content = to_markdown(content)
     # Parse keep list — only these existing attachments should be preserved.
     # keep_attachments="" means "not provided" (keep all for backward compat).
     # keep_attachments="[...]" means the frontend explicitly sent the list.
@@ -596,6 +629,9 @@ async def update_article(
     has_content_change = content_changed
     has_title_change = bool(title.strip() and title.strip() != (article.title or ""))
     has_category_change = bool(category_id and category_id != (article.category_id or ""))
+    # 文章必须对应分类：更换分类时校验目标分类存在（不允许置空——空值视为未变更）
+    if has_category_change and not db.query(Category).filter(Category.id == category_id).first():
+        raise HTTPException(status_code=400, detail="分类不存在")
     tags_changed = bool(tags and json.dumps(user_tags, ensure_ascii=False) != (article.tags or "[]"))
     has_attachment_change = False
     if keep_list is not None:
@@ -615,11 +651,14 @@ async def update_article(
 
     if not has_files and not has_content_change and not has_title_change \
             and not has_category_change and not tags_changed and not has_attachment_change:
+        _attach_entities(article)
         return article
 
     # Something changed — apply basic field updates
     article.title = title.strip() or article.title
-    article.category_id = category_id or None
+    # 分类只在显式传入时更新（空值视为不变更，不允许置空——文章必须对应分类）
+    if category_id:
+        article.category_id = category_id
     if tags:
         article.tags = json.dumps(user_tags, ensure_ascii=False)
 
@@ -858,6 +897,7 @@ async def update_article(
         db.commit()
         asyncio.create_task(_bg_extract(article.id, user_tags, need_title=False))
 
+    _attach_entities(article)
     return article
 
 
@@ -946,6 +986,7 @@ async def reprocess_article(
     asyncio.create_task(_bg_attachment_enhance(
         article.id, uploaded_files, need_title=False,
     ))
+    _attach_entities(article)
     return article
 
 
@@ -1030,6 +1071,7 @@ async def recognize_article(
     db.commit()
 
     asyncio.create_task(_bg_extract(article.id, existing_tags, need_title=False))
+    _attach_entities(article)
     return article
 
 
@@ -1048,17 +1090,13 @@ def delete_article(
     if article.created_by != user_cn:
         raise HTTPException(status_code=403, detail="只有文章创建人可以删除该文章")
 
-    # Collect entity names from this article before deleting
-    entity_names: set[str] = set()
-    if article.entities:
-        try:
-            ent_data = json.loads(article.entities)
-            for e in ent_data.get("entities", []):
-                name = e.get("name", "")
-                if name:
-                    entity_names.add(name)
-        except (json.JSONDecodeError, TypeError):
-            pass
+    # Collect entity names from this article before deleting（Neo4j 唯一存储；
+    # 不可用时给空集——EntityInfo 孤儿清理跳过，悬空边由下次启动 GC 治愈）
+    try:
+        entity_names = set(neo4j_store.get_entity_names_mentioned_in_sync(article_id))
+    except Neo4jStoreError as e:
+        logger.warning("Entity names query failed (Neo4j unavailable): %s", e)
+        entity_names = set()
 
     # Collect attachment files (article + its cascade-deleted comments) for cleanup
     attachment_files: set[str] = set()
@@ -1087,27 +1125,23 @@ def delete_article(
     vector_store.schedule_delete_by_article(article_id)  # 清理该文章全部分块点（含评论）
     delete_uploaded_files(attachment_files)
 
-    # Clean up entity_infos that no longer appear in any article
+    # Neo4j 边清理：best-effort（失败时下次启动悬空 GC 兜底治愈），不阻塞文章删除
+    try:
+        neo4j_store.remove_article_sync(article_id)
+    except Neo4jStoreError as e:
+        logger.warning("Neo4j article cleanup failed: %s", e)
+
+    # Clean up entity_infos that no longer appear in any article（Neo4j 批量判断，避免 N+1）
     if entity_names:
-        still_used: set[str] = set()
-        all_articles = db.query(Article.entities).filter(Article.entities.isnot(None)).all()
-        for (ent_str,) in all_articles:
-            try:
-                ent_data = json.loads(ent_str) if isinstance(ent_str, str) else ent_str
-                for e in ent_data.get("entities", []):
-                    name = e.get("name", "")
-                    if name:
-                        still_used.add(name)
-            except (json.JSONDecodeError, TypeError):
-                pass
-        orphaned = entity_names - still_used
+        try:
+            still_mentioned = neo4j_store.entity_names_with_mentions_sync(list(entity_names))
+        except Neo4jStoreError as e:
+            logger.warning("Entity orphan check failed (Neo4j unavailable): %s", e)
+            still_mentioned = entity_names  # 保守：不可用时跳过清理
+        orphaned = entity_names - still_mentioned
         if orphaned:
             db.query(EntityInfo).filter(EntityInfo.entity_name.in_(orphaned)).delete(synchronize_session=False)
             db.commit()
             logger.info(f"Cleaned up entity_infos for orphaned entities: {orphaned}")
-
-    # Invalidate knowledge graph cache
-    from app.routes.graph import invalidate_graph_cache
-    invalidate_graph_cache()
 
     return None

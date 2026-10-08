@@ -11,7 +11,8 @@
 - 记录创建人和更新人（从 mTLS 证书 CN 提取姓名+身份证号）
 - 仅更新过的文章显示更新时间/更新人
 - 文件上传自动解析（文本 / Word / Excel / PPT / PDF / 图片 / 音视频），500MB 大小限制；中文文本文件自动编码检测（BOM → UTF-8 → GB18030），GBK 文件不再乱码
-- 分类管理（颜色标签，含文章保护）
+- **公文/法律文本自动转 Markdown**：文件解析与编辑框内容统一转换——公文编号层级（一、/（一）/1./（1））与法律结构（《法律名称》/第X章/第X条）转标题、docx 表格转 markdown 表格、正文保真一字不改
+- 分类管理（颜色标签，含文章保护；**文章必须对应分类**——编辑器/上传强制选择，后端 400 兜底）
 - 标签系统（手动 chips 交互 + AI 自动提取）
 - 附件下载（原始文件保留）
 - 附件手动重新解析（每个附件独立 🔄 按钮，解析中显示遮罩）
@@ -128,9 +129,12 @@ my-wiki/
 │   │       ├── qa.py              # RAG 问答 (语义搜索 + LLM)
 │   │       └── upload.py          # 文件上传 + 解析 + AI 增强
 │   ├── static/                    # 前端构建产物（生产模式）
-│   ├── uploads/                   # 上传文件存储
 │   ├── requirements.txt
 │   └── .env                       # 环境变量 (需自行创建)
+├── data/                          # 数据统一目录（本地开发与 Docker 共用）
+│   ├── knowledge_base.db          #   SQLite 数据库
+│   ├── uploads/                   #   上传文件
+│   ├── qdrant/  neo4j/            #   向量与图数据（compose 卷）
 ├── frontend/                      # 前端
 │   ├── src/
 │   │   ├── main.tsx               # React 入口
@@ -188,7 +192,7 @@ my-wiki/
 ├── nginx/                         # nginx mTLS 反向代理配置
 │   └── mtls.conf                  # TLS 终止 + optional_no_ca + X-Client-Cert 头
 ├── Dockerfile                     # 多阶段构建（静态 ffmpeg → Node 前端 → Python 运行时）
-├── docker-compose.yml             # 三容器编排（my-wiki + qdrant + nginx）
+├── docker-compose.yml             # 四容器编排（my-wiki + qdrant + neo4j + nginx）
 ├── .env.example                   # 环境变量模板（复制为 .env 使用，已 gitignore）
 ├── .dockerignore
 └── README.md
@@ -361,10 +365,11 @@ docker compose up -d --build
 ```
 
 - 多阶段构建：静态 ffmpeg 二进制 → Node 构建前端 → Python slim 运行时（OpenCV headless）
-- **三容器架构**：my-wiki（应用）+ qdrant（向量检索，`qdrant/qdrant:v1.19.1`）+ nginx（mTLS TLS 终止）
-- 数据持久化：本机目录绑定挂载（`./data` SQLite + Qdrant 向量数据 / `./uploads` 上传文件）
+- **四容器架构**：my-wiki（应用）+ qdrant（向量检索，`qdrant/qdrant:v1.19.1`）+ neo4j（实体/关系图存储，`neo4j:5.26` LTS）+ nginx（mTLS TLS 终止）
+- 数据持久化：本机目录绑定挂载（`./data` 统一存放 SQLite 数据库 + Qdrant 向量数据 + Neo4j 图数据 + `data/uploads` 上传文件）
 - **Qdrant 连接**：统一在 `.env` 中配置 `QDRANT_URL`——Docker 部署 `http://qdrant:6333`（compose 网络服务名），本地开发 `http://localhost:6333`（`docker compose up -d qdrant` 单独起向量库即可）
-- **环境变量**：统一在仓库根目录 `.env`（模型参数、超时、开关、白名单），docker-compose 不做覆盖
+- **Neo4j 连接**：统一在 `.env` 中配置 `NEO4J_URI`——Docker 部署 `bolt://neo4j:7687`，本地开发 `bolt://localhost:7687`；密码 `NEO4J_PASSWORD` 仅在 `./data/neo4j` 数据卷首次初始化时生效，Neo4j Browser 管理界面在 `http://localhost:7474`
+- **环境变量**：统一在仓库根目录 `.env`（模型参数、超时、开关、白名单、Qdrant/Neo4j 连接），docker-compose 不做覆盖
 - **证书挂载**：`./certs:/certs:ro`（镜像不含证书，启动必须提供）
 - 修改根目录 `.env` 后执行 `docker compose restart` 即可生效（无需重建容器/镜像；若修改了 `docker-compose.yml` 则需 `docker compose up -d` 重建容器）
 
@@ -393,14 +398,14 @@ docker compose up -d --build
 - **单一配置文件**：仓库根目录 `.env`（已 gitignore，模板见 `.env.example`），Docker 部署与本地开发共用
 - **Docker 部署**：挂载为容器内 `/app/.env`，后端启动时 `load_dotenv()` 读取 —— **修改后 `docker compose restart` 即生效**
 - **本地开发**：`config.py` 显式加载根目录 `.env`（cwd 在 backend/ 下同样生效）
-- 路径类变量（数据库 / 上传目录 / 证书路径）不用配置 —— 容器由 Dockerfile `ENV` 提供，本地由代码默认值兜底
+- 路径类变量（数据库 / 上传目录 / 证书路径）不用配置 —— 数据统一锚定仓库根 `data/` 目录（本地开发与 Docker 共用），容器由 Dockerfile `ENV` 覆盖，本地由代码默认值兜底
 
 ### 基础设施
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `DATABASE_URL` | SQLite 数据库路径 | `sqlite:///./knowledge_base.db` |
-| `UPLOAD_DIR` | 上传文件存储目录 | `./uploads` |
+| `DATABASE_URL` | SQLite 数据库路径 | `data/knowledge_base.db`（锚定仓库根） |
+| `UPLOAD_DIR` | 上传文件存储目录 | `data/uploads`（锚定仓库根） |
 | `CORS_ORIGINS` | 跨域白名单（Vite 代理模式下通常不需要） | `https://localhost:5173` |
 
 ### LLM 文本模型（标题生成、实体提取、纯文本问答）
@@ -445,7 +450,7 @@ docker compose up -d --build
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `AUTO_PARSE` | 控制 LLM 类后台解析（媒体描述、标签/实体/标题提取）。`1` 开启 / `0` 关闭。文档附件的文本提取为纯本地解析，始终自动执行，不受本开关影响 | `0`（关闭） |
+| `AUTO_PARSE` | 控制上传后/内容修改后的自动解析（媒体描述、标签/实体/标题提取、文档文本提取）。`1` 开启 / `0` 关闭——文章与评论的新增附件和内容修改统一受控，关闭时保留"待解析"占位（`/api/upload` 上传入口的文档文本提取例外，始终自动） | `0`（关闭） |
 
 ### 示例数据
 
@@ -504,12 +509,14 @@ docker compose up -d --build
 
 ### Article (文章)
 ```
-id, title, content, category_id, tags (JSON数组), entities (JSON对象),
+id, title, content, category_id, tags (JSON数组),
 created_by, updated_by, created_at, updated_at,
 attachment_path/name/type, processing
 ```
+- **实体/关系不在此表**（v2.3 起存 Neo4j，见下方「Neo4j 图存储」）
+- **category_id 必填**（v2.4 起）：创建/上传缺省返回 400「文章必须选择分类」，编辑不可置空
 
-### entities 格式
+### entities 格式（文章/评论接口字段，由 Neo4j 组装）
 ```json
 {
   "entities": [{"name": "机器学习", "type": "技术"}],
@@ -521,6 +528,18 @@ attachment_path/name/type, processing
 }
 ```
 - 实体以「名称+类型」为标识，同名不同类型是不同实体；关系两端携带类型（`source_type` / `target_type`）
+- 该字段不再存于 SQLite：由 `neo4j_store` 从 Neo4j 批量 Cypher 组装返回，Neo4j 不可用时降级 `null`
+
+### Neo4j 图存储（v2.3，实体/关系唯一存储）
+```
+(:Article {id})                                    -- 仅作 MENTIONS 边源
+(:Entity {name, type, created_by, created_at})     -- 身份键 (name,type)
+(a)-[:MENTIONS {source: 'body'|'comment:<id>'}]->(e)
+(e1)-[:RELATES {label, article_id, source}]->(e2)
+```
+- 提取/手动增删/改名改类型全部直接写 Neo4j；文章/评论接口按请求批量组装 `entities` 字段
+- 评论贡献带 `source='comment:<id>'` 出处，删除/重解析时精确删边；孤儿实体节点自动 GC
+- 旧 SQLite JSON 数据由启动懒迁移自动导入 Neo4j 后删列（`ALTER TABLE … DROP COLUMN`）
 
 ### Category (分类)
 ```
@@ -530,19 +549,20 @@ id, name, color, created_by, created_at, updated_at
 
 ### Comment (评论)
 ```
-id, article_id, content, tags (JSON), entities (JSON),
+id, article_id, content, tags (JSON),
 attachments (JSON数组 [{path, name, type}]),
 processing, created_by, updated_by, created_at, updated_at
 ```
 - 关联文章，级联删除；支持多附件
+- 实体贡献存 Neo4j（`source='comment:<id>'` 边），接口返回时组装
 
 ### ArticleChunk (文章分块)
 ```
-id, article_id, chunk_index, chunk_text, entities (JSON对象)
+id, article_id, chunk_index, chunk_text
 ```
 - 评论内容以 `comment.{id}.{i}` 索引分块纳入
-- `entities` 为块级实体标注：分段提取时逐段落库，检索命中时随来源返回前端
-- **向量不存 SQLite**：embedding 只存 Qdrant（point id = 分块 id，payload 含 article_id/chunk_index/chunk_text），SQLite 仅保留分块元数据
+- QA 来源卡片的实体 chips 由 Neo4j 实体名与 chunk_text 子串匹配即时派生（无块级快照列）
+- **向量不存 SQLite**：embedding 只存 Qdrant（point id = 分块 id，payload 含 article_id/chunk_index/chunk_text），SQLite 仅保留分块文本
 
 ### EntityInfo (实体附加信息)
 ```
@@ -643,7 +663,7 @@ const DEV_USERS = [
 - 文章按 Markdown 标题分段（附件标记 HTML 注释不参与分块），每段调用 embedding API 生成向量**写入 Qdrant**；嵌入失败时分块行保留，下次启动同步重算补齐
 - 分块是唯一分段来源：语义搜索与 LLM 分段提取共用 `article_chunks` 表；分块参数（`MAX_CHUNK_CHARS`/`CHUNK_OVERLAP`）在 `.env` 配置，改动后执行 `backend/rebuild_chunks.py` 全量重建
 - 增量计算（`asyncio.Lock` 保护 + 记录已处理文章数）
-- 问答时经 Qdrant `query_points` 检索（Cosine 相似度，阈值 `QA_MIN_RELEVANCE` 默认 0.3），按 point id 回查分块行返回命中的块级实体标注
+- 问答时经 Qdrant `query_points` 检索（Cosine 相似度，阈值 `QA_MIN_RELEVANCE` 默认 0.3），按 point id 回查分块行；来源卡片的实体 chips 由 Neo4j 实体名与块文本匹配派生
 - **图谱实体直召**：问句中的实体名直接定位提及该实体的分块（确定性匹配，不受向量阈值限制），与向量结果按文章去重合并
 - 检索完全依赖 Qdrant：Qdrant 不可用 / 嵌入模型失败时问答返回明确错误提示（无关键词兜底）
 

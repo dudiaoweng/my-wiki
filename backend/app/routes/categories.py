@@ -4,7 +4,6 @@ from app.dependencies import get_db
 from app.models import Category, Article
 from app.schemas import CategoryCreate, CategoryResponse
 from app.auth import get_client_cert, CertInfo
-from app.routes.graph import invalidate_graph_cache
 import uuid
 
 router = APIRouter(prefix="/api/categories", tags=["categories"])
@@ -37,7 +36,6 @@ def create_category(body: CategoryCreate, db: Session = Depends(get_db),
     db.add(category)
     db.commit()
     db.refresh(category)
-    invalidate_graph_cache()
     return category
 
 
@@ -64,7 +62,6 @@ def update_category(
     cat.color = body.color
     db.commit()
     db.refresh(cat)
-    invalidate_graph_cache()
     return cat
 
 
@@ -92,5 +89,4 @@ def delete_category(
 
     db.delete(cat)
     db.commit()
-    invalidate_graph_cache()
     return None

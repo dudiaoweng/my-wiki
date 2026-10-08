@@ -186,16 +186,21 @@ export function EditorModal() {
   const handleSave = async () => {
     // 文章加载完成前 title/content 仍是空串，此时保存会覆盖原文
     if (saving || loadingArticle) return;
+    // 文章必须对应分类
+    if (!categoryId) {
+      showToast('请选择分类', 'error');
+      return;
+    }
     setSaving(true);
 
     try {
       if (isEdit && editorState.articleId) {
         // Always send content — backend compares against stored content to
         // decide whether LLM re-extraction is needed.
-        const updateData: { title: string; content: string; category_id: string | null; tags: string[] } = {
+        const updateData: { title: string; content: string; category_id: string; tags: string[] } = {
           title: title.trim(),
           content,
-          category_id: categoryId || null,
+          category_id: categoryId,
           tags,
         };
         await api.updateArticle(
@@ -208,7 +213,7 @@ export function EditorModal() {
         const article = await api.createArticle({
           title: title.trim(),
           content,
-          category_id: categoryId || null,
+          category_id: categoryId,
           tags,
         }, attachments.length > 0 ? attachments : undefined);
         showToast('文章已创建', 'success');
@@ -260,7 +265,7 @@ export function EditorModal() {
               value={categoryId}
               onChange={(e) => setCategoryId(e.target.value)}
             >
-              <option value="">无分类</option>
+              <option value="" disabled>请选择分类</option>
               {categories.map((c) => (
                 <option key={c.id} value={c.id}>{c.name}</option>
               ))}

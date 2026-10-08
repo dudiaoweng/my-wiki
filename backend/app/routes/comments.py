@@ -11,21 +11,23 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from app.dependencies import get_db
 from app.database import SessionLocal
-from app.models import Article, ArticleChunk, Comment, utcnow
+from app.models import Article, ArticleChunk, Comment
 from app.schemas import CommentCreate, CommentUpdate, CommentResponse
 from app.auth import get_client_cert, CertInfo
-from app.llm_extract import extract_chunks_iter, merge_tags, merge_entities
+from app.llm_extract import extract_chunks_iter, merge_tags
 from app.config import AUTO_PARSE
-from app.routes.graph import invalidate_graph_cache
 from app.routes.upload import (
     parse_text_from_bytes, parse_docx, parse_xlsx, parse_pptx, parse_pdf,
-    parse_image, parse_video, parse_media,
+    parse_image, parse_video, parse_media, to_markdown,
     TEXT_EXTENSIONS, WORD_EXTENSIONS, EXCEL_EXTENSIONS, PPT_EXTENSIONS,
     PDF_EXTENSIONS, IMAGE_EXTENSIONS, AUDIO_EXTENSIONS, VIDEO_EXTENSIONS,
 )
 from app.routes.qa import _extract_video_thumbnail, get_comment_chunks
 from app.utils import read_upload_limited, MAX_UPLOAD_BYTES, delete_uploaded_files
 from app import vector_store
+from app import neo4j_store
+from app.neo4j_store import Neo4jStoreError
+from app.config import UPLOAD_DIR as UPLOAD_DIR_STR
 
 logger = logging.getLogger(__name__)
 
@@ -34,129 +36,19 @@ router = APIRouter(
     tags=["comments"],
 )
 
-UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads"))
+UPLOAD_DIR = Path(UPLOAD_DIR_STR)
 
-# 文档类扩展名 — 纯本地解析（不调用 LLM）。上传后始终自动提取文本，
-# 不受 AUTO_PARSE 开关影响（AUTO_PARSE 仅控制媒体描述与标签/实体提取）
+# 文档类扩展名 — 纯本地解析（不调用 LLM）。
+# 评论新增附件的解析（含文档文本提取）统一受 AUTO_PARSE 开关控制：
+# 开关关闭时保留"待解析"占位，等手动 reprocess
 DOCUMENT_EXTENSIONS = TEXT_EXTENSIONS | WORD_EXTENSIONS | EXCEL_EXTENSIONS | PPT_EXTENSIONS | PDF_EXTENSIONS
 
 
 # ─── Helpers ────────────────────────────────────────
-
-def _merge_entities_into_article(article: Article, comment_entities: dict) -> bool:
-    """Merge comment-extracted entities into article.entities JSON (dedup by name)."""
-    try:
-        art_entities = json.loads(article.entities) if article.entities else None
-    except (json.JSONDecodeError, TypeError):
-        art_entities = None
-
-    if not comment_entities:
-        return False
-
-    art_ents = art_entities.get("entities", []) if isinstance(art_entities, dict) else []
-    art_rels = art_entities.get("relations", []) if isinstance(art_entities, dict) else []
-    comm_ents = comment_entities.get("entities", [])
-    comm_rels = comment_entities.get("relations", [])
-
-    seen_names = {(e.get("name"), e.get("type")) for e in art_ents}
-    # 实体以「名称+类型」为标识，关系去重键纳入两端类型
-    seen_rels = {
-        (r.get("source"), r.get("source_type") or "", r.get("target"), r.get("target_type") or "", r.get("label"))
-        for r in art_rels
-    }
-
-    changed = False
-    for e in comm_ents:
-        key = (e.get("name"), e.get("type"))
-        if key not in seen_names:
-            seen_names.add(key)
-            art_ents.append(e)
-            changed = True
-    for r in comm_rels:
-        key = (r.get("source"), r.get("source_type") or "", r.get("target"), r.get("target_type") or "", r.get("label"))
-        if key not in seen_rels:
-            seen_rels.add(key)
-            art_rels.append(r)
-            changed = True
-
-    if changed:
-        merged = {"entities": art_ents, "relations": art_rels}
-        article.entities = json.dumps(merged, ensure_ascii=False)
-    return changed
-
-
-def _subtract_comment_from_article(article: Article, comment: Comment) -> bool:
-    """Remove a single comment's entities from the article (tags are kept per-comment)."""
-    changed = False
-
-    # Subtract entities
-    try:
-        comm_entities = json.loads(comment.entities) if comment.entities else None
-    except (json.JSONDecodeError, TypeError):
-        comm_entities = None
-    try:
-        art_entities = json.loads(article.entities) if article.entities else None
-    except (json.JSONDecodeError, TypeError):
-        art_entities = None
-
-    if isinstance(comm_entities, dict) and isinstance(art_entities, dict):
-        comm_ent_names = {(e.get("name"), e.get("type")) for e in comm_entities.get("entities", [])}
-        comm_rel_keys = {(r.get("source"), r.get("target"), r.get("label")) for r in comm_entities.get("relations", [])}
-        art_ents = art_entities.get("entities", [])
-        art_rels = art_entities.get("relations", [])
-
-        new_ents = [e for e in art_ents if (e.get("name"), e.get("type")) not in comm_ent_names]
-        new_rels = [r for r in art_rels if (r.get("source"), r.get("target"), r.get("label")) not in comm_rel_keys]
-
-        if len(new_ents) != len(art_ents) or len(new_rels) != len(art_rels):
-            article.entities = json.dumps({"entities": new_ents, "relations": new_rels}, ensure_ascii=False)
-            changed = True
-
-    return changed
-
-
-def _rebuild_article_entities_from_comments(article: Article, db: Session) -> bool:
-    """Rebuild article entities from article's own content-entities + all comment entities."""
-    try:
-        art_entities = json.loads(article.entities) if article.entities else None
-    except (json.JSONDecodeError, TypeError):
-        art_entities = None
-
-    # Rebuild from article's own base entities + all comments
-    comments = db.query(Comment).filter(Comment.article_id == article.id).all()
-    merged = {"entities": [], "relations": []}
-    seen_names = set()
-    seen_rels = set()
-
-    def add_from(src):
-        if not isinstance(src, dict):
-            return
-        for e in src.get("entities", []):
-            key = (e.get("name"), e.get("type"))
-            if key not in seen_names:
-                seen_names.add(key)
-                merged["entities"].append(e)
-        for r in src.get("relations", []):
-            key = (r.get("source"), r.get("target"), r.get("label"))
-            if key not in seen_rels:
-                seen_rels.add(key)
-                merged["relations"].append(r)
-
-    # Apply article's own base entities first (from content, not from comments)
-    if art_entities:
-        add_from(art_entities)
-
-    for c in comments:
-        try:
-            comm_entities = json.loads(c.entities) if c.entities else None
-        except (json.JSONDecodeError, TypeError):
-            comm_entities = None
-        if comm_entities:
-            add_from(comm_entities)
-
-    article.entities = json.dumps(merged, ensure_ascii=False)
-    return True
-
+# v2.3 实体/关系迁移 Neo4j 后：
+# - 评论贡献以 MENTIONS/RELATES 边的 source='comment:<id>' 标识，
+#   合并 = add_article_mentions（MERGE 幂等），减法 = 按 source 精确删边
+# - 原 JSON 合并/减法 helper 已删除（3 元组减法会误删正文关系，删边更精确）
 
 # ─── Embedding helper ────────────────────────────────
 
@@ -245,6 +137,8 @@ async def _bg_comment_process(
                     parsed = await parse_media(audio_bytes, uf["filename"], uf["content_type"])
                 else:
                     parsed = ""
+                # 公文结构 → markdown（规则转换，正文一字不改；幂等）
+                parsed = to_markdown(parsed, ext)
 
                 if parsed:
                     # Replace placeholder div
@@ -281,6 +175,14 @@ async def _bg_comment_process(
             if not article:
                 return
 
+            # 编辑评论场景：先按 source 精确删除旧贡献再重新提取合并，
+            # 避免旧实体/关系残留（新建评论无旧边，删除为 no-op）
+            try:
+                await neo4j_store.delete_mentions(article_id, source=f"comment:{comment_id}")
+                await neo4j_store.delete_relations(article_id, source=f"comment:{comment_id}")
+            except Neo4jStoreError as e:
+                logger.error("[BG_COMMENT] Neo4j subtract failed: %s", e)
+
             # 评论分块不存在时先建（文本提取已完成、内容已定稿）
             if not get_comment_chunks(db2, comment_id):
                 await _embed_comment_content(comment, db2)
@@ -291,30 +193,25 @@ async def _bg_comment_process(
                     cur_tags = []
                 chunk_rows = get_comment_chunks(db2, comment_id)
                 texts = [r.chunk_text.removeprefix("[评论] ") for r in chunk_rows]
-                seg_idx = 0
                 async for seg_tags, seg_entities in extract_chunks_iter(texts):
                     if seg_tags:
                         cur_tags = merge_tags(cur_tags, seg_tags)
                         comment.tags = json.dumps(cur_tags, ensure_ascii=False)
                     if isinstance(seg_entities, dict) and seg_entities:
-                        # Annotate entity items with comment creator
-                        now_str = utcnow().isoformat()
-                        for e in seg_entities.get("entities", []):
-                            if not e.get("created_by"):
-                                e["created_by"] = comment.created_by or ""
-                                e["created_at"] = now_str
-                        cur_entities = json.loads(comment.entities) if comment.entities else None
-                        merged_entities = merge_entities(cur_entities, seg_entities)
-                        comment.entities = (
-                            json.dumps(merged_entities, ensure_ascii=False) if merged_entities else None
-                        )
-                        _merge_entities_into_article(article, seg_entities)
-                        # 块级实体标注：该段提取结果写入对应评论分块
-                        if seg_idx < len(chunk_rows):
-                            chunk_rows[seg_idx].entities = json.dumps(seg_entities, ensure_ascii=False)
+                        # Neo4j：评论贡献以 source='comment:<id>' 边合并进文章
+                        # （MERGE 幂等 = 原逐段合并语义；创建人由存储层标注）
+                        try:
+                            await neo4j_store.add_article_mentions(
+                                article_id,
+                                seg_entities.get("entities", []),
+                                seg_entities.get("relations", []),
+                                source=f"comment:{comment_id}",
+                                creator=comment.created_by or "",
+                            )
+                        except Neo4jStoreError as e:
+                            logger.error("[BG_COMMENT] Neo4j entity write failed: %s", e)
                     # 逐段落库
                     db2.commit()
-                    seg_idx += 1
             except Exception as e:
                 logger.warning(f"[BG_COMMENT] LLM extraction failed: {e}")
 
@@ -331,11 +228,10 @@ async def _bg_comment_process(
 
             comment.processing = None
             db2.commit()
-            invalidate_graph_cache()
             # 评论分块已在提取前建立（向量分块先行），无需重复嵌入
             logger.info("[BG_COMMENT] comment %s processing complete", comment_id)
         else:
-            # 无 LLM 提取（AUTO_PARSE 关闭或无需提取）——仅写入文档提取的文本。
+            # 无需提取（仅附件文本落库，如只加附件无正文）——仅写入文档提取的文本。
             # 无论是否有变化都要清 processing，避免占位符卡在"读取中…"
             comment = db2.query(Comment).filter(Comment.id == comment_id).first()
             if comment:
@@ -395,15 +291,13 @@ async def _bg_comment_reextract(
         # Step A: 重建评论分块 + 嵌入（提取与 Q&A 检索共用同一套切分）
         await _embed_comment_content(comment, db2)
 
-        # Step B: 重新提取标签/实体——旧贡献先从文章实体扣除，避免重复累计
-        comment = db2.query(Comment).filter(Comment.id == comment_id).first()
-        if not comment:
-            return
-        article = db2.query(Article).filter(Article.id == article_id).first()
-        if not article:
-            return
-        _subtract_comment_from_article(article, comment)
-        comment.entities = None
+        # Step B: 重新提取标签/实体——旧贡献先按 source 精确删边，避免重复累计
+        # （原 3 元组减法可能误删正文关系，删边更精确）
+        try:
+            await neo4j_store.delete_mentions(article_id, source=f"comment:{comment_id}")
+            await neo4j_store.delete_relations(article_id, source=f"comment:{comment_id}")
+        except Neo4jStoreError as e:
+            logger.error("[BG_COMMENT_REEXTRACT] Neo4j subtract failed: %s", e)
         db2.commit()
 
         try:
@@ -412,29 +306,24 @@ async def _bg_comment_reextract(
                 cur_tags = []
             chunk_rows = get_comment_chunks(db2, comment_id)
             texts = [r.chunk_text.removeprefix("[评论] ") for r in chunk_rows]
-            seg_idx = 0
             async for seg_tags, seg_entities in extract_chunks_iter(texts):
                 if seg_tags:
                     cur_tags = merge_tags(cur_tags, seg_tags)
                     comment.tags = json.dumps(cur_tags, ensure_ascii=False)
                 if isinstance(seg_entities, dict) and seg_entities:
-                    now_str = utcnow().isoformat()
-                    for e in seg_entities.get("entities", []):
-                        if not e.get("created_by"):
-                            e["created_by"] = comment.created_by or ""
-                            e["created_at"] = now_str
-                    cur_entities = json.loads(comment.entities) if comment.entities else None
-                    merged_entities = merge_entities(cur_entities, seg_entities)
-                    comment.entities = (
-                        json.dumps(merged_entities, ensure_ascii=False) if merged_entities else None
-                    )
-                    _merge_entities_into_article(article, seg_entities)
-                    # 块级实体标注：该段提取结果写入对应评论分块
-                    if seg_idx < len(chunk_rows):
-                        chunk_rows[seg_idx].entities = json.dumps(seg_entities, ensure_ascii=False)
+                    # Neo4j：评论贡献以 source='comment:<id>' 边合并进文章
+                    try:
+                        await neo4j_store.add_article_mentions(
+                            article_id,
+                            seg_entities.get("entities", []),
+                            seg_entities.get("relations", []),
+                            source=f"comment:{comment_id}",
+                            creator=comment.created_by or "",
+                        )
+                    except Neo4jStoreError as e:
+                        logger.error("[BG_COMMENT_REEXTRACT] Neo4j entity write failed: %s", e)
                 # 逐段落库
                 db2.commit()
-                seg_idx += 1
         except Exception as e:
             logger.warning(f"[BG_COMMENT_REEXTRACT] LLM extraction failed: {e}")
 
@@ -443,7 +332,6 @@ async def _bg_comment_reextract(
             return
         comment.processing = None
         db2.commit()
-        invalidate_graph_cache()
         logger.info("[BG_COMMENT_REEXTRACT] comment %s reextract complete", comment_id)
     except Exception as e:
         logger.warning(f"[BG_COMMENT_REEXTRACT] Failed: {e}")
@@ -549,6 +437,17 @@ async def _bg_comment_attachment_reprocess(
 # ─── Routes ──────────────────────────────────────────
 
 
+def _attach_entities(comment: Comment) -> None:
+    """组装评论实体贡献挂 ORM 临时属性（Neo4j 按 source='comment:<id>' 边查询，
+    dict 直通响应模型 validator）；不可用时降级 None（前端容忍）。"""
+    try:
+        ent_map = neo4j_store.get_comment_entities_sync([comment.id])
+    except Neo4jStoreError as e:
+        logger.warning("Comment entities assembly failed (Neo4j unavailable): %s", e)
+        ent_map = {}
+    comment.entities = ent_map.get(comment.id)
+
+
 @router.get("", response_model=list[CommentResponse])
 def list_comments(
     article_id: str = PathParam(..., max_length=36),
@@ -569,6 +468,8 @@ def list_comments(
         .limit(limit)
         .all()
     )
+    for c in comments:
+        _attach_entities(c)
     return comments
 
 
@@ -659,8 +560,8 @@ async def create_comment(
                 initial_content = f"{initial_content}\n\n{video_tag}" if initial_content else video_tag
             else:
                 # 文档类型 — 占位符。文档文本提取为纯本地解析，始终后台执行；
-                # 未知类型在 AUTO_PARSE 关闭时保留"待解析"（媒体描述/实体提取由 AUTO_PARSE 控制）
-                parse_hint = "（读取中…）" if (ext in DOCUMENT_EXTENSIONS or AUTO_PARSE) else "（待解析）"
+                # 新增附件统一受 AUTO_PARSE 控制：关闭时保留"待解析"占位等手动解析
+                parse_hint = "（读取中…）" if AUTO_PARSE else "（待解析）"
                 doc_placeholder = f'<div data-attachment="{escaped_name}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {escaped_name}{parse_hint}</div>'
                 doc_marker = f'<!-- doc-attachment: {escaped_name} | {safe_name} -->'
                 initial_content = f"{initial_content}\n\n{doc_placeholder}\n{doc_marker}" if initial_content else f"{doc_placeholder}\n{doc_marker}"
@@ -674,17 +575,12 @@ async def create_comment(
 
     has_files = len(uploaded_files) > 0
     has_content = bool(initial_content.strip())
-    # 文档附件始终自动提取文本（纯本地解析）；AUTO_PARSE 只控制 LLM 类解析
-    has_doc_files = any(
-        Path(uf["filename"]).suffix.lower() in DOCUMENT_EXTENSIONS for uf in uploaded_files
-    )
 
     comment = Comment(
         article_id=article_id,
         content=initial_content,
         tags=json.dumps(user_tags, ensure_ascii=False),
-        entities=None,
-        processing="processing" if (AUTO_PARSE and (has_files or has_content)) or has_doc_files else None,
+        processing="processing" if AUTO_PARSE and (has_files or has_content) else None,
         attachments=json.dumps(all_attachments, ensure_ascii=False) if all_attachments else None,
         attachment_path=attachment_path,
         attachment_name=attachment_name,
@@ -696,14 +592,15 @@ async def create_comment(
     db.commit()
     db.refresh(comment)
 
-    # Launch background processing — 文档文本提取始终执行；
-    # 媒体描述与标签/实体提取（LLM）由 AUTO_PARSE 开关控制
-    if (AUTO_PARSE and (has_files or has_content)) or has_doc_files:
+    # Launch background processing — 新增附件与内容解析统一受 AUTO_PARSE 控制；
+    # 开关关闭时保留"待解析"占位，等手动 reprocess
+    if AUTO_PARSE and (has_files or has_content):
         asyncio.create_task(_bg_comment_process(
             comment.id, article_id, uploaded_files,
             need_extract=has_content,
         ))
 
+    _attach_entities(comment)
     return comment
 
 
@@ -820,8 +717,8 @@ async def update_comment(
                 comment.content = f"{comment.content}\n\n{video_tag}" if comment.content else video_tag
             else:
                 # 文档类型 — 占位符。文档文本提取为纯本地解析，始终后台执行；
-                # 未知类型在 AUTO_PARSE 关闭时保留"待解析"（媒体描述/实体提取由 AUTO_PARSE 控制）
-                parse_hint = "（读取中…）" if (ext in DOCUMENT_EXTENSIONS or AUTO_PARSE) else "（待解析）"
+                # 新增附件统一受 AUTO_PARSE 控制：关闭时保留"待解析"占位等手动解析
+                parse_hint = "（读取中…）" if AUTO_PARSE else "（待解析）"
                 doc_placeholder = f'<div data-attachment="{escaped_name}" data-path="{safe_name}" style="padding:10px 14px;background:var(--c-surface);border-radius:8px;border:1px solid var(--c-border);margin:8px 0">📎 {escaped_name}{parse_hint}</div>'
                 doc_marker = f'<!-- doc-attachment: {escaped_name} | {safe_name} -->'
                 comment.content = f"{comment.content}\n\n{doc_placeholder}\n{doc_marker}" if comment.content else f"{doc_placeholder}\n{doc_marker}"
@@ -846,26 +743,23 @@ async def update_comment(
     tags_changed = bool(tags)
     attachments_changed = bool(keep_attachments) or bool(new_attachments)
     if not content_changed and not uploaded_files and not tags_changed and not attachments_changed:
+        _attach_entities(comment)
         return comment
 
-    # 新上传的文档附件始终自动提取文本；AUTO_PARSE 只控制 LLM 类解析
-    has_new_doc_files = any(
-        Path(uf["filename"]).suffix.lower() in DOCUMENT_EXTENSIONS for uf in uploaded_files
-    )
-
     comment.updated_by = user_cn
-    comment.processing = "processing" if (AUTO_PARSE and (content_changed or uploaded_files)) or has_new_doc_files else comment.processing
+    comment.processing = "processing" if AUTO_PARSE and (content_changed or uploaded_files) else comment.processing
     db.commit()
     db.refresh(comment)
 
-    # Background processing — 文档文本提取始终执行；LLM 类解析由 AUTO_PARSE 控制
-    if (AUTO_PARSE and (content_changed or uploaded_files)) or has_new_doc_files:
+    # Background processing — 新增附件与内容解析统一受 AUTO_PARSE 控制
+    if AUTO_PARSE and (content_changed or uploaded_files):
         # Subtract old entities, re-extract later in background
         asyncio.create_task(_bg_comment_process(
             comment.id, article_id, uploaded_files,
             need_extract=content_changed or bool(uploaded_files),
         ))
 
+    _attach_entities(comment)
     return comment
 
 
@@ -907,6 +801,7 @@ async def reprocess_comment(
     db.commit()
 
     asyncio.create_task(_bg_comment_reextract(comment.id, article_id))
+    _attach_entities(comment)
     return comment
 
 
@@ -982,6 +877,7 @@ async def reprocess_comment_attachment(
         comment.id, article_id,
         {"filename": original_name, "content_type": content_type, "storage_path": str(storage_path)},
     ))
+    _attach_entities(comment)
     return comment
 
 
@@ -1011,8 +907,13 @@ def delete_comment(
     if comment.created_by != user_cn and article.created_by != user_cn:
         raise HTTPException(status_code=403, detail="只有评论作者或文章作者可以删除该评论")
 
-    # Subtract comment's contributions from article entities
-    _subtract_comment_from_article(article, comment)
+    # 减去该评论的实体贡献：按 source 精确删边（best-effort；Neo4j 宕机时
+    # 评论级悬空边由下次启动的悬空 GC 兜底治愈）
+    try:
+        neo4j_store.delete_mentions_sync(article_id, source=f"comment:{comment_id}")
+        neo4j_store.delete_relations_sync(article_id, source=f"comment:{comment_id}")
+    except Neo4jStoreError as e:
+        logger.warning("Neo4j comment subtract failed: %s", e)
     # Clean up comment chunks from embedding index（Qdrant 点同步清理）
     from app.models import ArticleChunk
     old_chunk_ids = [
@@ -1043,5 +944,4 @@ def delete_comment(
     vector_store.schedule_delete_points(old_chunk_ids)
     delete_uploaded_files(attachment_files)
 
-    invalidate_graph_cache()
     return None

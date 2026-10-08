@@ -8,16 +8,19 @@ export interface Occurrence {
 /**
  * Compute entity occurrences across one or more text sources.
  *
- * @param content     Primary text (article body).
- * @param entityName  Entity name to search for, or null.
- * @param extraTexts  Additional text blocks (e.g. comment contents). Their
- *                    occurrences are appended after content occurrences, with
- *                    ratios normalised across the combined total length.
+ * @param content        Primary text (article body).
+ * @param entityName     Term to search for (实体名或标签词), or null.
+ * @param extraTexts     Additional text blocks (e.g. comment contents). Their
+ *                       occurrences are appended after content occurrences, with
+ *                       ratios normalised across the combined total length.
+ * @param activeClassName 高亮激活态类名（实体 entity-highlight-active /
+ *                       标签 tag-highlight-active）
  */
 export function useEntityOccurrences(
   content: string,
   entityName: string | null,
   extraTexts: string[] = [],
+  activeClassName: string = 'entity-highlight-active',
 ) {
   const [activeIndex, setActiveIndex] = useState(0);
   const observerRef = useRef<IntersectionObserver | null>(null);
@@ -149,21 +152,21 @@ export function useEntityOccurrences(
     };
   }, [entityName, count]);
 
-  // ── Toggle .entity-highlight-active class on the current element ──
+  // ── Toggle active class on the current element ──
   useEffect(() => {
     // Remove active class from all occurrences
     document
-      .querySelectorAll('.entity-highlight-active')
-      .forEach((el) => el.classList.remove('entity-highlight-active'));
+      .querySelectorAll(`.${activeClassName}`)
+      .forEach((el) => el.classList.remove(activeClassName));
 
     // Add to the current one
     if (entityName && count > 0) {
       const activeEl = document.getElementById(`entity-occurrence-${activeIndex}`);
       if (activeEl) {
-        activeEl.classList.add('entity-highlight-active');
+        activeEl.classList.add(activeClassName);
       }
     }
-  }, [entityName, count, activeIndex]);
+  }, [entityName, count, activeIndex, activeClassName]);
 
   // ── Scroll to a specific occurrence ──
   const scrollToOccurrence = useCallback((index: number) => {

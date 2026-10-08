@@ -31,13 +31,11 @@ certs/tmp_*.cnf
 certs/verify_output.txt
 
 # ===== 运行时数据 =====
-backend/uploads/
 *.db
 *.sqlite3
 
-# ===== Docker 数据目录（本机绑定挂载） =====
+# ===== 数据目录（本机绑定挂载，v2.3 起统一：数据库 + 上传 + Qdrant + Neo4j） =====
 data/
-uploads/
 
 # ===== Node / 前端 =====
 node_modules/

@@ -14,6 +14,8 @@ from sqlalchemy.orm import Session, joinedload
 from app.dependencies import get_db
 from app.models import Article, ArticleChunk, Comment, EntityInfo
 from app import vector_store
+from app import neo4j_store
+from app.neo4j_store import Neo4jStoreError
 from app.config import (
     LLM_API_KEY, LLM_API_BASE, LLM_MODEL,
     VISION_API_KEY, VISION_API_BASE, VISION_MODEL,
@@ -71,7 +73,7 @@ class QASource(BaseModel):
     title: str
     excerpt: str
     relevance: float
-    entities: list[dict] = []  # 命中分块的块级实体标注 [{name, type}]
+    entities: list[dict] = []  # 命中块相关的实体 [{name, type}]（Neo4j 实体名与块文本匹配派生）
 
 class QAResponse(BaseModel):
     answer: str
@@ -417,7 +419,7 @@ async def semantic_search(db: Session, question: str, top_k: int = 5) -> list[tu
     """
     Semantic search via Qdrant.
 
-    Returns list of (score, article, chunk) — chunk 为命中的分块行（含块级实体标注）。
+    Returns list of (score, article, chunk) — chunk 为命中的分块行。
     检索路径严格依赖 Qdrant：失败抛 VectorStoreError / EmbeddingError，由调用方降级。
     """
     # Ensure all articles have embeddings（新文章首次问答时懒建分块并写入 Qdrant）
@@ -518,7 +520,7 @@ async def embed_chunk_rows(db: Session, chunks: list[ArticleChunk]) -> None:
 
 
 def get_article_chunks(db: Session, article_id: str) -> list[ArticleChunk]:
-    """按序返回文章正文分块行（不含评论分块）——提取与检索共用，支持块级实体标注。"""
+    """按序返回文章正文分块行（不含评论分块）——提取与检索共用同一套切分。"""
     rows = db.query(ArticleChunk).filter(
         ArticleChunk.article_id == article_id,
         ~ArticleChunk.chunk_index.like("comment.%"),
@@ -536,16 +538,16 @@ def get_comment_chunks(db: Session, comment_id: str) -> list[ArticleChunk]:
     return rows
 
 
-def parse_chunk_entities(chunk: ArticleChunk | None) -> list[dict]:
-    """解析块级实体标注 JSON → [{name, type}] 列表。"""
-    if not chunk or not chunk.entities:
+def _entities_in_chunk(chunk_text: str, name_types: dict[str, str]) -> list[dict]:
+    """命中块的实体 chips：Neo4j 实体名与块文本（含 [实体: …] 标签行）子串匹配派生。
+
+    v2.3 前来自块级实体标注（article_chunks.entities 快照——改名不传播、重新分块即丢）；
+    现从 Neo4j 即时派生，永远与图谱一致。与实体直召同规则：实体名长度 ≥ 2 防单字噪声。
+    """
+    if not chunk_text or not name_types:
         return []
-    try:
-        data = json.loads(chunk.entities)
-    except (json.JSONDecodeError, TypeError):
-        return []
-    ents = data.get("entities", []) if isinstance(data, dict) else []
-    return [{"name": e.get("name", ""), "type": e.get("type", "")} for e in ents if e.get("name")]
+    hits = sorted(n for n in name_types if len(n) >= 2 and n in chunk_text)
+    return [{"name": n, "type": name_types[n]} for n in hits]
 
 
 # ─── File parsing for Q&A context ──────────────────
@@ -968,10 +970,13 @@ async def ask_question(body: QARequest, db: Session = Depends(get_db)):
                 sources=[],
             )
 
+        # 实体名→类型映射（Neo4j 一次查询）：直召与来源卡片实体 chips 共用
+        name_types = await _collect_all_entity_name_types(db)
+
         # 图谱实体直召补充：问句中含知识图谱实体名时，把提及该实体的分块
         # 作为候选——确定性匹配（实体名出现在分块文本中），不经过向量相似度
         # 阈值过滤；与向量结果按文章去重（向量命中优先）
-        recalled = entity_recall(db, question)
+        recalled = await entity_recall(db, question, name_types)
         merged = list(top_chunks)
         have_articles = {a.id for _, a, _ in merged}
         for item in recalled:
@@ -985,7 +990,7 @@ async def ask_question(body: QARequest, db: Session = Depends(get_db)):
                 title=a.title,
                 excerpt=get_excerpt(c.chunk_text if c else ""),
                 relevance=round(score, 3),
-                entities=parse_chunk_entities(c),
+                entities=_entities_in_chunk(c.chunk_text if c else "", name_types),
             )
 
         # 来源与上下文：向量命中（阈值过滤）+ 实体直召（不受阈值限制）
@@ -1005,7 +1010,7 @@ async def ask_question(body: QARequest, db: Session = Depends(get_db)):
             sources.append(_make_source(ENTITY_RECALL_SCORE, a, c))
             relevant_chunks.append((ENTITY_RECALL_SCORE, a, c))
 
-        entity_info_text = _collect_entity_info(question, merged, db)
+        entity_info_text = await _collect_entity_info(question, merged, db)
     else:
         top_chunks = []
         sources = []
@@ -1142,24 +1147,19 @@ async def call_llm(
 ENTITY_RECALL_SCORE = 0.5
 
 
-def _collect_all_entity_names(db: Session) -> set[str]:
-    """收集知识图谱全部实体名（文章 entities JSON）。"""
-    names: set[str] = set()
-    for (ent_str,) in db.query(Article.entities).filter(Article.entities.isnot(None)).all():
-        try:
-            ent_data = json.loads(ent_str)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        for e in ent_data.get("entities", []):
-            name = e.get("name", "")
-            if name:
-                names.add(name)
-    return names
+async def _collect_all_entity_name_types(db: Session) -> dict[str, str]:
+    """收集知识图谱全部实体名→类型映射（Neo4j 实体节点；不可用降级空字典）。"""
+    try:
+        return await neo4j_store.all_entity_name_types()
+    except Neo4jStoreError as e:
+        logger.warning("Entity names query failed (Neo4j unavailable): %s", e)
+        return {}
 
 
-def entity_recall(
+async def entity_recall(
     db: Session,
     question: str,
+    name_types: dict[str, str],
 ) -> list[tuple[float, Article, ArticleChunk]]:
     """图谱实体直召：问句中的实体名 → 含该实体的文章 → 提及该实体的分块。
 
@@ -1168,26 +1168,31 @@ def entity_recall(
     相关分块。返回 (保底分数, 文章, 分块) 列表，每篇文章最多一条。
     """
     # 问句中出现的知识图谱实体名（长度 ≥ 2 防单字噪声；子串匹配不要求分词）
-    hit_names = [
-        n for n in _collect_all_entity_names(db)
-        if len(n) >= 2 and n in question
-    ]
+    hit_names = [n for n in name_types if len(n) >= 2 and n in question]
     if not hit_names:
         return []
 
-    # 文章级匹配：哪些文章包含问句命中的实体
-    matched: list[tuple[Article, list[str]]] = []
-    for a in db.query(Article).filter(Article.entities.isnot(None)).all():
-        try:
-            ent_data = json.loads(a.entities)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        ent_names = {e.get("name", "") for e in ent_data.get("entities", [])}
-        hits = [n for n in hit_names if n in ent_names]
-        if hits:
-            matched.append((a, hits))
+    # 文章级匹配（Neo4j MENTIONS 边）：哪些文章包含问句命中的实体
+    try:
+        by_name = await neo4j_store.article_ids_by_entity_names(hit_names)
+    except Neo4jStoreError as e:
+        logger.warning("Entity recall query failed (Neo4j unavailable): %s", e)
+        return []
+    aid_hits: dict[str, list[str]] = {}
+    for name, aids in by_name.items():
+        for aid in aids:
+            aid_hits.setdefault(aid, []).append(name)
+    if not aid_hits:
+        return []
 
-    # 分块级匹配：提及实体名的分块，每篇文章取第一条
+    matched: list[tuple[Article, list[str]]] = []
+    # 命中文章数来自 Neo4j（无上限）：按 500 分块查询，避免 SQLite 绑定变量超限
+    aid_list = list(aid_hits.keys())
+    for i in range(0, len(aid_list), 500):
+        for a in db.query(Article).filter(Article.id.in_(aid_list[i:i + 500])).all():
+            matched.append((a, aid_hits[a.id]))
+
+    # 分块级匹配：提及实体名的分块，每篇文章取第一条（SQLite 分块文本）
     results: list[tuple[float, Article, ArticleChunk]] = []
     for a, hits in matched:
         chunks = db.query(ArticleChunk).filter(ArticleChunk.article_id == a.id).all()
@@ -1198,7 +1203,7 @@ def entity_recall(
     return results
 
 
-def _collect_entity_info(
+async def _collect_entity_info(
     question: str,
     top_chunks: list[tuple[float, Article, str]],
     db: Session,
@@ -1216,18 +1221,16 @@ def _collect_entity_info(
         if name.lower() in question.lower():
             entity_names.add(name)
 
-    # Also collect entity names from the retrieved articles
-    for _, article, _ in top_chunks:
-        if not article.entities:
-            continue
-        try:
-            ent_data = json.loads(article.entities)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        for e in ent_data.get("entities", []):
-            name = e.get("name", "")
-            if name:
-                entity_names.add(name)
+    # 检索命中文章的实体名来自 Neo4j（MENTIONS 边）；不可用时跳过——问答照常
+    try:
+        names_by_article = await neo4j_store.entity_names_for_articles(
+            [a.id for _, a, _ in top_chunks]
+        )
+    except Neo4jStoreError as e:
+        logger.warning("Entity names query failed (Neo4j unavailable): %s", e)
+        names_by_article = {}
+    for names in names_by_article.values():
+        entity_names.update(names)
 
     if not entity_names:
         return ""

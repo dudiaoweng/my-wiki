@@ -12,6 +12,7 @@ export function ArticleDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [selectedEntity, setSelectedEntity] = useState<string | null>(null);
+  const [selectedTag, setSelectedTag] = useState<string | null>(null);
 
   const { articles: allArticles } = useArticles();
   const currentIndex = allArticles.findIndex((a) => a.id === id);
@@ -35,8 +36,16 @@ export function ArticleDetail() {
       nextArticleId={nextId}
       onNavigate={(nid) => navigate(`/articles/${nid}`)}
       selectedEntity={selectedEntity}
-      onEntitySelect={(name) => setSelectedEntity(name)}
-      onTagClick={(tag) => navigate(`/articles?tag=${encodeURIComponent(tag)}`)}
+      onEntitySelect={(name) => {
+        setSelectedEntity(name);
+        if (name) setSelectedTag(null);  // 实体与标签互斥
+      }}
+      selectedTag={selectedTag}
+      onTagClick={(tag) => {
+        // 内容导航：选中定位文中所有该标签词，再点取消；与实体选择互斥
+        setSelectedTag((prev) => (prev === tag ? null : tag));
+        setSelectedEntity(null);
+      }}
     />
   );
 }

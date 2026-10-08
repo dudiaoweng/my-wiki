@@ -13,6 +13,25 @@ services:
       timeout: 3s
       retries: 12
 
+  neo4j:
+    image: neo4j:5.26              # 钉死版本（LTS），勿用 latest
+    container_name: my-wiki-neo4j
+    ports:
+      - "7474:7474"   # HTTP（Neo4j Browser 管理界面）
+      - "7687:7687"   # Bolt；本地开发后端直连此端口
+    environment:
+      # ${NEO4J_PASSWORD} 来自仓库根目录 .env（compose 自动读取做插值）
+      # 注意：密码仅在数据卷首次初始化时生效；改密需重置 ./data/neo4j
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-my-wiki-neo4j}
+    volumes:
+      - ./data/neo4j:/data         # 图数据持久化（data/ 已 gitignore）
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
   my-wiki:
     image: my-wiki
     build: .
@@ -20,11 +39,12 @@ services:
     depends_on:
       qdrant:
         condition: service_healthy
+      neo4j:
+        condition: service_healthy
     ports:
       - "8000:8000"   # 登录页（HTTPS，无需客户端证书）
     volumes:
-      - ./data:/app/data          # SQLite 数据库持久化（本机 data 目录）
-      - ./uploads:/app/uploads    # 上传文件持久化（本机 uploads 目录）
+      - ./data:/app/data          # 数据统一持久化（数据库 + 上传文件，本机 data 目录）
       # 证书目录只读挂载（镜像内不含证书，启动必须提供）
       - ./certs:/certs:ro
       # 环境变量文件挂载（已 gitignore；模板见 .env.example）

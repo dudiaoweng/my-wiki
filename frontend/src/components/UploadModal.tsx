@@ -54,6 +54,11 @@ export function UploadModal() {
 
   const handleUpload = async () => {
     if (!file) return;
+    // 上传文件也必须选择分类
+    if (!categoryId) {
+      showToast('请选择分类', 'error');
+      return;
+    }
 
     // Check file size before uploading (backend limit: 500MB)
     const MAX_SIZE = 500 * 1024 * 1024;
@@ -69,7 +74,7 @@ export function UploadModal() {
 
     try {
       setStep('uploading');
-      const article = await api.uploadFile(file, categoryId || undefined);
+      const article = await api.uploadFile(file, categoryId);
 
       setStep('done');
       showToast('文件上传成功，文章已创建', 'success');
@@ -161,7 +166,7 @@ export function UploadModal() {
                   value={categoryId}
                   onChange={(e) => setCategoryId(e.target.value)}
                 >
-                  <option value="">无分类</option>
+                  <option value="" disabled>请选择分类</option>
                   {categories.map((c) => (
                     <option key={c.id} value={c.id}>{c.name}</option>
                   ))}
@@ -185,7 +190,7 @@ export function UploadModal() {
           <button
             className={`${styles.btn} ${styles.btnPrimary}`}
             onClick={handleUpload}
-            disabled={!file || step !== 'idle'}
+            disabled={!file || !categoryId || step !== 'idle'}
           >
             开始上传
           </button>

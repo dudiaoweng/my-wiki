@@ -9,7 +9,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from app.dependencies import get_db
-from app.models import Article
+from app.models import Article, Category
 from app.schemas import ArticleResponse
 from app.auth import get_client_cert, CertInfo
 from app.config import (
@@ -23,6 +23,8 @@ from app.config import (
 from app.utils import find_ffmpeg, read_upload_limited, MAX_UPLOAD_BYTES
 from app.llm_extract import extract_chunks_iter, merge_tags, merge_entities
 from app.prompts import IMAGE_DESCRIPTION, VIDEO_DESCRIPTION, GENERATE_TITLE
+from app import neo4j_store
+from app.neo4j_store import Neo4jStoreError
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
 
@@ -77,12 +79,202 @@ def parse_text_from_bytes(content_bytes: bytes) -> str:
     return _decode_text(content_bytes)
 
 
+# 公文编号层级 → markdown 标题（行首匹配）
+_LEVEL_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r'^[一二三四五六七八九十]+、'), '## '),   # 一、二、
+    (re.compile(r'^（[一二三四五六七八九十]+）'), '### '),  # （一）（二）
+    (re.compile(r'^\d{1,2}[.、]'), '#### '),              # 1. 1、
+    (re.compile(r'^（\d{1,2}）'), '##### '),               # （1）（2）
+]
+
+# 句读结尾编号行的内嵌标题拆分：首个句号前的标题段长度上限（公文格式
+# 「（一）小标题。正文……」标题与正文同段、以句号分隔）
+_GONGWEN_SPLIT_LIMIT = 30
+
+# 法律文本结构：第X章 / 第X条（条是法律基本单元，句号结尾仍转标题）；
+# 法律名称行《…》转一级标题
+_LEGAL_CHAPTER = re.compile(r'^第[一二三四五六七八九十百千零0-9]+章')
+_LEGAL_ARTICLE = re.compile(r'^第[一二三四五六七八九十百千零0-9]+条')
+_LAW_TITLE = re.compile(r'^《[^《》]+》\s*$')
+
+# docx 标题字号阈值（pt）：公文标题二号(22)/小标宋；正文三号(16)仿宋不能误判为标题
+_DOCX_TITLE_MIN_PT = 18.0
+
+
+def _split_gongwen_heading(stripped: str, level: str) -> tuple[str | None, str | None]:
+    """公文编号行（句读结尾）的标题拆分。
+
+    返回 (heading_line, body_line)：
+    - 「（一）小标题。正文……」：首个句号前 ≤ _GONGWEN_SPLIT_LIMIT → 拆分为
+      标题行 + 正文行（公文内嵌标题格式）
+    - 句号靠后/在末尾：整行作标题（如「1.编制……规范要求。」三级项）
+    - 无句号且短（；/，/、结尾 ≤40 字）：整行作标题；长行保持正文
+    """
+    idx = stripped.find("。")
+    if idx < 0:
+        if stripped[-1] in "；，、" and len(stripped) <= 40:
+            return f"{level}{stripped}", None
+        return None, None
+    pre = stripped[: idx + 1]
+    rest = stripped[idx + 1:].strip()
+    if len(pre) <= _GONGWEN_SPLIT_LIMIT:
+        return f"{level}{pre}", (rest or None)
+    return f"{level}{stripped}", None
+
+
+def to_markdown(text: str, ext: str = "") -> str:
+    """公文/法律文本结构 → markdown（规则转换，正文一字不改）。
+
+    - 公文编号层级（一、/（一）/1./（1））行首匹配转对应级别标题；
+      句读结尾的编号行做「内嵌标题」拆分——首个句号前 ≤30 字为标题
+      （公文格式「（一）小标题。正文……」），句号靠后则整行作标题
+    - 法律：《法律名称》→ `#`、第X章 → `##`、第X条 → `###`（条的内容
+      以句号结尾仍转标题——条是法律检索的基本单元）；条内 （一）/1./（1）
+      层级顺延一级（####/#####/######）。法律模式一经触发保持全文生效
+      （法律条文条项之间常有空行，空行不能作为上下文结束信号）
+    - 已是 markdown 结构行（#/-/*/>/|/```）不动（幂等，可重复调用）
+    """
+    if not text:
+        return text
+    # 结构预扫描：全文含公文编号或法律章/条时才启用纯文本标题识别
+    # （代码文件/普通笔记无这些特征 → 首行不会被误转标题）。
+    # 注意：^ 锚定模式必须加 MULTILINE 才能命中行首（中段行）
+    has_structure = bool(
+        _LAW_TITLE.search(text)
+        or any(
+            re.search(pat.pattern, text, re.MULTILINE)
+            for pat in [_LEGAL_CHAPTER, _LEGAL_ARTICLE, *[p for p, _ in _LEVEL_PATTERNS]]
+        )
+    )
+    out: list[str] = []
+    legal_mode = False  # 文档中出现过法律章/条 → 后续公文编号顺延一级（全文生效）
+    seen_content = False
+    for raw in text.split("\n"):
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            out.append("")
+            continue
+        is_first = not seen_content
+        seen_content = True
+        if stripped.startswith(("#", "- ", "* ", ">", "|", "```")):
+            out.append(line)
+            continue
+        converted = False
+        # 纯文本标题识别：首行短行（2-40 字、句读结尾/发文字号/数字开头除外），
+        # 且全文含公文/法律结构特征（代码文件/普通笔记不误转）
+        if is_first and has_structure:
+            if (
+                2 <= len(stripped) <= 40
+                and stripped[-1] not in "。；，、！？…"
+                and "〔" not in stripped
+                and not stripped[0].isdigit()
+            ):
+                out.append(f"# {stripped}")
+                converted = True
+        if not converted and _LAW_TITLE.match(stripped):
+            out.append(f"# {stripped}")
+            converted = True
+        elif not converted and _LEGAL_CHAPTER.match(stripped):
+            out.append(f"## {stripped}")
+            legal_mode = True
+            converted = True
+        elif not converted and _LEGAL_ARTICLE.match(stripped):
+            out.append(f"### {stripped}")
+            legal_mode = True
+            converted = True
+        else:
+            for pat, prefix in _LEVEL_PATTERNS:
+                if pat.match(stripped):
+                    level = prefix
+                    if legal_mode:
+                        level = "#" * (level.count("#") + 1) + " "
+                    if legal_mode:
+                        # 法律条内项：整句结尾仍为结构单元，整行转标题
+                        out.append(f"{level}{stripped}")
+                        converted = True
+                    elif stripped[-1] not in "。；，、":
+                        out.append(f"{level}{stripped}")
+                        converted = True
+                    else:
+                        # 公文句读结尾编号行：内嵌标题拆分（「（一）小标题。正文……」）
+                        heading, body = _split_gongwen_heading(stripped, level)
+                        if heading is not None:
+                            out.append(heading)
+                            converted = True
+                            if body:
+                                out.append(body)
+                    break
+        if not converted:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _table_to_markdown(table) -> str:
+    """docx 表格 → markdown 表格（合并单元格的重复文本保留）。"""
+    rows: list[list[str]] = []
+    for row in table.rows:
+        rows.append([c.text.strip().replace("\n", " ") for c in row.cells])
+    if not rows:
+        return ""
+    width = max(len(r) for r in rows)
+    lines: list[str] = []
+    for i, r in enumerate(rows):
+        r = r + [""] * (width - len(r))
+        lines.append("| " + " | ".join(c.replace("|", "\\|") for c in r) + " |")
+        if i == 0:
+            lines.append("|" + "---|" * width)
+    return "\n".join(lines)
+
+
 def parse_docx(file_path: str) -> str:
-    """Parse Word documents."""
+    """Parse Word documents —— 结构感知：
+
+    - 段落样式（Heading N / 标题 N / Title）→ 对应级别 markdown 标题
+    - 样式缺失时按字号兜底（≥ 18pt 视为标题，公文正文三号 16pt 不会误判）
+    - 表格 → markdown 表格（旧版完全丢弃表格）
+    - 按文档流顺序遍历（正文段落与表格交错保序）
+    - 末尾再过公文编号规则（幂等）
+    """
     from docx import Document
+    from docx.document import Document as _Doc
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+    from docx.oxml.ns import qn
+
     doc = Document(file_path)
-    paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-    return "\n\n".join(paragraphs)
+
+    def para_to_md(p: Paragraph) -> str:
+        text = p.text.strip()
+        if not text:
+            return ""
+        style = (p.style.name or "").lower()
+        if style in ("title", "标题", "document title") or "heading 1" in style or "标题 1" in style:
+            return f"# {text}"
+        if "heading 2" in style or "标题 2" in style:
+            return f"## {text}"
+        if "heading 3" in style or "标题 3" in style:
+            return f"### {text}"
+        max_pt = max(
+            (run.font.size.pt for run in p.runs if run.font.size and run.font.size.pt),
+            default=0.0,
+        )
+        if max_pt >= _DOCX_TITLE_MIN_PT:
+            return f"# {text}"
+        return text
+
+    out: list[str] = []
+    for child in doc.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            md = para_to_md(Paragraph(child, doc))
+            if md:
+                out.append(md)
+        elif child.tag == qn("w:tbl"):
+            md = _table_to_markdown(Table(child, doc))
+            if md:
+                out.append(md)
+
+    return to_markdown("\n\n".join(out), ".docx")
 
 
 def parse_xlsx(file_path: str) -> str:
@@ -603,6 +795,12 @@ async def upload_file(
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided")
 
+    # 文章必须对应分类（v2.3 起强制）——校验前置，避免文件写盘后才失败
+    if not category_id:
+        raise HTTPException(status_code=400, detail="文章必须选择分类")
+    if not db.query(Category).filter(Category.id == category_id).first():
+        raise HTTPException(status_code=400, detail="分类不存在")
+
     # Determine file extension
     ext = Path(file.filename).suffix.lower()
 
@@ -660,9 +858,8 @@ async def upload_file(
     article = Article(
         title=title,
         content=raw_text,
-        category_id=category_id or None,
+        category_id=category_id,
         tags=json.dumps([], ensure_ascii=False),
-        entities=None,
         processing=(
             f"processing:{safe_name}" if is_doc
             else (f"recognizing:{safe_name}" if AUTO_PARSE else None)
@@ -703,6 +900,8 @@ async def upload_file(
                         parsed = await asyncio.to_thread(parse_pdf, str(file_path))
                     else:
                         parsed = ""
+                    # 公文结构 → markdown（规则转换，正文一字不改；幂等）
+                    parsed = to_markdown(parsed, ext)
 
                     if parsed:
                         placeholder = f'<div data-attachment="{escaped_name}"'
@@ -757,15 +956,11 @@ async def upload_file(
                 try:
                     chunk_rows = get_article_chunks(db2, article_id)
                     texts = [r.chunk_text for r in chunk_rows]
-                    seg_idx = 0
                     async for seg_tags, seg_entities in extract_chunks_iter(texts):
                         if seg_tags:
                             bg_tags = merge_tags(bg_tags, seg_tags)
                         if seg_entities:
                             bg_entities = merge_entities(bg_entities, seg_entities)
-                            # 块级实体标注：该段提取结果写入对应分块
-                            if seg_idx < len(chunk_rows):
-                                chunk_rows[seg_idx].entities = json.dumps(seg_entities, ensure_ascii=False)
                         # 逐段落库（本任务串行使用 db2，无并发访问）
                         art = db2.query(Article).filter(Article.id == article_id).first()
                         if not art:
@@ -773,9 +968,19 @@ async def upload_file(
                         if bg_tags:
                             art.tags = json.dumps(bg_tags, ensure_ascii=False)
                         if bg_entities:
-                            art.entities = json.dumps(bg_entities, ensure_ascii=False)
+                            # Neo4j 写路径：覆盖本文章 body 来源的实体/关系边
+                            # （创建人由存储层标注——修复旧版上传路径漏打 created_by）
+                            try:
+                                await neo4j_store.replace_article_mentions(
+                                    article_id,
+                                    bg_entities.get("entities", []),
+                                    bg_entities.get("relations", []),
+                                    source="body",
+                                    creator=art.created_by or "",
+                                )
+                            except Neo4jStoreError as e:
+                                logger.error("[UPLOAD] Neo4j entity write failed: %s", e)
                         db2.commit()
-                        seg_idx += 1
                 except Exception as e:
                     logger.warning(f"[UPLOAD] LLM extraction failed: {e}")
 
@@ -798,7 +1003,17 @@ async def upload_file(
                     errs.append("标签提取未返回结果")
 
                 if bg_entities:
-                    art.entities = json.dumps(bg_entities, ensure_ascii=False)
+                    # 兜底写入（提取循环异常中断时，落库累积结果）
+                    try:
+                        await neo4j_store.replace_article_mentions(
+                            article_id,
+                            bg_entities.get("entities", []),
+                            bg_entities.get("relations", []),
+                            source="body",
+                            creator=art.created_by or "",
+                        )
+                    except Neo4jStoreError as e:
+                        logger.error("[UPLOAD] Neo4j entity write failed: %s", e)
                 else:
                     errs.append("实体和关系提取未返回结果")
 
@@ -832,4 +1047,11 @@ async def upload_file(
 
     # Embeddings are computed after background recognition completes (see _bg_enhance)
 
+    # 实体组装（Neo4j 唯一存储；降级 entities=None，前端容忍）
+    try:
+        ent_map = neo4j_store.get_entities_for_articles_sync([article.id])
+    except Neo4jStoreError as e:
+        logger.warning("Article entities assembly failed (Neo4j unavailable): %s", e)
+        ent_map = {}
+    article.entities = ent_map.get(article.id)
     return article

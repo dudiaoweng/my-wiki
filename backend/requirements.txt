@@ -12,3 +12,4 @@ openpyxl==3.1.5
 python-pptx==1.0.2
 PyPDF2==3.0.1
 qdrant-client==1.19.0
+neo4j==5.26.0

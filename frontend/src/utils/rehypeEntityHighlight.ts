@@ -2,17 +2,19 @@ import type { Plugin } from 'unified';
 
 /**
  * Create a rehype plugin that wraps all occurrences of `entityName`
- * in <mark class="entity-highlight" data-entity-occurrence="N"
+ * in <mark class="{className}" data-entity-occurrence="N"
  * id="entity-occurrence-N"> elements within text nodes.
  *
  * - Skips <code>, <pre>, <style>, <script>, <svg> subtrees.
  * - Runs with `gi` flags: case-insensitive for ASCII, exact for CJK.
  * - Returns a no-op plugin when entityName is null/empty.
  * - `startIndex` offsets the occurrence numbering (for spanning across article + comments).
+ * - `className` 用于区分实体（entity-highlight）与标签（tag-highlight）高亮
  */
 export function createEntityHighlightPlugin(
   entityName: string | null,
   startIndex: number = 0,
+  className: string = 'entity-highlight',
 ): Plugin {
   if (!entityName) {
     return function noop() {
@@ -73,7 +75,7 @@ export function createEntityHighlightPlugin(
               type: 'element',
               tagName: 'mark',
               properties: {
-                className: ['entity-highlight'],
+                className: [className],
                 'data-entity-occurrence': occurrenceIndex,
                 id: `entity-occurrence-${occurrenceIndex}`,
               },

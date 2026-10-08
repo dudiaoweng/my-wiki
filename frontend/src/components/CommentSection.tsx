@@ -16,6 +16,8 @@ interface Props {
   articleId: string;
   /** Currently selected entity name (for highlighting), or null */
   selectedEntity?: string | null;
+  /** 高亮类名：实体 entity-highlight / 标签 tag-highlight。 */
+  highlightClassName?: string;
   /** Starting index for entity occurrence numbering in comments */
   entityOccurrenceOffset?: number;
   /** Called with concatenated comment text contents for occurrence counting */
@@ -278,6 +280,7 @@ function CommentBody({
 export function CommentSection({
   articleId,
   selectedEntity,
+  highlightClassName,
   entityOccurrenceOffset = 0,
   onCommentTextsChange,
 }: Props) {
@@ -318,8 +321,8 @@ export function CommentSection({
 
   // ── Entity highlight plugin for comments (with offset from article occurrences) ──
   const commentHighlightPlugin = useMemo(
-    () => createEntityHighlightPlugin(selectedEntity ?? null, entityOccurrenceOffset),
-    [selectedEntity, entityOccurrenceOffset],
+    () => createEntityHighlightPlugin(selectedEntity ?? null, entityOccurrenceOffset, highlightClassName ?? 'entity-highlight'),
+    [selectedEntity, entityOccurrenceOffset, highlightClassName],
   );
 
   const commentRehypePlugins = useMemo(

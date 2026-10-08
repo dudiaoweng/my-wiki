@@ -1,5 +1,5 @@
-import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -9,8 +9,9 @@ from sqlalchemy.orm import Session
 from app.dependencies import get_db
 from app.models import Article, ArticleChunk, EntityInfo
 from app.auth import get_client_cert, CertInfo
-from app.routes.graph import invalidate_graph_cache
 from app import vector_store
+from app import neo4j_store
+from app.neo4j_store import Neo4jStoreError
 import asyncio
 
 logger = logging.getLogger(__name__)
@@ -73,12 +74,19 @@ class EntityInfoResponse(BaseModel):
     updated_at: str
 
 
+# 主事件循环引用：sync 路由（线程池）经 run_coroutine_threadsafe 把嵌入重算
+# 投递到主循环，避免请求线程阻塞在数十秒的 LLM 嵌入调用上
+_embed_main_loop = None
+
+
 def _schedule_embedding_recompute(chunks: list):
     """Schedule async embedding recomputation for modified chunks.
 
     Uses chunk IDs to create an independent DB session inside the async task,
     ensuring embeddings are committed even after the request session closes.
     """
+    global _embed_main_loop
+
     # Capture only IDs — the request session may close before the async task runs
     chunk_ids = [ch.id for ch in chunks if ch.id]
 
@@ -111,9 +119,17 @@ def _schedule_embedding_recompute(chunks: list):
 
     try:
         loop = asyncio.get_running_loop()
+        _embed_main_loop = loop
         loop.create_task(recompute())
     except RuntimeError:
-        # No running event loop (called from sync route) — run in new loop
+        # sync 路由（线程池）：投递到主事件循环异步执行；主循环尚未捕获
+        # （启动早期等极端场景）才退回同步兜底
+        if _embed_main_loop is not None and _embed_main_loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(recompute(), _embed_main_loop)
+                return
+            except Exception:
+                logger.warning("Failed to schedule recompute onto main loop", exc_info=True)
         try:
             loop = asyncio.new_event_loop()
             loop.run_until_complete(recompute())
@@ -122,22 +138,35 @@ def _schedule_embedding_recompute(chunks: list):
             logger.warning("Background embedding recompute failed", exc_info=True)
 
 
+def _check_entity_modify_permission(name: str, user_cn: str, db: Session) -> None:
+    """实体修改权限（update/rename/remove 共用）：实体创建人，或任一提及文章的
+    创建人即放行；实体与提及文章均无创建人记录时放行（沿用旧版宽松语义）。
+
+    旧版只检查第一个匹配文章（依赖扫描顺序），迁移后按全部提及文章判定——更一致。
+    """
+    creator, aids = neo4j_store.entity_creator_and_articles_sync(name)
+    if creator and creator == user_cn:
+        return
+    article_creators: list[str] = []
+    # aids 来自 Neo4j（无上限）：按 500 分块查询，避免 SQLite 绑定变量超限
+    for i in range(0, len(aids), 500):
+        rows = db.query(Article.created_by).filter(Article.id.in_(aids[i:i + 500])).all()
+        article_creators.extend(row[0] or "" for row in rows)
+    if any(ac == user_cn for ac in article_creators):
+        return
+    if not creator and not any(article_creators):
+        return
+    raise HTTPException(status_code=403, detail=f"只有创建人可以修改实体「{name}」")
+
+
 @router.get("", response_model=list[str])
 def list_entities(db: Session = Depends(get_db)):
-    articles = db.query(Article).all()
-    entity_set: set[str] = set()
-    for article in articles:
-        if not article.entities:
-            continue
-        try:
-            ent_data: dict = json.loads(article.entities)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        for e in ent_data.get("entities", []):
-            name = e.get("name", "")
-            if name:
-                entity_set.add(name)
-    return sorted(entity_set)
+    # 实体名来自 Neo4j（唯一存储）；不可用时降级为空列表（面板空显示，不 500）
+    try:
+        return neo4j_store.all_entity_names_sync()
+    except Neo4jStoreError as e:
+        logger.warning("Entity list query failed: %s", e)
+        return []
 
 
 @router.post("", status_code=201)
@@ -162,18 +191,26 @@ async def add_entity(body: EntityAddRequest, db: Session = Depends(get_db),
     if not articles:
         raise HTTPException(status_code=404, detail="Articles not found")
 
+    # Neo4j 写入先行（按名去重后单事务批量 MERGE）；失败 503，SQLite 不动。
+    # 单事务保证全部成功或全部失败——避免逐篇写中途失败产生半态（部分文章
+    # 已有边但标签行未写、重试被去重跳过导致标签行永久缺失）
+    try:
+        entries = []
+        for article in articles:
+            if not await neo4j_store.article_has_entity_name(article.id, name):
+                entries.append({
+                    "aid": article.id,
+                    "name": name,
+                    "type": etype,
+                    "created_by": user_cn,
+                    "created_at": now,
+                })
+        await neo4j_store.add_entities_to_articles_bulk(entries)
+    except Neo4jStoreError as e:
+        raise HTTPException(status_code=503, detail="知识图谱服务（Neo4j）不可用，请稍后重试") from e
+
     all_matched_chunks: list = []
     for article in articles:
-        try:
-            ent_data: dict = json.loads(article.entities)
-        except (json.JSONDecodeError, TypeError):
-            ent_data = {"entities": [], "relations": []}
-        ents = ent_data.get("entities", [])
-        if not any(e.get("name") == name for e in ents):
-            ents.append({"name": name, "type": etype, "created_by": user_cn, "created_at": now})
-            ent_data["entities"] = ents
-            article.entities = json.dumps(ent_data, ensure_ascii=False)
-
         # Link entity to chunks for QA recall
         chunks = db.query(ArticleChunk).filter(
             ArticleChunk.article_id == article.id
@@ -208,7 +245,6 @@ async def add_entity(body: EntityAddRequest, db: Session = Depends(get_db),
     db.commit()
     if all_matched_chunks:
         _schedule_embedding_recompute(all_matched_chunks)
-    invalidate_graph_cache()
     return {"name": name, "type": etype, "count": len(articles)}
 
 
@@ -226,50 +262,15 @@ def update_entity(body: EntityUpdateRequest, db: Session = Depends(get_db),
     if not new_name and not new_type:
         raise HTTPException(status_code=400, detail="Nothing to update")
 
-    articles = db.query(Article).all()
-    count = 0
-    for article in articles:
-        if not article.entities:
-            continue
-        try:
-            ent_data: dict = json.loads(article.entities)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        ents = ent_data.get("entities", [])
-        rels = ent_data.get("relations", [])
-        # Check: user must be entity creator or article creator
-        for e in ents:
-            if e.get("name") == old:
-                creator = e.get("created_by", "") or ""
-                article_creator = article.created_by or ""
-                if creator != user_cn and article_creator != user_cn:
-                    raise HTTPException(status_code=403, detail=f"只有创建人可以修改实体「{old}」")
-                # If no creator info, still allow article creator
-                if not creator and article_creator and article_creator != user_cn:
-                    raise HTTPException(status_code=403, detail=f"只有文章创建人可以修改实体「{old}」")
-                break
-        changed = False
-        for e in ents:
-            if e.get("name") == old:
-                if new_name:
-                    e["name"] = new_name
-                if new_type:
-                    e["type"] = new_type
-                changed = True
-        for r in rels:
-            if new_name and r.get("source") == old:
-                r["source"] = new_name
-                changed = True
-            if new_name and r.get("target") == old:
-                r["target"] = new_name
-                changed = True
-        if changed:
-            article.entities = json.dumps(ent_data, ensure_ascii=False)
-            count += 1
-
-    db.commit()
-    invalidate_graph_cache()
-    return {"old": old, "name": new_name, "type": new_type, "count": count}
+    try:
+        _check_entity_modify_permission(old, user_cn, db)
+        _, aids = neo4j_store.entity_creator_and_articles_sync(old)
+        # 节点属性 SET：关系边指向节点，改名/改类型后边端点自动跟随（修复旧 JSON
+        # 时代 relations[].source_type 不同步的问题）
+        neo4j_store.update_entity_props_sync(old, new_name, new_type)
+    except Neo4jStoreError as e:
+        raise HTTPException(status_code=503, detail="知识图谱服务（Neo4j）不可用，请稍后重试") from e
+    return {"old": old, "name": new_name, "type": new_type, "count": len(aids)}
 
 
 @router.put("/rename")
@@ -282,60 +283,32 @@ def rename_entity(body: EntityRenameRequest, db: Session = Depends(get_db),
     if not old or not new:
         raise HTTPException(status_code=400, detail="Entity names cannot be empty")
 
-    articles = db.query(Article).all()
-    count = 0
-    for article in articles:
-        if not article.entities:
-            continue
-        try:
-            ent_data: dict = json.loads(article.entities)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        ents = ent_data.get("entities", [])
-        rels = ent_data.get("relations", [])
-        # Check creator
-        for e in ents:
-            if e.get("name") == old:
-                creator = e.get("created_by", "") or ""
-                article_creator = article.created_by or ""
-                if creator != user_cn and article_creator != user_cn:
-                    raise HTTPException(status_code=403, detail=f"只有创建人可以修改实体「{old}」")
-                if not creator and article_creator and article_creator != user_cn:
-                    raise HTTPException(status_code=403, detail=f"只有文章创建人可以修改实体「{old}」")
-                break
-        changed = False
-        for e in ents:
-            if e.get("name") == old:
-                e["name"] = new
-                changed = True
-        for r in rels:
-            if r.get("source") == old:
-                r["source"] = new
-                changed = True
-            if r.get("target") == old:
-                r["target"] = new
-                changed = True
-        if changed:
-            article.entities = json.dumps(ent_data, ensure_ascii=False)
-            count += 1
+    try:
+        _check_entity_modify_permission(old, user_cn, db)
+        _, aids = neo4j_store.entity_creator_and_articles_sync(old)
+        neo4j_store.rename_entity_sync(old, new)
+    except Neo4jStoreError as e:
+        raise HTTPException(status_code=503, detail="知识图谱服务（Neo4j）不可用，请稍后重试") from e
 
-    # Cascade rename to EntityInfo and chunk entity-tag lines
+    # Cascade rename to EntityInfo and chunk entity-tag lines（SQLite，不变）
     db.query(EntityInfo).filter(EntityInfo.entity_name == old).update(
         {EntityInfo.entity_name: new}, synchronize_session=False,
     )
-    tag_old = f"[实体: {old}"
-    tag_new = f"[实体: {new}"
+    # 词边界：只匹配「[实体: 旧名 (」前缀（旧名后必须紧跟类型括号），
+    # 防止旧名是其他实体名的前缀时误替换（如「AI」与「AI 助手」）
+    tag_pattern = re.compile(rf"\[实体:\s*{re.escape(old)}\s*\(")
     affected_chunks = []
     for ch in db.query(ArticleChunk).all():
-        if ch.chunk_text and tag_old in ch.chunk_text:
-            ch.chunk_text = ch.chunk_text.replace(tag_old, tag_new)
-            affected_chunks.append(ch)
+        if ch.chunk_text and f"[实体: {old}" in ch.chunk_text:
+            new_text = tag_pattern.sub(f"[实体: {new} (", ch.chunk_text)
+            if new_text != ch.chunk_text:
+                ch.chunk_text = new_text
+                affected_chunks.append(ch)
 
     db.commit()
     if affected_chunks:
         _schedule_embedding_recompute(affected_chunks)
-    invalidate_graph_cache()
-    return {"old": old, "new": new, "count": count}
+    return {"old": old, "new": new, "count": len(aids)}
 
 
 @router.delete("/remove", status_code=200)
@@ -356,36 +329,20 @@ def remove_entity(body: EntityRemoveRequest, db: Session = Depends(get_db),
         query = query.filter(Article.id.in_(body.article_ids))
 
     articles = query.all()
-    count = 0
-    for article in articles:
-        if not article.entities:
-            continue
-        try:
-            ent_data: dict = json.loads(article.entities)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        ents = ent_data.get("entities", [])
-        rels = ent_data.get("relations", [])
-        # Check creator before removing
-        for e in ents:
-            if e.get("name") == name:
-                creator = e.get("created_by", "") or ""
-                article_creator = article.created_by or ""
-                if creator != user_cn and article_creator != user_cn:
-                    raise HTTPException(status_code=403, detail=f"只有创建人可以删除实体「{name}」")
-                if not creator and article_creator and article_creator != user_cn:
-                    raise HTTPException(status_code=403, detail=f"只有文章创建人可以删除实体「{name}」")
-                break
-        ents = [e for e in ents if e.get("name") != name]
-        rels = [r for r in rels if r.get("source") != name and r.get("target") != name]
-        ent_data["entities"] = ents
-        ent_data["relations"] = rels
-        article.entities = json.dumps(ent_data, ensure_ascii=False)
-        count += 1
 
-    # Clean up entity tag lines from article chunks
-    import re
-    chunk_tag_pattern = re.compile(rf'^\[实体:\s*{re.escape(name)}\b.*\]\s*\n?', re.MULTILINE)
+    # Neo4j 删除先行（权限 + 删边）：失败 503，SQLite（标签行/EntityInfo）不动
+    try:
+        _check_entity_modify_permission(name, user_cn, db)
+        _, aids = neo4j_store.entity_creator_and_articles_sync(name)
+        neo4j_store.remove_entity_sync(name, body.article_ids or None)
+        # If the entity no longer exists in any article, drop its EntityInfo records.
+        still_exists = neo4j_store.entity_mentioned_anywhere_sync(name)
+    except Neo4jStoreError as e:
+        raise HTTPException(status_code=503, detail="知识图谱服务（Neo4j）不可用，请稍后重试") from e
+
+    # Clean up entity tag lines from article chunks（SQLite，不变）
+    # 词边界：实体名后必须紧跟类型括号（(，防止「AI」误删「AI 助手」的标签行
+    chunk_tag_pattern = re.compile(rf'^\[实体:\s*{re.escape(name)}\s*\(.*\]\s*\n?', re.MULTILINE)
     affected_chunks = []
     for article in articles:
         chunks = db.query(ArticleChunk).filter(ArticleChunk.article_id == article.id).all()
@@ -394,29 +351,19 @@ def remove_entity(body: EntityRemoveRequest, db: Session = Depends(get_db),
                 chunk.chunk_text = chunk_tag_pattern.sub("", chunk.chunk_text).rstrip()
                 affected_chunks.append(chunk)
 
-    # If the entity no longer exists in any article, drop its EntityInfo records.
-    still_exists = False
-    for article in db.query(Article).filter(Article.entities.isnot(None)).all():
-        try:
-            ent_data = json.loads(article.entities)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if any(e.get("name") == name for e in ent_data.get("entities", [])):
-            still_exists = True
-            break
     if not still_exists:
         db.query(EntityInfo).filter(EntityInfo.entity_name == name).delete(synchronize_session=False)
 
     db.commit()
     if affected_chunks:
         _schedule_embedding_recompute(affected_chunks)
-    invalidate_graph_cache()
+    count = len(articles) if body.article_ids else len(aids)
     return {"entity": name, "count": count}
 
 
 # ── Entity Info sync helper ──
 
-def _sync_entity_info_to_chunks(entity_name: str, db: Session) -> list:
+async def _sync_entity_info_to_chunks(entity_name: str, db: Session) -> list:
     """Sync entity additional info to all matching article chunks for Q&A recall.
 
     For each article that contains this entity, find chunks mentioning the entity
@@ -427,21 +374,19 @@ def _sync_entity_info_to_chunks(entity_name: str, db: Session) -> list:
         EntityInfo.entity_name == entity_name
     ).all()
 
-    # Find all articles containing this entity
-    articles = db.query(Article).all()
-    related_articles: list = []
-    for article in articles:
-        if not article.entities:
-            continue
-        try:
-            ent_data: dict = json.loads(article.entities)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if any(e.get("name") == entity_name for e in ent_data.get("entities", [])):
-            related_articles.append(article)
-
-    if not related_articles:
+    # 提及该实体的文章来自 Neo4j（唯一存储）；不可用时跳过同步——附加信息
+    # 的 CRUD 本身不受影响，分块信息行下次同步补上
+    try:
+        aids = await neo4j_store.articles_mentioning(entity_name)
+    except Neo4jStoreError as e:
+        logger.warning("Entity info chunk sync skipped (Neo4j unavailable): %s", e)
         return []
+    if not aids:
+        return []
+    related_articles: list = []
+    # aids 来自 Neo4j（无上限）：按 500 分块查询，避免 SQLite 绑定变量超限
+    for i in range(0, len(aids), 500):
+        related_articles.extend(db.query(Article).filter(Article.id.in_(aids[i:i + 500])).all())
 
     # Build current info tag lines
     info_lines = []
@@ -511,7 +456,7 @@ async def create_entity_info(entity_name: str, body: EntityInfoCreate,
     db.refresh(info)
 
     # Sync info to chunks for Q&A recall
-    matched_chunks = _sync_entity_info_to_chunks(entity_name, db)
+    matched_chunks = await _sync_entity_info_to_chunks(entity_name, db)
     if matched_chunks:
         _schedule_embedding_recompute(matched_chunks)
 
@@ -548,7 +493,7 @@ async def update_entity_info(entity_name: str, info_id: str, body: EntityInfoUpd
     db.refresh(info)
 
     # Sync info to chunks for Q&A recall
-    matched_chunks = _sync_entity_info_to_chunks(entity_name, db)
+    matched_chunks = await _sync_entity_info_to_chunks(entity_name, db)
     if matched_chunks:
         _schedule_embedding_recompute(matched_chunks)
 
@@ -581,7 +526,7 @@ async def delete_entity_info(entity_name: str, info_id: str,
     db.commit()
 
     # Sync remaining infos (or clear all) to chunks
-    matched_chunks = _sync_entity_info_to_chunks(entity_name, db)
+    matched_chunks = await _sync_entity_info_to_chunks(entity_name, db)
     if matched_chunks:
         _schedule_embedding_recompute(matched_chunks)
 
