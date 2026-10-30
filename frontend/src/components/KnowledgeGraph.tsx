@@ -123,7 +123,7 @@ export function KnowledgeGraph() {
 
       {/* ── Left: Categories ── */}
       <aside className={`${styles.leftCol} ${sidebarOpen ? styles.leftColOpen : ''}`}>
-        <div className={styles.colHeader}>分类</div>
+        <div className={styles.colHeader}>目录</div>
         <div className={styles.catList}>
           <button
             className={`${styles.catItem} ${!selectedCategoryId ? styles.catActive : ''}`}
@@ -203,7 +203,7 @@ export function KnowledgeGraph() {
         </div>
         <div className={styles.legend}>
           <div className={styles.legendItem}><div className={styles.legendDot} style={{ background: '#1E5C8A', borderRadius: 3 }} /> 文章</div>
-          <div className={styles.legendItem}><div className={styles.legendDot} style={{ background: '#3D7B4F' }} /> 分类</div>
+          <div className={styles.legendItem}><div className={styles.legendDot} style={{ background: '#3D7B4F' }} /> 目录</div>
           <div className={styles.legendItem}><div className={styles.legendDot} style={{ background: '#E8DEF8', border: '1.5px solid #8B6BAE' }} /> 实体</div>
         </div>
         <div className={styles.container} ref={containerRef}>

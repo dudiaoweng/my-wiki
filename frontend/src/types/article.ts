@@ -17,11 +17,36 @@ export interface ArticleEntities {
   relations: EntityRelation[];
 }
 
+/** 面包屑/子文章导航条目（后端计算）。 */
+export interface ArticleBreadcrumbItem {
+  id: string;
+  title: string;
+}
+
+/** 子文章树节点（详情页树形展示用，递归嵌套）。 */
+export interface ArticleChildNode {
+  id: string;
+  title: string;
+  /** 创建人（证书 CN，格式「姓名 身份证号」） */
+  created_by: string | null;
+  /** 最后更新时间（ISO 字符串） */
+  updated_at: string;
+  children: ArticleChildNode[];
+}
+
 export interface Article {
   id: string;
   title: string;
   content: string;
   category_id: string | null;
+  /** 父文章 ID（同目录内嵌套；null = 顶级文章） */
+  parent_id: string | null;
+  /** 祖先链（根→直接父，后端计算） */
+  ancestors: ArticleBreadcrumbItem[];
+  /** 直接子文章（后端计算） */
+  children: ArticleBreadcrumbItem[];
+  /** 子文章递归树（含全部子孙，后端计算） */
+  children_tree: ArticleChildNode[];
   tags: string[];
   entities: ArticleEntities | null;
   created_by: string | null;
@@ -40,6 +65,7 @@ export interface ArticleCreate {
   title: string;
   content: string;
   category_id: string | null;
+  parent_id?: string | null;
   tags: string[];
   entities?: ArticleEntities | null;
 }
@@ -48,6 +74,7 @@ export interface ArticleUpdate {
   title?: string;
   content?: string;
   category_id?: string | null;
+  parent_id?: string | null;
   tags?: string[];
   entities?: ArticleEntities | null;
 }

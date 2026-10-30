@@ -5,14 +5,15 @@ import os
 import re
 import html
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, Query, Path as PathParam, UploadFile, File, Form
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Path as PathParam, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import desc
 from app.dependencies import get_db
 from app.database import SessionLocal
 from app.models import Article, Category, Comment, EntityInfo
-from app.schemas import ArticleCreate, ArticleUpdate, ArticleResponse, ArticleListItem, CommentSummary
+from app.ancestry import attach_ancestry, attach_children_trees
+from app.schemas import ArticleCreate, ArticleUpdate, ArticleMove, ArticleResponse, ArticleListItem, CommentSummary
 from app.auth import get_client_cert, CertInfo
 from app.llm_extract import extract_chunks_iter, merge_tags, merge_entities
 from app.config import AUTO_PARSE
@@ -61,11 +62,36 @@ def _attach_entities(article: Article) -> None:
     article.entities = ent_map.get(article.id)
 
 
+def _validate_parent(db: Session, parent_id: str, category_id: str) -> Article:
+    """校验父文章：存在 + 与文章同目录（保证面包屑路径 首页/目录/文章1/文章1.1 单调一致）。"""
+    parent = db.query(Article).filter(Article.id == parent_id).first()
+    if not parent:
+        raise HTTPException(status_code=400, detail="父文章不存在")
+    if parent.category_id != category_id:
+        raise HTTPException(status_code=400, detail="父文章必须与文章属于同一目录")
+    return parent
+
+
+def _check_no_cycle(db: Session, article_id: str, parent_id: str) -> None:
+    """沿新父文章的祖先链向上走，若遇到 article_id 则拒绝（不能挂到自己的子文章下）。"""
+    cur_id: str | None = parent_id
+    seen: set[str] = set()
+    while cur_id and cur_id not in seen:
+        if cur_id == article_id:
+            raise HTTPException(status_code=400, detail="不能挂载到自己的子文章下")
+        seen.add(cur_id)
+        parent = db.query(Article).filter(Article.id == cur_id).first()
+        cur_id = parent.parent_id if parent else None
+
+
 @router.get("", response_model=list[ArticleListItem])
 def list_articles(
     category_id: str | None = Query(default=None, alias="category_id"),
+    parent_id: str | None = Query(default=None, alias="parent_id"),
     search: str | None = Query(default=None),
+    title: str | None = Query(default=None),
     tag: str | None = Query(default=None),
+    root_only: bool = Query(default=False),
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=MAX_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     db: Session = Depends(get_db),
@@ -75,11 +101,23 @@ def list_articles(
     if category_id:
         q = q.filter(Article.category_id == category_id)
 
+    if parent_id:
+        q = q.filter(Article.parent_id == parent_id)
+
+    # 层级浏览模式：只返回直接挂载在当前位置的顶级文章（parent_id 为空），
+    # 深层文章经父文章的 children_tree 导航进入；全局搜索/标签查询不传此参数
+    if root_only:
+        q = q.filter(Article.parent_id.is_(None))
+
     if search:
         like = f"%{search}%"
         q = q.filter(
             Article.title.ilike(like) | Article.content.ilike(like)
         )
+
+    # 仅标题匹配（位置选择器筛选框用，不搜正文）
+    if title:
+        q = q.filter(Article.title.ilike(f"%{title}%"))
 
     if tag:
         # tags stored as JSON array string: ["tag1","tag2"]
@@ -98,6 +136,9 @@ def list_articles(
             ent_map = {}
         for a in articles:
             a.entities = ent_map.get(a.id)
+
+    # 子文章树批量组装（列表卡片内树形展示；整批 O(层数) 次查询）
+    attach_children_trees(db, articles)
 
     # Batch-fetch comment counts and latest comments
     article_ids = [a.id for a in articles]
@@ -158,6 +199,7 @@ def get_article(
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
     _attach_entities(article)
+    attach_ancestry(db, article)
     return article
 
 
@@ -441,6 +483,7 @@ async def create_article(
     title: str = Form(default="", max_length=200),
     content: str = Form(default=""),
     category_id: str = Form(default=""),
+    parent_id: str = Form(default=""),
     tags: str = Form(default="[]"),
     files: list[UploadFile] = File(default=[]),
     db: Session = Depends(get_db),
@@ -458,11 +501,15 @@ async def create_article(
     # 幂等——手写 markdown 不受影响）
     content = to_markdown(content)
 
-    # 文章必须对应分类（v2.3 起强制）——校验前置，避免附件写盘后才失败
+    # 文章必须对应目录（v2.3 起强制）——校验前置，避免附件写盘后才失败
     if not category_id:
-        raise HTTPException(status_code=400, detail="文章必须选择分类")
+        raise HTTPException(status_code=400, detail="文章必须选择目录")
     if not db.query(Category).filter(Category.id == category_id).first():
-        raise HTTPException(status_code=400, detail="分类不存在")
+        raise HTTPException(status_code=400, detail="目录不存在")
+
+    # 文章层级：父文章必须存在且与文章同目录（创建时父不可能是自身/后代，无需环检）
+    if parent_id:
+        _validate_parent(db, parent_id, category_id)
 
     # Handle file uploads
     attachment_path = None
@@ -535,6 +582,7 @@ async def create_article(
         title=user_title or "无标题",
         content=initial_content,
         category_id=category_id,
+        parent_id=parent_id or None,
         tags=json.dumps(user_tags, ensure_ascii=False),
         processing="processing" if AUTO_PARSE and (len(uploaded_files) > 0 or initial_content.strip()) else None,
         attachment_path=attachment_path,
@@ -556,6 +604,7 @@ async def create_article(
         asyncio.create_task(_bg_extract(article.id, user_tags, need_title=not user_title))
 
     _attach_entities(article)
+    attach_ancestry(db, article)
     return article
 
 
@@ -565,6 +614,7 @@ async def update_article(
     title: str = Form(default=""),
     content: str = Form(default=""),
     category_id: str = Form(default=""),
+    parent_id: str = Form(default=""),
     tags: str = Form(default=""),
     files: list[UploadFile] = File(default=[]),
     keep_attachments: str = Form(default=""),
@@ -629,9 +679,15 @@ async def update_article(
     has_content_change = content_changed
     has_title_change = bool(title.strip() and title.strip() != (article.title or ""))
     has_category_change = bool(category_id and category_id != (article.category_id or ""))
-    # 文章必须对应分类：更换分类时校验目标分类存在（不允许置空——空值视为未变更）
+    # 文章必须对应目录：更换目录时校验目标目录存在（不允许置空——空值视为未变更）
     if has_category_change and not db.query(Category).filter(Category.id == category_id).first():
-        raise HTTPException(status_code=400, detail="分类不存在")
+        raise HTTPException(status_code=400, detail="目录不存在")
+    # 挂载位置：前端始终传当前值，空串 = 顶级（无父文章）
+    has_parent_change = (parent_id or "") != (article.parent_id or "")
+    if has_parent_change and parent_id:
+        # 校验前置（在任何 db.commit 之前）：父文章存在、同目录、无环
+        _validate_parent(db, parent_id, category_id or article.category_id or "")
+        _check_no_cycle(db, article_id, parent_id)
     tags_changed = bool(tags and json.dumps(user_tags, ensure_ascii=False) != (article.tags or "[]"))
     has_attachment_change = False
     if keep_list is not None:
@@ -650,15 +706,20 @@ async def update_article(
         has_attachment_change = (sorted(existing_ids) != sorted(keep_list))
 
     if not has_files and not has_content_change and not has_title_change \
-            and not has_category_change and not tags_changed and not has_attachment_change:
+            and not has_category_change and not tags_changed and not has_attachment_change \
+            and not has_parent_change:
         _attach_entities(article)
+        attach_ancestry(db, article)
         return article
 
     # Something changed — apply basic field updates
     article.title = title.strip() or article.title
-    # 分类只在显式传入时更新（空值视为不变更，不允许置空——文章必须对应分类）
+    # 目录只在显式传入时更新（空值视为不变更，不允许置空——文章必须对应目录）
     if category_id:
         article.category_id = category_id
+    # 挂载位置：空串 = 移到顶级
+    if has_parent_change:
+        article.parent_id = parent_id or None
     if tags:
         article.tags = json.dumps(user_tags, ensure_ascii=False)
 
@@ -898,6 +959,7 @@ async def update_article(
         asyncio.create_task(_bg_extract(article.id, user_tags, need_title=False))
 
     _attach_entities(article)
+    attach_ancestry(db, article)
     return article
 
 
@@ -987,6 +1049,7 @@ async def reprocess_article(
         article.id, uploaded_files, need_title=False,
     ))
     _attach_entities(article)
+    attach_ancestry(db, article)
     return article
 
 
@@ -1033,6 +1096,57 @@ async def reprocess_single_attachment(
         [{"filename": original_name, "content_type": "", "storage_path": str(storage_path)}],
         need_title=False,
     ))
+    attach_ancestry(db, article)
+    return article
+
+
+@router.post("/{article_id}/move", response_model=ArticleResponse)
+def move_article(
+    article_id: str = PathParam(..., max_length=36),
+    body: ArticleMove = Body(...),
+    db: Session = Depends(get_db),
+    cert: CertInfo = Depends(get_client_cert),
+):
+    """拖拽移动文章（创建人 only）。
+
+    - category_id：None = 目录不变；ID = 移入该目录（若原父文章不在该目录则重置为顶级）
+    - parent_id：None = 不变；'' = 移到顶级；ID = 挂到该文章下（同目录约束 + 环检测）
+    """
+    _validate_article_id(article_id)
+    article = db.query(Article).filter(Article.id == article_id).first()
+    if not article:
+        raise HTTPException(status_code=404, detail="Article not found")
+    user_cn = cert.display_name or ""
+    if article.created_by != user_cn:
+        raise HTTPException(status_code=403, detail="只有文章创建人可以移动该文章")
+
+    new_cat_id = article.category_id
+    if body.category_id is not None:
+        if body.category_id and not db.query(Category).filter(Category.id == body.category_id).first():
+            raise HTTPException(status_code=400, detail="目录不存在")
+        new_cat_id = body.category_id or article.category_id
+
+    if body.parent_id is not None:
+        if body.parent_id == "":
+            article.parent_id = None
+        elif body.parent_id != (article.parent_id or ""):
+            _validate_parent(db, body.parent_id, new_cat_id or "")
+            _check_no_cycle(db, article_id, body.parent_id)
+            article.parent_id = body.parent_id
+
+    # 换目录时：原父文章不在新目录则重置为顶级（保证父子同目录约束）
+    if body.category_id is not None and article.parent_id:
+        parent = db.query(Article).filter(Article.id == article.parent_id).first()
+        if not parent or parent.category_id != body.category_id:
+            article.parent_id = None
+
+    if body.category_id is not None:
+        article.category_id = body.category_id or None
+
+    db.commit()
+    db.refresh(article)
+    _attach_entities(article)
+    attach_ancestry(db, article)
     return article
 
 
@@ -1072,6 +1186,7 @@ async def recognize_article(
 
     asyncio.create_task(_bg_extract(article.id, existing_tags, need_title=False))
     _attach_entities(article)
+    attach_ancestry(db, article)
     return article
 
 
@@ -1089,6 +1204,14 @@ def delete_article(
     user_cn = cert.display_name or ""
     if article.created_by != user_cn:
         raise HTTPException(status_code=403, detail="只有文章创建人可以删除该文章")
+
+    # 层级保护：有子文章时拒绝删除，避免整棵子树被意外移除
+    child_count = db.query(Article).filter(Article.parent_id == article_id).count()
+    if child_count:
+        raise HTTPException(
+            status_code=409,
+            detail=f"该文章下有 {child_count} 篇子文章，请先移动或删除子文章",
+        )
 
     # Collect entity names from this article before deleting（Neo4j 唯一存储；
     # 不可用时给空集——EntityInfo 孤儿清理跳过，悬空边由下次启动 GC 治愈）

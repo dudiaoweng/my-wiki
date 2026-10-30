@@ -1,0 +1,336 @@
+/* PositionPicker — 文章位置（分类/挂载位置）懒加载树选择器 */
+
+.picker {
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+/* 下拉层内嵌模式：无外框；树区自带滚动（下拉层整体高度受限） */
+.pickerBare {
+  border: none;
+  border-radius: 0;
+}
+
+.pickerBare .scroll {
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 6px 10px;
+}
+
+.scroll {
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 6px;
+}
+
+/* ── 标题筛选框 ── */
+
+.searchRow {
+  position: relative;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--c-border);
+}
+
+.searchInput {
+  width: 100%;
+  padding: 5px 26px 5px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-family: var(--font-body);
+  color: var(--c-text);
+  background: var(--c-card);
+  transition: all var(--transition-fast);
+}
+
+.searchInput:focus {
+  outline: none;
+  border-color: var(--c-accent);
+  box-shadow: 0 0 0 2px var(--c-accent-wash);
+}
+
+.searchInput::placeholder {
+  color: var(--c-text-muted);
+  font-size: 12px;
+}
+
+.searchClear {
+  position: absolute;
+  right: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: none;
+  background: none;
+  color: var(--c-text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+  transition: color var(--transition-fast);
+}
+
+.searchClear:hover {
+  color: var(--c-text);
+}
+
+.empty {
+  padding: 24px 10px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--c-text-muted);
+}
+
+.categoryBlock {
+  margin-bottom: 2px;
+}
+
+.tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* 行：展开开关 + 节点名按钮 */
+.nodeRow {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.nodeToggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  background: none;
+  border-radius: 4px;
+  color: var(--c-text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all var(--transition-fast);
+}
+
+.nodeToggle:hover:not(:disabled) {
+  color: var(--c-accent);
+  background: var(--c-surface);
+}
+
+/* 无子节点：隐藏开关但保留占位对齐 */
+
+
+
+.node {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  padding: 5px 8px;
+  border: none;
+  background: none;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--c-text);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.node:hover:not(:disabled) {
+  background: var(--c-surface);
+}
+
+.categoryNode {
+  font-weight: 600;
+}
+
+
+.nodeIcon {
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.nodeTitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nodeSelected {
+  background: var(--c-accent-wash) !important;
+  color: var(--c-accent);
+}
+
+.nodeDisabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ── 位置字段（一行展示 + 锚定下拉层，编辑器/上传共用） ── */
+
+.positionRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  padding: 7px 10px;
+  background: var(--c-card);
+}
+
+.positionValue {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--c-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.positionPlaceholder {
+  color: var(--c-text-muted);
+  font-size: 12px;
+}
+
+.positionSelectBtn {
+  padding: 4px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--c-border);
+  background: var(--c-card);
+  color: var(--c-text-soft);
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all var(--transition-fast);
+}
+
+.positionSelectBtn:hover {
+  color: var(--c-accent);
+  border-color: var(--c-accent);
+}
+
+.positionDropdown {
+  position: fixed;
+  z-index: 400;
+  display: flex;
+  flex-direction: column;
+  background: var(--c-page);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-elevated);
+  overflow: hidden;
+  animation: fadeSlideIn 150ms ease;
+}
+
+/* 分批载入：加载更多 */
+.loadMoreBtn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 4px 10px;
+  border: none;
+  background: none;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-body);
+  font-size: 11px;
+  color: var(--c-text-muted);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.loadMoreBtn:hover:not(:disabled) {
+  color: var(--c-accent);
+  background: var(--c-surface);
+}
+
+.loadMoreBtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 筛选结果中的分类小标签 */
+.resultCat {
+  margin-left: auto;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+/* 子类别列表（树形嵌套） */
+.subCatList {
+  margin: 0;
+  padding: 0;
+}
+
+/* ── 目录样式同款：文件夹图标 + 颜色圆点 / 文章图标 + 叠加箭头 ── */
+
+.folderWrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.folderIcon {
+  font-size: 16px;
+  line-height: 1;
+}
+
+.folderDot {
+  position: absolute;
+  right: -2px;
+  bottom: -1px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1px solid var(--c-page);
+}
+
+.folderDim {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 22px;
+  opacity: 0.35;
+  flex-shrink: 0;
+}
+
+.iconWrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 22px;
+  flex-shrink: 0;
+}
+
+.docIcon {
+  font-size: 16px;
+  line-height: 1;
+}
+
+.expandBadge {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--c-text-muted);
+  transition: all var(--transition-fast);
+}
+
+.expandBadgeOpen {
+  transform: rotate(90deg);
+  color: var(--c-accent);
+}
+
+button.nodeToggle:hover .expandBadge {
+  color: var(--c-accent);
+}

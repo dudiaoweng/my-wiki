@@ -1,4 +1,5 @@
 import type { Article } from '../types/article';
+import { ChildTree } from './ChildTree';
 import styles from './ArticleCard.module.css';
 
 interface Props {
@@ -6,6 +7,8 @@ interface Props {
   selected: boolean;
   onSelect: (id: string, ctrl: boolean) => void;
   onOpen: (id: string) => void;
+  /** 层级深度（0 = 顶级文章），用于树状缩进 */
+  depth?: number;
 }
 
 function stripMarkdown(md: string): string {
@@ -48,16 +51,18 @@ function formatUser(cn: string | null): string {
   return match ? match[1] : cn;
 }
 
-export function ArticleCard({ article, selected, onSelect, onOpen }: Props) {
+export function ArticleCard({ article, selected, onSelect, onOpen, depth = 0 }: Props) {
   const catColor = article.category?.color ?? 'var(--c-border)';
-  const catName = article.category?.name ?? '未分类';
+  const catName = article.category?.name ?? '未归类';
   const stripped = stripMarkdown(article.content);
   const excerpt = stripped.slice(0, 200) + (stripped.length > 200 ? '…' : '');
+  // 树状缩进（深度封顶 6 级，避免过深嵌套挤出可视区）
+  const indent = Math.min(depth, 6) * 24;
 
   return (
     <div
-      className={`${styles.card} ${selected ? styles.cardSelected : ''}`}
-      style={{ '--card-accent': catColor } as React.CSSProperties}
+      className={`${styles.card} ${selected ? styles.cardSelected : ''} ${depth > 0 ? styles.cardNested : ''}`}
+      style={{ marginLeft: indent, width: `calc(100% - ${indent}px)`, '--card-accent': catColor } as React.CSSProperties}
       role="button"
       tabIndex={0}
       aria-label={`${article.title}${selected ? '（已选中）' : ''}`}
@@ -73,7 +78,7 @@ export function ArticleCard({ article, selected, onSelect, onOpen }: Props) {
     >
       <div className={styles.body}>
         <div className={styles.titleRow}>
-          <span className={styles.title}>{article.title}</span>
+          <span className={styles.title}>{depth > 0 ? '↳ ' : ''}{article.title}</span>
           <button
             className={styles.openBtn}
             onClick={(e) => {
@@ -125,6 +130,11 @@ export function ArticleCard({ article, selected, onSelect, onOpen }: Props) {
                 <span className={styles.commentTime}>{formatDate(c.created_at)}</span>
               </div>
             ))}
+          </div>
+        )}
+        {article.children_tree.length > 0 && (
+          <div className={styles.childTreeWrap}>
+            <ChildTree nodes={article.children_tree} onOpen={onOpen} />
           </div>
         )}
       </div>

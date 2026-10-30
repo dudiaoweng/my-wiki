@@ -17,7 +17,7 @@ export function Hero() {
         </div>
         <div className={styles.stat}>
           <div className={styles.number}>{stats?.category_count ?? '—'}</div>
-          <div className={styles.label}>个分类</div>
+          <div className={styles.label}>个目录</div>
         </div>
         <div className={styles.stat}>
           <div className={styles.number}>{stats?.entity_count ?? '—'}</div>

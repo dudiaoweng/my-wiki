@@ -743,7 +743,7 @@ export function EntityPanel({
           {/* Legend */}
           <div style={{ display: 'flex', gap: 12, padding: '6px 16px', flexShrink: 0, fontSize: 11, color: 'var(--c-text-soft)', alignItems: 'center' }}>
             <span>◫ 文章</span>
-            <span>● 分类</span>
+            <span>● 目录</span>
             <span>◆ 实体</span>
             {filteredGraph && (
               <span style={{ marginLeft: 'auto' }}>

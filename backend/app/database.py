@@ -38,6 +38,13 @@ def init_db():
                 conn.exec_driver_sql(f"ALTER TABLE articles ADD COLUMN {col} TEXT")
             except Exception:
                 pass  # Column already exists
+        # 文章层级（v2.5）：父文章外键；旧库加普通 TEXT 列（无 DB 级 FK，
+        # 同目录/无环约束由应用层保证）
+        for col in ["parent_id"]:
+            try:
+                conn.exec_driver_sql(f"ALTER TABLE articles ADD COLUMN {col} TEXT")
+            except Exception:
+                pass  # Column already exists
         for col in ["attachments"]:
             try:
                 conn.exec_driver_sql(f"ALTER TABLE comments ADD COLUMN {col} TEXT")
@@ -61,6 +68,12 @@ def init_db():
             except Exception:
                 pass  # Column already exists
         for col in ["created_by", "created_at", "updated_at"]:
+            try:
+                conn.exec_driver_sql(f"ALTER TABLE categories ADD COLUMN {col} TEXT")
+            except Exception:
+                pass  # Column already exists
+        # 子目录（v2.6）：上级目录外键；旧库加普通 TEXT 列（无环约束由应用层保证）
+        for col in ["parent_id"]:
             try:
                 conn.exec_driver_sql(f"ALTER TABLE categories ADD COLUMN {col} TEXT")
             except Exception:

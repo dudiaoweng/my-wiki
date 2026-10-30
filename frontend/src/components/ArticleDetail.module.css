@@ -147,12 +147,48 @@
 
 /* ── Header ── */
 
-.categoryLabel {
-  font-size: 11px;
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 13px;
+  margin-bottom: 10px;
+  color: var(--c-text-muted);
+}
+
+.breadcrumb a {
+  color: var(--c-text-soft);
+  text-decoration: none;
+  font-weight: 500;
+  transition: color var(--transition-fast);
+}
+
+.breadcrumb a:hover {
+  color: var(--c-accent);
+}
+
+.breadcrumb a.crumbCategory {
+  color: var(--crumb-cat, var(--c-text-soft));
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin-bottom: 8px;
+}
+
+.breadcrumb a.crumbCategory:hover {
+  color: var(--c-accent);
+}
+
+.breadcrumbSep {
+  color: var(--c-text-muted);
+  user-select: none;
+}
+
+/* 面包屑当前文章标题（无链接，截断防溢出） */
+.crumbCurrent {
+  color: var(--c-text-muted);
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .title {
@@ -231,6 +267,63 @@ button.tag:hover {
   outline: 1px solid rgba(60, 150, 255, 0.5);
 }
 
+/* ── Tabs (子文章 / 评论) ── */
+
+.tabsBar {
+  display: flex;
+  gap: 4px;
+  margin-top: 28px;
+  padding-top: 12px;
+  border-top: 1px solid var(--c-border);
+  border-bottom: 1px solid var(--c-border);
+}
+
+.tabBtn {
+  padding: 7px 16px 9px;
+  font-size: 13px;
+  font-weight: 500;
+  border: none;
+  background: none;
+  color: var(--c-text-muted);
+  cursor: pointer;
+  font-family: var(--font-body);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: all var(--transition-fast);
+}
+
+.tabBtn:hover {
+  color: var(--c-text-soft);
+}
+
+.tabBtnActive {
+  color: var(--c-accent);
+  font-weight: 600;
+  border-bottom-color: var(--c-accent);
+}
+
+.tabBadge {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--c-text-muted);
+  background: var(--c-surface);
+  border-radius: 10px;
+  padding: 1px 7px;
+}
+
+.tabHidden {
+  display: none;
+}
+
+/* ── Children tree (子文章树 Tab 面板) ── */
+
+.childTreeSection {
+  margin: 14px 0 8px;
+}
+
+/* 子文章树样式见共用组件 ChildTree.module.css */
+
 /* ── Actions ── */
 
 .actions {
@@ -278,14 +371,6 @@ button.tag:hover {
   opacity: 0.9;
   background: var(--c-accent);
 }
-
-.btnDanger {
-  color: var(--c-danger);
-  border-color: transparent;
-  background: transparent;
-}
-
-.btnDanger:hover { background: var(--c-danger-wash); }
 
 /* ── Markdown content ── */
 
@@ -412,6 +497,15 @@ button.tag:hover {
     flex-direction: column;
     align-items: flex-start;
     gap: 10px;
+  }
+
+  .topBarLeft {
+    flex-wrap: wrap;
+  }
+
+  .topBarRight {
+    flex-wrap: wrap;
+    width: 100%;
   }
 
   .searchInput {

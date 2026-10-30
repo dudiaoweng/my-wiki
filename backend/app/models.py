@@ -19,6 +19,8 @@ class Category(Base):
     id = Column(String, primary_key=True, default=generate_uuid)
     name = Column(String(100), nullable=False, unique=True)
     color = Column(String(7), nullable=False)
+    # 子目录：上级目录（空 = 顶级目录）。同文章层级，约束由应用层保证（无环）
+    parent_id = Column(String, ForeignKey("categories.id", ondelete="SET NULL"), nullable=True, index=True)
     created_by = Column(String(200), nullable=True, default=None)
     created_at = Column(DateTime, default=utcnow, nullable=False)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
@@ -36,6 +38,9 @@ class Article(Base):
     title = Column(String(200), nullable=False)
     content = Column(Text, nullable=False, default="")
     category_id = Column(String, ForeignKey("categories.id", ondelete="SET NULL"), nullable=True, index=True)
+    # 文章层级：父文章（同目录内嵌套）；空 = 顶级文章直接挂在目录下。
+    # 约束由应用层保证（同目录 + 无环），SQLite 迁移库无 FK 约束
+    parent_id = Column(String, ForeignKey("articles.id", ondelete="SET NULL"), nullable=True, index=True)
     tags = Column(Text, nullable=False, default="[]")
     # 实体/关系已迁移至 Neo4j（v2.3）：实体节点 + 提及边 + 关系边只存 Neo4j，
     # 文章接口的 entities 字段由 neo4j_store 组装后挂在 ORM 实例临时属性上

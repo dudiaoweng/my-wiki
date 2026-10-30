@@ -3,7 +3,7 @@ import { api } from '../api/client';
 import type { Article, ArticleCreate, ArticleUpdate } from '../types/article';
 import { useToast } from './useToast';
 
-export function useArticles(params?: { category_id?: string; search?: string; tag?: string }) {
+export function useArticles(params?: { category_id?: string; search?: string; tag?: string; root_only?: boolean }) {
   const [articles, setArticles] = useState<Article[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -22,7 +22,7 @@ export function useArticles(params?: { category_id?: string; search?: string; ta
     } finally {
       setLoading(false);
     }
-  }, [params?.category_id, params?.search, params?.tag, showToast]);
+  }, [params?.category_id, params?.search, params?.tag, params?.root_only, showToast]);
 
   useEffect(() => {
     let cancelled = false;
@@ -45,7 +45,7 @@ export function useArticles(params?: { category_id?: string; search?: string; ta
     return () => {
       cancelled = true;
     };
-  }, [params?.category_id, params?.search, params?.tag, showToast]);
+  }, [params?.category_id, params?.search, params?.tag, params?.root_only, showToast]);
 
   const createArticle = async (data: ArticleCreate): Promise<Article | null> => {
     try {

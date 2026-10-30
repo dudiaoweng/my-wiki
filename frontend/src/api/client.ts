@@ -73,10 +73,11 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
-function qs(params: Record<string, string>): string {
+function qs(params: Record<string, string | boolean | number>): string {
   const usp = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && v !== null && v !== '') usp.set(k, v);
+    if (v === undefined || v === null || v === '') continue;
+    usp.set(k, typeof v === 'boolean' ? (v ? '1' : '0') : String(v));
   }
   const s = usp.toString();
   return s ? `?${s}` : '';
@@ -84,7 +85,10 @@ function qs(params: Record<string, string>): string {
 
 export const api = {
   // ── Articles ──
-  getArticles(params?: { category_id?: string; search?: string; tag?: string }) {
+  getArticles(params?: {
+    category_id?: string; parent_id?: string; search?: string; title?: string;
+    tag?: string; root_only?: boolean; skip?: number; limit?: number;
+  }) {
     return request<Article[]>(`/articles${params ? qs(params) : ''}`);
   },
   getArticle(id: string) {
@@ -95,6 +99,7 @@ export const api = {
     formData.append('title', data.title);
     formData.append('content', data.content);
     formData.append('category_id', data.category_id ?? '');
+    formData.append('parent_id', data.parent_id ?? '');
     formData.append('tags', JSON.stringify(data.tags));
     if (files) {
       for (const f of files) formData.append('files', f);
@@ -122,6 +127,7 @@ export const api = {
     if (data.title !== undefined) formData.append('title', data.title);
     if (data.content !== undefined) formData.append('content', data.content);
     if (data.category_id !== undefined) formData.append('category_id', data.category_id ?? '');
+    if (data.parent_id !== undefined) formData.append('parent_id', data.parent_id ?? '');
     if (data.tags !== undefined) formData.append('tags', JSON.stringify(data.tags));
     if (files) {
       for (const f of files) formData.append('files', f);
@@ -150,6 +156,12 @@ export const api = {
   deleteArticle(id: string) {
     return request<void>(`/articles/${id}`, { method: 'DELETE' });
   },
+  moveArticle(id: string, data: { category_id?: string | null; parent_id?: string | null }) {
+    return request<Article>(`/articles/${id}/move`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
   reprocessArticle(id: string) {
     return request<Article>(`/articles/${id}/reprocess`, { method: 'POST' });
   },
@@ -174,6 +186,12 @@ export const api = {
     return request<Category>(`/categories/${id}`, {
       method: 'PUT',
       body: JSON.stringify(data),
+    });
+  },
+  moveCategory(id: string, parentId: string) {
+    return request<Category>(`/categories/${id}/move`, {
+      method: 'POST',
+      body: JSON.stringify({ parent_id: parentId }),
     });
   },
   deleteCategory(id: string) {
@@ -367,10 +385,11 @@ export const api = {
   },
 
   // ── Upload ──
-  async uploadFile(file: File, categoryId?: string): Promise<Article> {
+  async uploadFile(file: File, categoryId?: string, parentId?: string): Promise<Article> {
     const formData = new FormData();
     formData.append('file', file);
     if (categoryId) formData.append('category_id', categoryId);
+    if (parentId) formData.append('parent_id', parentId);
 
     const res = await fetch(`${BASE}/upload`, {
       method: 'POST',

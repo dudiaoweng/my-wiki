@@ -20,13 +20,36 @@
   flex-wrap: wrap;
 }
 
-.header h3 {
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--c-text-muted);
+  flex-shrink: 0;
+}
+
+.breadcrumb a {
+  color: var(--c-text-soft);
+  text-decoration: none;
+  transition: color var(--transition-fast);
+}
+
+.breadcrumb a:hover {
+  color: var(--c-accent);
+}
+
+.breadcrumbSep {
+  color: var(--c-text-muted);
+  user-select: none;
+}
+
+.breadcrumbCurrent {
   font-family: var(--font-display);
   font-size: 20px;
   font-weight: 600;
   color: var(--c-text);
-  white-space: nowrap;
-  flex-shrink: 0;
 }
 
 .searchWrap {
@@ -130,4 +153,46 @@
     min-height: 0;
     overflow-y: auto;
   }
+}
+
+/* 同级子目录入口（目录芯片行） */
+.dirRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.dirChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-card);
+  color: var(--c-text-soft);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: var(--font-body);
+  transition: all var(--transition-fast);
+}
+
+.dirChip:hover {
+  border-color: var(--dir-accent, var(--c-accent));
+  color: var(--c-accent);
+  box-shadow: var(--shadow-elevated);
+}
+
+.dirChipIcon {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.dirChipName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

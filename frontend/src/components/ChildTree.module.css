@@ -1,0 +1,62 @@
+/* ChildTree — 子文章标题树（文章详情页与文章卡片共用样式） */
+
+.childTree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* 嵌套层级：缩进 + 左侧连接线 */
+.childTree .childTree {
+  margin-left: 14px;
+  padding-left: 12px;
+  border-left: 1px solid var(--c-border);
+}
+
+.treeRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+}
+
+.treeIcon {
+  font-size: 12px;
+  line-height: 1;
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+
+.treeLink {
+  font-size: 13px;
+  color: var(--c-text-soft);
+  text-decoration: none;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color var(--transition-fast);
+}
+
+/* 创建人 · 更新时间（右对齐，标题过长时省略号截断标题） */
+.treeMeta {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--c-text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* 回调模式渲染 button：重置默认样式，外观与链接一致 */
+button.treeLink {
+  border: none;
+  background: none;
+  padding: 0;
+  font-family: var(--font-body);
+  text-align: left;
+  cursor: pointer;
+}
+
+.treeLink:hover {
+  color: var(--c-accent);
+}

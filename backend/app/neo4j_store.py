@@ -753,7 +753,7 @@ def count_distinct_entity_names_sync() -> int:
 
 
 def graph_data_sync() -> tuple[list[dict], list[dict], list[dict]]:
-    """图谱数据三查：(实体节点, 提及边, 关系边) —— 文章/分类节点仍由 SQLite 构建。"""
+    """图谱数据三查：(实体节点, 提及边, 关系边) —— 文章/目录节点仍由 SQLite 构建。"""
     ents = _run_sync("MATCH (e:Entity) RETURN e.name AS name, e.type AS type")
     ments = _run_sync("MATCH (a:Article)-[:MENTIONS]->(e:Entity) RETURN a.id AS aid, e.name AS name, e.type AS type")
     rels = _run_sync(

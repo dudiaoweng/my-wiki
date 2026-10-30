@@ -2,8 +2,10 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useApp } from '../context/AppProvider';
 import { useCategories } from '../hooks/useCategories';
+import { useArticles } from '../hooks/useArticles';
 import { useToast } from '../hooks/useToast';
 import { api } from '../api/client';
+import { PositionField, type Position } from './PositionPicker';
 import styles from './UploadModal.module.css';
 
 const SUPPORTED_FORMATS = '.txt,.md,.docx,.xlsx,.pptx,.pdf,.mp3,.wav,.mp4,.avi,.mov,.csv,.json,.html,.jpg,.jpeg,.png,.gif,.webp,.svg,.bmp';
@@ -17,14 +19,16 @@ function formatFileSize(bytes: number): string {
 }
 
 export function UploadModal() {
-  const { uploaderOpen, closeUploader, notifyArticleSaved } = useApp();
+  const { uploaderOpen, uploaderPreset, closeUploader, notifyArticleSaved } = useApp();
   const { categories } = useCategories();
+  const { articles: allArticles, refetch: refetchArticles } = useArticles();
   const { showToast } = useToast();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
 
   const [file, setFile] = useState<File | null>(null);
-  const [categoryId, setCategoryId] = useState('');
+  // 文章位置（目录 + 挂载位置归并）：parentId 为空 = 顶级文章
+  const [position, setPosition] = useState<Position>({ categoryId: '', parentId: null });
   const [step, setStep] = useState<Step>('idle');
   const [error, setError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -33,12 +37,18 @@ export function UploadModal() {
   // Reset state when modal opens
   useEffect(() => {
     if (uploaderOpen) {
+      // 打开弹窗时刷新文章列表，保证位置树的文章数据最新
+      refetchArticles();
       setFile(null);
-      setCategoryId(searchParams.get('category') ?? '');
+      // 位置预设：侧边栏选中文章 > URL 目录参数
+      setPosition({
+        categoryId: uploaderPreset?.categoryId ?? searchParams.get('category') ?? '',
+        parentId: uploaderPreset?.parentId ?? null,
+      });
       setStep('idle');
       setError(null);
     }
-  }, [uploaderOpen]);
+  }, [uploaderOpen, uploaderPreset, refetchArticles, searchParams]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -54,9 +64,9 @@ export function UploadModal() {
 
   const handleUpload = async () => {
     if (!file) return;
-    // 上传文件也必须选择分类
-    if (!categoryId) {
-      showToast('请选择分类', 'error');
+    // 上传文件也必须选择位置（目录）
+    if (!position.categoryId) {
+      showToast('请选择位置（目录）', 'error');
       return;
     }
 
@@ -74,7 +84,7 @@ export function UploadModal() {
 
     try {
       setStep('uploading');
-      const article = await api.uploadFile(file, categoryId);
+      const article = await api.uploadFile(file, position.categoryId, position.parentId || undefined);
 
       setStep('done');
       showToast('文件上传成功，文章已创建', 'success');
@@ -158,19 +168,16 @@ export function UploadModal() {
                 />
               </div>
 
-              {/* Category selector */}
-              <div className={styles.categoryRow}>
-                <span className={styles.categoryLabel}>分类：</span>
-                <select
-                  className={styles.categorySelect}
-                  value={categoryId}
-                  onChange={(e) => setCategoryId(e.target.value)}
-                >
-                  <option value="" disabled>请选择分类</option>
-                  {categories.map((c) => (
-                    <option key={c.id} value={c.id}>{c.name}</option>
-                  ))}
-                </select>
+              {/* 文章位置（目录 + 挂载位置，与编辑器共用组件） */}
+              <div className={styles.positionGroup}>
+                <span className={styles.categoryLabel}>位置：</span>
+                <PositionField
+                  categories={categories}
+                  articles={allArticles}
+                  value={position}
+                  onChange={setPosition}
+                  onOpen={() => refetchArticles()}
+                />
               </div>
 
               {error && <div className={styles.error}>{error}</div>}
@@ -190,7 +197,7 @@ export function UploadModal() {
           <button
             className={`${styles.btn} ${styles.btnPrimary}`}
             onClick={handleUpload}
-            disabled={!file || !categoryId || step !== 'idle'}
+            disabled={!file || !position.categoryId || step !== 'idle'}
           >
             开始上传
           </button>

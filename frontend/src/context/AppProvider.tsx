@@ -3,6 +3,10 @@ import { createContext, useContext, useState, useRef, useCallback, useMemo, type
 interface EditorState {
   isOpen: boolean;
   articleId: string | null; // null = create mode
+  /** create 模式预选父文章（如「添加子文章」入口） */
+  parentId?: string | null;
+  /** create 模式预选目录 */
+  categoryId?: string | null;
 }
 
 interface ConfirmState {
@@ -19,7 +23,7 @@ interface AppContextValue {
   closeSidebar: () => void;
 
   editorState: EditorState | null;
-  openEditor: (articleId?: string | null) => void;
+  openEditor: (articleId?: string | null, preset?: { parentId?: string | null; categoryId?: string | null }) => void;
   closeEditor: () => void;
 
   confirmState: ConfirmState | null;
@@ -28,8 +32,10 @@ interface AppContextValue {
   executeConfirm: () => void;
 
   uploaderOpen: boolean;
-  openUploader: () => void;
+  openUploader: (preset?: { parentId?: string | null; categoryId?: string | null }) => void;
   closeUploader: () => void;
+  /** 上传弹窗打开时的位置预设（如从侧边栏选中文章发起） */
+  uploaderPreset: { parentId?: string | null; categoryId?: string | null } | null;
 
   articleVersion: number;
   notifyArticleSaved: () => void;
@@ -68,12 +74,24 @@ export function AppProvider({ children, userName = '', userIdNumber = '' }: AppP
   const toggleSidebar = useCallback(() => setSidebarOpen((p) => !p), []);
   const closeSidebar = useCallback(() => setSidebarOpen(false), []);
 
-  const openEditor = useCallback((articleId: string | null = null) => {
-    setEditorState({ isOpen: true, articleId });
+  const openEditor = useCallback((
+    articleId: string | null = null,
+    preset?: { parentId?: string | null; categoryId?: string | null },
+  ) => {
+    setEditorState({
+      isOpen: true,
+      articleId,
+      parentId: preset?.parentId,
+      categoryId: preset?.categoryId,
+    });
   }, []);
   const closeEditor = useCallback(() => setEditorState(null), []);
 
-  const openUploader = useCallback(() => setUploaderOpen(true), []);
+  const [uploaderPreset, setUploaderPreset] = useState<{ parentId?: string | null; categoryId?: string | null } | null>(null);
+  const openUploader = useCallback((preset?: { parentId?: string | null; categoryId?: string | null }) => {
+    setUploaderPreset(preset ?? null);
+    setUploaderOpen(true);
+  }, []);
   const closeUploader = useCallback(() => setUploaderOpen(false), []);
 
   const requestConfirm = useCallback((title: string, message: string, onConfirm: () => void | Promise<void>, confirmLabel?: string) => {
@@ -106,6 +124,7 @@ export function AppProvider({ children, userName = '', userIdNumber = '' }: AppP
     uploaderOpen,
     openUploader,
     closeUploader,
+    uploaderPreset,
     articleVersion,
     notifyArticleSaved,
     categoriesVersion,
@@ -118,7 +137,7 @@ export function AppProvider({ children, userName = '', userIdNumber = '' }: AppP
     userName,
     userIdNumber,
   }), [
-    sidebarOpen, editorState, uploaderOpen, articleVersion,
+    sidebarOpen, editorState, uploaderOpen, uploaderPreset, articleVersion,
     categoriesVersion,
     confirmState, toggleSidebar, closeSidebar, openEditor,
     closeEditor, openUploader, closeUploader, notifyArticleSaved,

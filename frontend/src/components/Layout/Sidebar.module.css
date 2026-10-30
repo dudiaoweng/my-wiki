@@ -8,10 +8,16 @@
   overflow-y: auto;
 }
 
+/* 顶部固定区：全部按钮 + 筛选框（不随目录树滚动） */
+.navHeader {
+  flex-shrink: 0;
+  padding: 20px 16px 0;
+}
+
 .nav {
   flex: 1;
   overflow-y: auto;
-  padding: 20px 16px 16px;
+  padding: 12px 16px 16px;
 }
 
 .nav::-webkit-scrollbar {
@@ -59,7 +65,6 @@
   color: var(--c-text-soft);
   transition: all var(--transition-fast);
   border: none;
-  border-left: 3px solid transparent;
   background: none;
   width: 100%;
   text-align: left;
@@ -76,7 +81,6 @@
   background: var(--c-accent-wash);
   color: var(--c-accent);
   font-weight: 600;
-  border-left-color: var(--c-accent);
 }
 
 .count {
@@ -96,13 +100,6 @@
   background: var(--c-accent);
   color: white;
   font-weight: 600;
-}
-
-.dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
 }
 
 .actions {
@@ -167,49 +164,6 @@
 
 /* ── Header action buttons (edit / delete active category) ── */
 
-.headerActions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  margin-right: 4px;
-}
-
-.headerActionBtn {
-  width: 22px;
-  height: 22px;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  font-size: 12px;
-  color: var(--c-text-muted);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  line-height: 1;
-  transition: all var(--transition-fast);
-}
-
-.headerActionBtn:hover:not(:disabled) {
-  background: var(--c-surface);
-  color: var(--c-text);
-}
-
-.headerActionBtn:disabled {
-  opacity: 0.25;
-  cursor: not-allowed;
-}
-
-.headerActionDanger:hover:not(:disabled) {
-  background: var(--c-danger-wash, #fce4e4);
-  color: var(--c-danger, #c62828);
-}
-
-.headerActionAdd {
-  font-size: 18px;
-  font-weight: 600;
-}
 
 /* ── Inline create / edit form ── */
 
@@ -304,7 +258,7 @@
   .sidebar {
     position: fixed;
     top: 0;
-    left: -280px;
+    left: calc(-1 * var(--sidebar-w));
     bottom: 0;
     z-index: 100;
     overflow-y: auto;
@@ -316,3 +270,474 @@
     box-shadow: var(--shadow-modal);
   }
 }
+
+/* ── 分类文章标题动态载入 ── */
+
+.catRowMain {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.catRowMain .item {
+  flex: 1;
+  min-width: 0;
+  padding-left: 2px;
+}
+
+.catToggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  background: none;
+  border-radius: 4px;
+  color: var(--tree-accent, var(--c-text-muted));
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all var(--transition-fast);
+}
+
+.catToggle:hover {
+  color: var(--c-accent);
+  background: var(--c-surface);
+}
+
+.catArticles {
+  margin: 2px 0 4px 14px;
+  padding-left: 6px;
+  border-left: 1px solid var(--c-border);
+  display: flex;
+  flex-direction: column;
+}
+
+.articleItem {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 6px;
+  line-height: 1.4;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--c-text-soft);
+  text-decoration: none;
+  min-width: 0;
+  transition: all var(--transition-fast);
+}
+
+.articleItem:hover {
+  background: var(--c-surface);
+  color: var(--c-accent);
+}
+
+/* 标题过长：省略号截断（hover 显示全文） */
+.articleTitle {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.articleIcon {
+  font-size: 16px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.articleLoading,
+.articleEmpty {
+  display: block;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--c-text-muted);
+}
+
+/* ── 文章逐层展开树 ── */
+
+.articleTree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.articleTree .articleTree {
+  margin-left: 14px;
+  padding-left: 6px;
+  border-left: 1px solid var(--c-border);
+}
+
+.articleRow {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.articleRow .articleItem {
+  flex: 1;
+  min-width: 0;
+  padding-left: 0;
+}
+
+.articleToggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  background: none;
+  border-radius: 4px;
+  color: var(--tree-accent, var(--c-text-muted));
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all var(--transition-fast);
+}
+
+.articleToggle:hover:not(:disabled) {
+  color: var(--c-accent);
+  background: var(--c-surface);
+}
+
+.articleToggleEmpty {
+  visibility: hidden;
+}
+
+/* ── 分类列表顶部筛选 ── */
+
+.catSearch {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  margin: 0 0 0 8px;
+}
+
+.catSearchInput {
+  width: 100%;
+  padding: 5px 26px 5px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-family: var(--font-body);
+  color: var(--c-text);
+  background: var(--c-card);
+  transition: all var(--transition-fast);
+}
+
+.catSearchInput:focus {
+  outline: none;
+  border-color: var(--c-accent);
+  box-shadow: 0 0 0 2px var(--c-accent-wash);
+}
+
+.catSearchInput::placeholder {
+  color: var(--c-text-muted);
+  font-size: 12px;
+}
+
+.catSearchClear {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: none;
+  background: none;
+  color: var(--c-text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+  transition: color var(--transition-fast);
+}
+
+.catSearchClear:hover {
+  color: var(--c-text);
+}
+
+.catSearchEmpty {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--c-text-muted);
+}
+
+/* ── 分批载入：加载更多 / 筛选结果 ── */
+
+.sidebarLoadMore {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin-top: 2px;
+  padding: 3px 8px;
+  border: none;
+  background: none;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-body);
+  font-size: 11px;
+  color: var(--c-text-muted);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.sidebarLoadMore:hover:not(:disabled) {
+  color: var(--c-accent);
+  background: var(--c-surface);
+}
+
+.sidebarLoadMore:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.catSearchResults {
+  display: flex;
+  flex-direction: column;
+  margin-top: 6px;
+}
+
+.catSearchResults .articleItem {
+  margin: 0 4px;
+}
+
+.searchCatTag {
+  margin-left: auto;
+  font-size: 11px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* 当前正在浏览的文章：醒目高亮（悬停时保持选中态背景） */
+.articleItemActive {
+  background: var(--c-accent-wash);
+  color: var(--c-accent);
+  font-weight: 600;
+}
+
+.articleItemActive:hover {
+  background: var(--c-accent-wash);
+  color: var(--c-accent);
+}
+
+/* ── 子类别树 ── */
+
+.catChildren {
+  margin-left: 0;
+  padding-left: 0;
+  margin-bottom: 4px;
+}
+
+
+/* ── 分类文章树样式优化：层级梯度 + 悬停联动 ── */
+
+/* 嵌套分类行：字号/内边距略小于顶级，形成层级梯度 */
+.catChildren .item {
+  font-size: 13px;
+  padding: 6px 10px;
+}
+
+/* 分类行悬停：浅色背景 + 展开图标联动变色 */
+.catRowMain .item:hover {
+  background: var(--c-surface);
+}
+
+.catRowMain:hover .catToggle {
+  color: var(--c-accent);
+}
+
+.catRowMain .itemActive:hover {
+  background: var(--c-accent-wash);
+}
+
+/* 分类展开图标：文件夹（📁 收起 / 📂 展开） */
+.catFolderIcon {
+  font-size: 16px;
+  line-height: 1;
+}
+
+/* 文章图标：恒定 📄；有子文章时叠加展开箭头 */
+.articleIconWrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  background: none;
+  flex-shrink: 0;
+}
+
+button.articleIconWrap {
+  cursor: pointer;
+}
+
+/* 展开箭头叠在文章图标之上（右下角重叠，尺寸与图标一致） */
+.articleExpandBadge {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  font-size: 19px;
+  line-height: 1;
+  color: var(--c-text-muted);
+  transition: all var(--transition-fast);
+}
+
+.articleExpandBadgeOpen {
+  transform: rotate(90deg);
+  color: var(--c-accent);
+}
+
+button.articleIconWrap:hover .articleExpandBadge {
+  color: var(--c-accent);
+}
+
+/* 无文章目录：灰显图标（占位对齐，不可展开） */
+.catFolderIconDim {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 22px;
+  opacity: 0.4;
+  flex-shrink: 0;
+}
+
+/* 目录行内操作按钮（有编辑权限的目录显示） */
+.catRowActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+
+.catActionBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  background: none;
+  border-radius: 4px;
+  color: var(--c-text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  transition: all var(--transition-fast);
+}
+
+.catActionBtn:hover {
+  color: var(--c-accent);
+  background: var(--c-surface);
+}
+
+.catActionBtnDanger:hover {
+  color: var(--c-danger);
+  background: var(--c-danger-wash);
+}
+
+/* 顶部「全部」按钮（home 图标 + 文字，位于左侧，无边框） */
+.allBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
+  border: none;
+  color: var(--c-text-soft);
+  text-decoration: none;
+  transition: all var(--transition-fast);
+}
+
+.allBtnIcon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.allBtnText {
+  font-size: 13px;
+  line-height: 1;
+  font-weight: 500;
+}
+
+.allBtn:hover {
+  color: var(--c-accent);
+  background: var(--c-surface);
+}
+
+.allBtnActive {
+  background: var(--c-accent-wash);
+  color: var(--c-accent);
+  font-weight: 600;
+}
+
+/* 底部操作区：主按钮 + 两个二级按钮并排 */
+.actionRow {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.secondaryBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  padding: 9px 10px;
+  background: var(--c-surface);
+  color: var(--c-text);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: var(--font-body);
+  transition: all var(--transition-fast);
+}
+
+.secondaryBtn:hover {
+  color: var(--c-accent);
+  border-color: var(--c-accent);
+}
+
+/* 目录颜色圆点叠在文件夹图标上 */
+.catFolderWrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.catFolderDot {
+  position: absolute;
+  right: -2px;
+  bottom: -1px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1px solid var(--c-page);
+}
+
+/* 拖拽放置目标高亮 */
+.dropTarget {
+  outline: 2px dashed var(--c-accent);
+  outline-offset: -2px;
+  border-radius: var(--radius-sm);
+  background: var(--c-accent-wash);
+}
+
+/* 拖拽不可用目标（如目录拖到文章上） */
+.dropTargetInvalid {
+  outline: 2px dashed var(--c-danger);
+  outline-offset: -2px;
+  border-radius: var(--radius-sm);
+  background: var(--c-danger-wash);
+  cursor: not-allowed;
+}
+

@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useArticles } from '../hooks/useArticles';
 import { ArticleDetailView } from './ArticleDetail';
+import { orderByHierarchy } from '../utils/hierarchy';
 
 /**
  * Standalone article detail page (route: /articles/:id).
@@ -15,10 +16,15 @@ export function ArticleDetail() {
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
 
   const { articles: allArticles } = useArticles();
-  const currentIndex = allArticles.findIndex((a) => a.id === id);
-  const prevId = currentIndex > 0 ? allArticles[currentIndex - 1]?.id : undefined;
-  const nextId = currentIndex >= 0 && currentIndex < allArticles.length - 1
-    ? allArticles[currentIndex + 1]?.id : undefined;
+  // 上一篇/下一篇按树状层级顺序（子文章紧随父文章）导航
+  const orderedIds = useMemo(
+    () => orderByHierarchy(allArticles).map((o) => o.article.id),
+    [allArticles],
+  );
+  const currentIndex = orderedIds.indexOf(id ?? '');
+  const prevId = currentIndex > 0 ? orderedIds[currentIndex - 1] : undefined;
+  const nextId = currentIndex >= 0 && currentIndex < orderedIds.length - 1
+    ? orderedIds[currentIndex + 1] : undefined;
 
   if (!id) {
     return (
@@ -32,6 +38,9 @@ export function ArticleDetail() {
     <ArticleDetailView
       articleId={id}
       onBack={() => navigate('/articles')}
+      onReturn={(pid, cid) =>
+        navigate(pid ? `/articles?view=${pid}` : cid ? `/articles?category=${cid}` : '/articles')
+      }
       prevArticleId={prevId}
       nextArticleId={nextId}
       onNavigate={(nid) => navigate(`/articles/${nid}`)}

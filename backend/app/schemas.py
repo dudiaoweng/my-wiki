@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field, field_validator, field_serializer
 class CategoryCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     color: str = Field(..., min_length=7, max_length=7)
+    # 上级目录 ID：None = 顶级目录；更新接口 None = 保持不变，空串 = 移到顶级
+    parent_id: Optional[str] = None
 
     @field_validator("color")
     @classmethod
@@ -22,10 +24,25 @@ class CategoryCreate(BaseModel):
         return v
 
 
+class CategoryMove(BaseModel):
+    """目录移动：parent_id 空串 = 移到顶级，否则为目标上级目录 ID。"""
+
+    parent_id: str = Field(default="")
+
+
+class ArticleMove(BaseModel):
+    """文章移动：category_id None = 目录不变（否则移入该目录的顶级）；
+    parent_id None = 不变、空串 = 顶级、否则挂到该文章下（同目录约束）。"""
+
+    category_id: Optional[str] = None
+    parent_id: Optional[str] = None
+
+
 class CategoryResponse(BaseModel):
     id: str
     name: str
     color: str
+    parent_id: Optional[str] = None  # 上级目录 ID（空 = 顶级目录）
     created_by: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -67,6 +84,7 @@ class ArticleBase(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
     content: str = Field(default="")
     category_id: Optional[str] = None
+    parent_id: Optional[str] = None  # 父文章 ID（同目录内嵌套；空 = 顶级文章）
     tags: list[str] = Field(default_factory=list)
     # Kept as dict rather than ArticleEntities to tolerate minor LLM output variations
     entities: Optional[dict] = None
@@ -76,6 +94,7 @@ class ArticleCreate(BaseModel):
     title: str = Field(default="", max_length=200)  # 允许为空，后端自动生成
     content: str = Field(default="")
     category_id: Optional[str] = None
+    parent_id: Optional[str] = None
     tags: list[str] = Field(default_factory=list)
     entities: Optional[dict] = None
 
@@ -84,8 +103,38 @@ class ArticleUpdate(BaseModel):
     title: Optional[str] = Field(default=None, min_length=1, max_length=200)
     content: Optional[str] = None
     category_id: Optional[str] = None
+    parent_id: Optional[str] = None
     tags: Optional[list[str]] = None
     entities: Optional[dict] = None
+
+
+class ArticleBreadcrumbItem(BaseModel):
+    """面包屑/子文章导航条目。"""
+
+    id: str
+    title: str
+
+
+class ArticleChildNode(BaseModel):
+    """子文章树节点（详情页树形展示用，递归嵌套）。"""
+
+    id: str
+    title: str
+    created_by: Optional[str] = None  # 创建人（证书 CN）
+    updated_at: Optional[datetime] = None
+    children: list["ArticleChildNode"] = Field(default_factory=list)
+
+    @field_serializer("updated_at")
+    @classmethod
+    def serialize_utc(cls, v: Optional[datetime]) -> str:
+        if v is None:
+            return ""
+        if v.tzinfo is None:
+            v = v.replace(tzinfo=timezone.utc)
+        return v.isoformat()
+
+
+ArticleChildNode.model_rebuild()
 
 
 class ArticleResponse(BaseModel):
@@ -93,6 +142,10 @@ class ArticleResponse(BaseModel):
     title: str
     content: str
     category_id: Optional[str]
+    parent_id: Optional[str] = None  # 父文章 ID（空 = 顶级文章）
+    ancestors: list[ArticleBreadcrumbItem] = Field(default_factory=list)  # 祖先链（根→直接父）
+    children: list[ArticleBreadcrumbItem] = Field(default_factory=list)    # 直接子文章
+    children_tree: list[ArticleChildNode] = Field(default_factory=list)    # 子文章递归树（含全部子孙）
     tags: list[str]
     entities: Optional[dict] = None  # LLM 提取的实体+关系
     created_by: Optional[str] = None  # 创建人（证书 CN）

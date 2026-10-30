@@ -3,7 +3,9 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useApp } from '../context/AppProvider';
 import { useToast } from '../hooks/useToast';
 import { useCategories } from '../hooks/useCategories';
+import { useArticles } from '../hooks/useArticles';
 import { api } from '../api/client';
+import { PositionField, type Position } from './PositionPicker';
 import type { Article } from '../types/article';
 import styles from './EditorModal.module.css';
 
@@ -26,6 +28,7 @@ function getFileIcon(filename: string): string {
 export function EditorModal() {
   const { editorState, closeEditor, notifyArticleSaved } = useApp();
   const { categories } = useCategories();
+  const { articles: allArticles, refetch: refetchArticles } = useArticles();
   const { showToast } = useToast();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -33,7 +36,8 @@ export function EditorModal() {
   const isEdit = !!editorState?.articleId;
 
   const [title, setTitle] = useState('');
-  const [categoryId, setCategoryId] = useState('');
+  // 文章位置（目录 + 挂载位置归并）：parentId 为空 = 顶级文章
+  const [position, setPosition] = useState<Position>({ categoryId: '', parentId: null });
   const [tags, setTags] = useState<string[]>([]);
   const [tagInput, setTagInput] = useState('');
   const [content, setContent] = useState('');
@@ -46,6 +50,26 @@ export function EditorModal() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const originalContentRef = useRef('');
   const objectUrlsRef = useRef<string[]>([]);
+
+  // 编辑时不可作为父文章：自身 + 全部子孙（防挂载成环）
+  const excludedParentIds = useMemo(() => {
+    const excluded = new Set<string>();
+    if (!editorState?.articleId) return excluded;
+    excluded.add(editorState.articleId);
+    const childrenOf = new Map<string, string[]>();
+    for (const a of allArticles) {
+      if (!a.parent_id) continue;
+      childrenOf.set(a.parent_id, [...(childrenOf.get(a.parent_id) ?? []), a.id]);
+    }
+    const stack = [editorState.articleId];
+    while (stack.length) {
+      const cur = stack.pop()!;
+      for (const child of childrenOf.get(cur) ?? []) {
+        if (!excluded.has(child)) { excluded.add(child); stack.push(child); }
+      }
+    }
+    return excluded;
+  }, [allArticles, editorState?.articleId]);
 
   // Cache object URLs per file so re-renders don't create (and leak) new URLs.
   const attachmentUrlMap = useMemo(() => {
@@ -71,6 +95,8 @@ export function EditorModal() {
   // Load article data when editing
   useEffect(() => {
     if (!editorState) return;
+    // 打开编辑器时刷新文章列表，保证「挂载位置」候选包含最新文章
+    refetchArticles();
     // Clear attachments immediately — don't wait for API call
     setAttachments([]);
     setExistingAttachments([]);
@@ -78,7 +104,7 @@ export function EditorModal() {
       setLoadingArticle(true);
       api.getArticle(editorState.articleId).then((a) => {
         setTitle(a.title);
-        setCategoryId(a.category_id ?? '');
+        setPosition({ categoryId: a.category_id ?? '', parentId: a.parent_id ?? null });
         setTags(a.tags || []);
         // Parse existing media attachments from content.
         // Use a Set of unique keys (src/safeName) to dedup same files, while
@@ -172,23 +198,26 @@ export function EditorModal() {
     } else {
       setLoadingArticle(false);
       setTitle('');
-      setCategoryId(searchParams.get('category') ?? '');
+      setPosition({
+        categoryId: editorState.categoryId ?? searchParams.get('category') ?? '',
+        parentId: editorState.parentId ?? null,
+      });
       setTags([]);
       setTagInput('');
       setContent('');
       originalContentRef.current = '';
     }
     setTimeout(() => titleRef.current?.focus(), 100);
-  }, [editorState, showToast]);
+  }, [editorState, showToast, refetchArticles]);
 
   if (!editorState) return null;
 
   const handleSave = async () => {
     // 文章加载完成前 title/content 仍是空串，此时保存会覆盖原文
     if (saving || loadingArticle) return;
-    // 文章必须对应分类
-    if (!categoryId) {
-      showToast('请选择分类', 'error');
+    // 文章必须选择位置（目录）
+    if (!position.categoryId) {
+      showToast('请选择位置（目录）', 'error');
       return;
     }
     setSaving(true);
@@ -197,10 +226,11 @@ export function EditorModal() {
       if (isEdit && editorState.articleId) {
         // Always send content — backend compares against stored content to
         // decide whether LLM re-extraction is needed.
-        const updateData: { title: string; content: string; category_id: string; tags: string[] } = {
+        const updateData: { title: string; content: string; category_id: string; parent_id: string; tags: string[] } = {
           title: title.trim(),
           content,
-          category_id: categoryId,
+          category_id: position.categoryId,
+          parent_id: position.parentId ?? '',
           tags,
         };
         await api.updateArticle(
@@ -213,7 +243,8 @@ export function EditorModal() {
         const article = await api.createArticle({
           title: title.trim(),
           content,
-          category_id: categoryId,
+          category_id: position.categoryId,
+          parent_id: position.parentId || null,
           tags,
         }, attachments.length > 0 ? attachments : undefined);
         showToast('文章已创建', 'success');
@@ -259,17 +290,15 @@ export function EditorModal() {
           </div>
 
           <div className={styles.group}>
-            <label className={styles.label}>分类</label>
-            <select
-              className={styles.select}
-              value={categoryId}
-              onChange={(e) => setCategoryId(e.target.value)}
-            >
-              <option value="" disabled>请选择分类</option>
-              {categories.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
-            </select>
+            <label className={styles.label}>位置</label>
+            <PositionField
+              categories={categories}
+              articles={allArticles}
+              value={position}
+              excludedArticleIds={excludedParentIds}
+              onChange={setPosition}
+              onOpen={() => refetchArticles()}
+            />
           </div>
 
           <div className={styles.group}>

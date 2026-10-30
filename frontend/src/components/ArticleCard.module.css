@@ -45,6 +45,21 @@
   background: var(--c-accent-wash);
 }
 
+/* 嵌套子文章：左侧树状引导线 */
+.cardNested::before {
+  top: 0;
+  bottom: 0;
+  width: 4px;
+}
+
+/* ── 卡片内嵌子文章标题树（共用组件 ChildTree，仅留外边距） ── */
+
+.childTreeWrap {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--c-border);
+}
+
 .body {
   flex: 1;
   min-width: 0;
@@ -135,7 +150,6 @@
 .commentSummary {
   margin-top: 8px;
   padding-top: 8px;
-  border-top: 1px solid var(--c-border);
   font-size: 11px;
   color: var(--c-text-muted);
 }

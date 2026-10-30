@@ -48,7 +48,7 @@ export function useCategories() {
       const cat = await api.createCategory(data);
       setCategories((prev) => [...prev, cat]);
       notifyCategoriesChanged();
-      showToast(`分类「${cat.name}」已创建`, 'success');
+      showToast(`目录「${cat.name}」已创建`, 'success');
       return cat;
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to create category';
@@ -62,7 +62,7 @@ export function useCategories() {
       const updated = await api.updateCategory(id, data);
       setCategories((prev) => prev.map((c) => (c.id === id ? updated : c)));
       notifyCategoriesChanged();
-      showToast(`分类「${updated.name}」已更新`, 'success');
+      showToast(`目录「${updated.name}」已更新`, 'success');
       return updated;
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to update category';
@@ -76,7 +76,7 @@ export function useCategories() {
       await api.deleteCategory(id);
       setCategories((prev) => prev.filter((c) => c.id !== id));
       notifyCategoriesChanged();
-      showToast('分类已删除', 'success');
+      showToast('目录已删除', 'success');
       return true;
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to delete category';

@@ -133,28 +133,22 @@
 }
 
 /* Category selector */
-.categoryRow {
+.positionGroup {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-top: 16px;
 }
 
+.positionGroup > :last-child {
+  flex: 1;
+  min-width: 0;
+}
+
 .categoryLabel {
   font-size: 13px;
   color: var(--c-text-soft);
   white-space: nowrap;
-}
-
-.categorySelect {
-  flex: 1;
-  padding: 8px 12px;
-  border: 1px solid var(--c-border);
-  border-radius: var(--radius-sm);
-  font-size: 13px;
-  font-family: var(--font-body);
-  color: var(--c-text);
-  background: var(--c-card);
 }
 
 /* Progress */

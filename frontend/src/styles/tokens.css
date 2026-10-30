@@ -32,7 +32,7 @@
   --shadow-elevated: 0 4px 16px rgba(0,0,0,0.08), 0 2px 4px rgba(0,0,0,0.04);
   --shadow-modal:    0 20px 60px rgba(0,0,0,0.15), 0 8px 20px rgba(0,0,0,0.08);
 
-  --sidebar-w: 260px;
+  --sidebar-w: 320px;
   --transition-fast: 150ms ease;
   --transition-base: 220ms ease;
 }

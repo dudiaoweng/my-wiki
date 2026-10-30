@@ -1,12 +1,15 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { Fragment, useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import type { CSSProperties } from 'react';
+import { useSearchParams, Link } from 'react-router-dom';
 import { api } from '../api/client';
 import { useArticles } from '../hooks/useArticles';
 import { useCategories } from '../hooks/useCategories';
 import { useApp } from '../context/AppProvider';
 import { ArticleCard } from './ArticleCard';
 import { ArticleDetailInline } from './ArticleDetail';
+import type { Article } from '../types/article';
 import { EntityPanel, type ViewMode } from './EntityPanel';
+import { orderByHierarchy } from '../utils/hierarchy';
 import styles from './ArticleList.module.css';
 
 export function ArticleList() {
@@ -16,7 +19,14 @@ export function ArticleList() {
   const tag = searchParams.get('tag') ?? undefined;
   const viewId = searchParams.get('view') ?? undefined;
 
-  const params = useMemo(() => ({ category_id: categoryId, search, tag }), [categoryId, search, tag]);
+  const params = useMemo(() => ({
+    category_id: categoryId,
+    search,
+    tag,
+    // 层级浏览：只显示直接挂载在当前位置（顶级）的文章，深层文章经父文章的
+    // 子文章树导航进入；搜索/标签为全局查询，不受层级限制
+    root_only: !search && !tag,
+  }), [categoryId, search, tag]);
   const { articles, loading, error, refetch } = useArticles(params);
   const { categories } = useCategories();
   const { openEditor, articleVersion, searchInputRef } = useApp();
@@ -47,6 +57,8 @@ export function ArticleList() {
 
   // Inline article view
   const [viewedArticleId, setViewedArticleId] = useState<string | null>(null);
+  // 被浏览文章不在当前列表中时（如从侧边栏打开目录树深层文章），单独拉取供实体面板使用
+  const [viewedArticleDetail, setViewedArticleDetail] = useState<Article | null>(null);
 
   // Entity highlight (for article content highlighting via rehype plugin)
   const [highlightEntity, setHighlightEntity] = useState<string | null>(null);
@@ -54,8 +66,12 @@ export function ArticleList() {
   const [highlightTag, setHighlightTag] = useState<string | null>(null);
 
   const categoryName = categoryId
-    ? categories.find((c) => c.id === categoryId)?.name ?? '分类'
+    ? categories.find((c) => c.id === categoryId)?.name ?? '目录'
     : null;
+
+  const categoryColor = categoryId
+    ? categories.find((c) => c.id === categoryId)?.color
+    : undefined;
 
   const title = tag
     ? `标签: ${tag}`
@@ -63,7 +79,33 @@ export function ArticleList() {
       ? `搜索: "${search}"`
       : categoryName ?? '所有文章';
 
+  // 面包屑：全部 / 目录（含上级目录链）/ 标签 / 搜索
+  const hasFilter = Boolean(categoryId || tag || search);
+
+  // 当前目录的祖先链（子目录嵌套场景，根→叶子，含自身）
+  const categoryChain = useMemo(() => {
+    if (!categoryId) return [];
+    const byId = new Map(categories.map((c) => [c.id, c]));
+    const chain: { id: string; name: string; color: string }[] = [];
+    const seen = new Set<string>();
+    let cur = byId.get(categoryId);
+    while (cur && !seen.has(cur.id)) {
+      seen.add(cur.id);
+      chain.unshift({ id: cur.id, name: cur.name, color: cur.color });
+      cur = cur.parent_id ? (byId.get(cur.parent_id) ?? undefined) : undefined;
+    }
+    return chain;
+  }, [categoryId, categories]);
+
   // Handle article selection
+  // 同级子目录（当前目录的直接子目录；「全部」视图 = 顶级目录）
+  const siblingDirs = useMemo(() => {
+    const parent = categoryId ?? null;
+    return categories
+      .filter((c) => (c.parent_id ?? null) === parent)
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [categories, categoryId]);
+
   const handleArticleSelect = useCallback((id: string, ctrl: boolean) => {
     setSelectedArticleIds((prev) => {
       const next = new Set(prev);
@@ -102,7 +144,7 @@ export function ArticleList() {
     });
   }, []);
 
-  // 正文高亮按名称（文本无法区分类型）：选中任一类型行即高亮该名称，集合清空才熄灭
+  // 正文高亮按名称（文本无法区目录型）：选中任一类型行即高亮该名称，集合清空才熄灭
   useEffect(() => {
     setHighlightEntity(selectedEntities.size > 0 ? lastEntityNameRef.current : null);
   }, [selectedEntities]);
@@ -160,11 +202,14 @@ export function ArticleList() {
     return result;
   }, [articles, selectedGraphNodeIds, selectedEntities]);
 
+  // 树状排布：子文章紧随父文章之后（同层按更新时间降序），根按更新时间降序
+  const orderedArticles = useMemo(() => orderByHierarchy(displayedArticles), [displayedArticles]);
+
   // Compute entity list
   const entityPool = useMemo(() => {
-    // If viewing an article, show only its entities
+    // If viewing an article, show only its entities（不在列表时用单独拉取的详情兜底）
     if (viewedArticleId) {
-      const a = articles.find((x) => x.id === viewedArticleId);
+      const a = articles.find((x) => x.id === viewedArticleId) ?? viewedArticleDetail ?? undefined;
       return a ? [a] : [];
     }
     // If articles selected, show their entities
@@ -173,7 +218,7 @@ export function ArticleList() {
     }
     // Otherwise all articles
     return articles;
-  }, [articles, selectedArticleIds, viewedArticleId]);
+  }, [articles, selectedArticleIds, viewedArticleId, viewedArticleDetail]);
 
   // Entities (LLM-extracted) — computed from article.entities, keyed by (name, type)
   // 同名但类型不同视为不同实体：分开展示、分别计数
@@ -215,6 +260,27 @@ export function ArticleList() {
       setViewedArticleId(null);
     }
   }, [viewId]);
+
+  // 被浏览文章不在当前列表时，单独拉取详情（实体面板数据来源兜底）
+  useEffect(() => {
+    if (!viewedArticleId) {
+      setViewedArticleDetail(null);
+      return;
+    }
+    if (articles.some((x) => x.id === viewedArticleId)) {
+      setViewedArticleDetail(null);
+      return;
+    }
+    let cancelled = false;
+    api.getArticle(viewedArticleId)
+      .then((a) => {
+        if (!cancelled) setViewedArticleDetail(a);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [viewedArticleId, articles]);
 
   // Poll only processing articles — update their cards individually
   useEffect(() => {
@@ -278,10 +344,11 @@ export function ArticleList() {
       <div className={styles.mainCol}>
         {viewedArticleId ? (
           (() => {
-            const currentIndex = displayedArticles.findIndex((a) => a.id === viewedArticleId);
-            const prevId = currentIndex > 0 ? displayedArticles[currentIndex - 1]?.id : undefined;
-            const nextId = currentIndex >= 0 && currentIndex < displayedArticles.length - 1
-              ? displayedArticles[currentIndex + 1]?.id : undefined;
+            const orderedIds = orderedArticles.map((o) => o.article.id);
+            const currentIndex = orderedIds.indexOf(viewedArticleId);
+            const prevId = currentIndex > 0 ? orderedIds[currentIndex - 1] : undefined;
+            const nextId = currentIndex >= 0 && currentIndex < orderedIds.length - 1
+              ? orderedIds[currentIndex + 1] : undefined;
             const handleNavigate = (id: string) => {
               setViewedArticleId(id);
               setSelectedArticleIds(new Set([id]));
@@ -294,6 +361,28 @@ export function ArticleList() {
                 key={viewedArticleId}
                 articleId={viewedArticleId}
                 onBack={handleBack}
+                onReturn={(pid, cid) => {
+                  if (pid) {
+                    // 返回父文章：切换内联视图到父文章
+                    setViewedArticleId(pid);
+                    setSelectedArticleIds(new Set([pid]));
+                    setSelectedEntities(new Set());
+                    setHighlightEntity(null);
+                    setHighlightTag(null);
+                  } else if (cid) {
+                    // 无父文章：返回所在目录的文章列表
+                    const params = new URLSearchParams(searchParams);
+                    params.delete('view');
+                    params.set('category', cid);
+                    setSearchParams(params);
+                    setViewedArticleId(null);
+                    setSelectedArticleIds(new Set());
+                    setHighlightEntity(null);
+                    setHighlightTag(null);
+                  } else {
+                    handleBack();
+                  }
+                }}
                 prevArticleId={prevId}
                 nextArticleId={nextId}
                 onNavigate={handleNavigate}
@@ -315,7 +404,40 @@ export function ArticleList() {
           <>
             {/* Header + search — always visible, never unmounted */}
             <div className={styles.header}>
-              <h3>{title}</h3>
+              {/* 面包屑路径与详情页同模式：全部 / 目录（含上级目录链）/ 标签 / 搜索 */}
+              <nav className={styles.breadcrumb} aria-label="面包屑导航">
+                {hasFilter ? (
+                  <>
+                    <Link to="/articles">全部</Link>
+                    <span className={styles.breadcrumbSep}>/</span>
+                    {categoryId && categoryChain.length > 0 ? (
+                      categoryChain.map((c, i) => (
+                        <Fragment key={c.id}>
+                          {i < categoryChain.length - 1 ? (
+                            <Link to={`/articles?category=${c.id}`} style={{ color: c.color }}>
+                              {c.name}
+                            </Link>
+                          ) : (
+                            <span className={styles.breadcrumbCurrent} style={{ color: c.color }}>
+                              {c.name}
+                            </span>
+                          )}
+                          <span className={styles.breadcrumbSep}>/</span>
+                        </Fragment>
+                      ))
+                    ) : (
+                      <span
+                        className={styles.breadcrumbCurrent}
+                        style={categoryColor ? { color: categoryColor } : undefined}
+                      >
+                        {title}
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <span className={styles.breadcrumbCurrent}>全部</span>
+                )}
+              </nav>
               <span className={styles.resultCount}>
                 {selectedArticleIds.size > 0
                   ? `已选 ${selectedArticleIds.size} / ${displayedArticles.length} 篇`
@@ -336,6 +458,24 @@ export function ArticleList() {
               </div>
             </div>
 
+            {/* 同级子目录入口 */}
+            {siblingDirs.length > 0 && (
+              <div className={styles.dirRow}>
+                {siblingDirs.map((d) => (
+                  <Link
+                    key={d.id}
+                    to={`/articles?category=${d.id}`}
+                    className={styles.dirChip}
+                    style={{ '--dir-accent': d.color } as CSSProperties}
+                    title={`进入目录「${d.name}」`}
+                  >
+                    <span className={styles.dirChipIcon}>📁</span>
+                    <span className={styles.dirChipName}>{d.name}</span>
+                  </Link>
+                ))}
+              </div>
+            )}
+
             {/* Content below — conditional */}
             {error ? (
               <div className={styles.empty}>
@@ -351,7 +491,7 @@ export function ArticleList() {
                 <p>
                   {search || tag
                     ? '没有匹配的文章，试试其他关键词'
-                    : '这个分类下还没有文章'}
+                    : '这个目录下还没有文章'}
                 </p>
                 {!search && !tag && (
                   <button className={styles.newBtn} onClick={() => openEditor(null)}>
@@ -361,10 +501,11 @@ export function ArticleList() {
               </div>
             ) : (
               <div className={styles.list}>
-                {displayedArticles.map((a) => (
+                {orderedArticles.map(({ article: a, depth }) => (
                   <ArticleCard
                     key={a.id}
                     article={a}
+                    depth={depth}
                     selected={selectedArticleIds.has(a.id)}
                     onSelect={handleArticleSelect}
                     onOpen={handleArticleOpen}

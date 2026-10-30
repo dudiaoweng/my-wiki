@@ -34,7 +34,7 @@ class GraphResponse(BaseModel):
 
 @router.get("", response_model=GraphResponse)
 def get_graph(db: Session = Depends(get_db)):
-    """知识图谱：文章/分类节点来自 SQLite（标题/颜色），实体/提及/关系边来自 Neo4j。
+    """知识图谱：文章/目录节点来自 SQLite（标题/颜色），实体/提及/关系边来自 Neo4j。
 
     v2.3 前这里全表扫描 articles.entities JSON 现搭图（30s TTL 缓存）；
     Neo4j 直查后无需缓存，前端已有 articleVersion → refetchGraph 刷新机制。

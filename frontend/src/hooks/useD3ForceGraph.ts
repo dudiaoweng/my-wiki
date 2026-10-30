@@ -28,7 +28,7 @@ export const esc = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 
 // ── Tooltip helpers ──
-const TYPE_LABELS: Record<string, string> = { article: '文章', category: '分类' };
+const TYPE_LABELS: Record<string, string> = { article: '文章', category: '目录' };
 
 export function buildTooltipHtml(type: string, label: string, entityType?: string): string {
   const category = type === 'entity' ? (entityType || '实体') : (TYPE_LABELS[type] ?? type);

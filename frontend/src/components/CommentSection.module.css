@@ -1,9 +1,8 @@
 /* CommentSection — Ink & Paper Study design tokens */
 
 .section {
-  margin-top: 40px;
-  padding-top: 32px;
-  border-top: 1px solid var(--c-border);
+  margin-top: 12px;
+  padding-top: 8px;
 }
 
 .heading {

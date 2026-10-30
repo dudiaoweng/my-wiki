@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from app.dependencies import get_db
 from app.models import Article, Category
+from app.ancestry import attach_ancestry
 from app.schemas import ArticleResponse
 from app.auth import get_client_cert, CertInfo
 from app.config import (
@@ -788,6 +789,7 @@ async def generate_title(text: str) -> str:
 async def upload_file(
     file: UploadFile = File(...),
     category_id: str | None = Form(default=None),
+    parent_id: str | None = Form(default=None),
     db: Session = Depends(get_db),
     cert: CertInfo = Depends(get_client_cert),
 ):
@@ -795,11 +797,19 @@ async def upload_file(
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided")
 
-    # 文章必须对应分类（v2.3 起强制）——校验前置，避免文件写盘后才失败
+    # 文章必须对应目录（v2.3 起强制）——校验前置，避免文件写盘后才失败
     if not category_id:
-        raise HTTPException(status_code=400, detail="文章必须选择分类")
+        raise HTTPException(status_code=400, detail="文章必须选择目录")
     if not db.query(Category).filter(Category.id == category_id).first():
-        raise HTTPException(status_code=400, detail="分类不存在")
+        raise HTTPException(status_code=400, detail="目录不存在")
+
+    # 文章层级：父文章必须存在且与文章同目录（上传时父不可能是自身/后代，无需环检）
+    if parent_id:
+        parent = db.query(Article).filter(Article.id == parent_id).first()
+        if not parent:
+            raise HTTPException(status_code=400, detail="父文章不存在")
+        if parent.category_id != category_id:
+            raise HTTPException(status_code=400, detail="父文章必须与文章属于同一目录")
 
     # Determine file extension
     ext = Path(file.filename).suffix.lower()
@@ -859,6 +869,7 @@ async def upload_file(
         title=title,
         content=raw_text,
         category_id=category_id,
+        parent_id=parent_id,
         tags=json.dumps([], ensure_ascii=False),
         processing=(
             f"processing:{safe_name}" if is_doc
@@ -1054,4 +1065,5 @@ async def upload_file(
         logger.warning("Article entities assembly failed (Neo4j unavailable): %s", e)
         ent_map = {}
     article.entities = ent_map.get(article.id)
+    attach_ancestry(db, article)
     return article
