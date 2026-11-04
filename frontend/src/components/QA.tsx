@@ -35,12 +35,13 @@ function getFileTypeIcon(filename: string): string {
 }
 
 export function QA() {
-  const { sidebarOpen, closeSidebar, userIdNumber } = useApp();
+  const { userIdNumber } = useApp();
   const { showToast } = useToast();
 
   const {
     sessions,
     activeId,
+    activeSession,
     messages,
     loading,
     error,
@@ -59,7 +60,7 @@ export function QA() {
 
   const [input, setInput] = useState('');
   const chatEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [viewedArticleId, setViewedArticleId] = useState<string | null>(null);
   const [lightboxFile, setLightboxFile] = useState<FileContext | null>(null);
@@ -67,15 +68,13 @@ export function QA() {
   const handleSwitchSession = useCallback(
     (id: string) => {
       switchSession(id);
-      closeSidebar();
     },
-    [switchSession, closeSidebar]
+    [switchSession]
   );
 
   const handleNewSession = useCallback(() => {
     newSession();
-    closeSidebar();
-  }, [newSession, closeSidebar]);
+  }, [newSession]);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -91,7 +90,17 @@ export function QA() {
     const q = input.trim();
     if (!q || loading) return;
     setInput('');
+    // 发送后输入框高度复原为默认两行
+    if (inputRef.current) inputRef.current.style.height = 'auto';
     await askQuestion(q);
+  };
+
+  // 多行输入框：默认两行，按内容自动拉伸（上限 220px）
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInput(e.target.value);
+    const el = e.target;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -132,46 +141,79 @@ export function QA() {
 
   const isAssistant = (msg: { role: string }) => msg.role === 'assistant';
 
+  // ── 会话下拉框（切换与管理）──
+  const [sessionDropOpen, setSessionDropOpen] = useState(false);
+  const sessionDropRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!sessionDropOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (sessionDropRef.current && !sessionDropRef.current.contains(e.target as Node)) {
+        setSessionDropOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [sessionDropOpen]);
+
   return (
     <div className={styles.page}>
-      {/* Mobile overlay */}
-      {sidebarOpen && (
-        <div className={styles.overlay} onClick={closeSidebar} />
-      )}
-
-      {/* ── Session sidebar ── */}
-      <aside className={`${styles.sidebar} ${sidebarOpen ? styles.sidebarOpen : ''}`}>
-        <button className={styles.newChatBtn} onClick={handleNewSession}>
-          <span>+</span> 新对话
-        </button>
-        <div className={styles.sessionList}>
-          {sessions.map((s) => (
-            <div
-              key={s.id}
-              className={`${styles.sessionItem} ${s.id === activeId ? styles.sessionActive : ''}`}
-              onClick={() => handleSwitchSession(s.id)}
-            >
-              <span className={styles.sessionTitle}>{s.title}</span>
-              <button
-                className={styles.sessionDel}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  deleteSession(s.id);
-                }}
-                title="删除会话"
-              >
-                ✕
-              </button>
-            </div>
-          ))}
-          {sessions.length === 0 && (
-            <div className={styles.sessionEmpty}>暂无对话记录</div>
-          )}
-        </div>
-      </aside>
-
       {/* ── Chat area ── */}
       <div className={styles.chatArea}>
+        {/* 会话下拉框：切换会话 + 新建/删除 */}
+        <div className={styles.sessionBar} ref={sessionDropRef}>
+          <button
+            type="button"
+            className={styles.sessionSelect}
+            onClick={() => setSessionDropOpen((p) => !p)}
+            title="切换会话"
+            aria-expanded={sessionDropOpen}
+          >
+            <span className={styles.sessionSelectTitle}>
+              {activeSession ? activeSession.title : '新会话'}
+            </span>
+            <span className={styles.sessionSelectArrow}>▾</span>
+          </button>
+          {sessionDropOpen && (
+            <div className={styles.sessionDrop} onClick={(e) => e.stopPropagation()}>
+              <button
+                type="button"
+                className={styles.sessionNewItem}
+                onClick={() => {
+                  handleNewSession();
+                  setSessionDropOpen(false);
+                }}
+              >
+                ＋ 新对话
+              </button>
+              {sessions.map((s) => (
+                <div
+                  key={s.id}
+                  className={`${styles.sessionItem} ${s.id === activeId ? styles.sessionActive : ''}`}
+                  onClick={() => {
+                    handleSwitchSession(s.id);
+                    setSessionDropOpen(false);
+                  }}
+                >
+                  <span className={styles.sessionTitle}>{s.title}</span>
+                  <button
+                    type="button"
+                    className={styles.sessionDel}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteSession(s.id);
+                    }}
+                    title="删除会话"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+              {sessions.length === 0 && (
+                <div className={styles.sessionEmpty}>暂无对话记录</div>
+              )}
+            </div>
+          )}
+        </div>
         {messages.length === 0 && !loading ? (
           <div className={styles.empty}>
             <div className={styles.emptyIcon}>💬</div>
@@ -330,56 +372,67 @@ export function QA() {
         )}
 
         <div className={styles.inputArea}>
-          <button
-            className={styles.clearBtn}
-            onClick={clearHistory}
-            disabled={messages.length === 0}
-            title="清除对话"
-          >
-            清除
-          </button>
-          {/* Hidden file input */}
-          <input
-            ref={fileInputRef}
-            type="file"
-            className={styles.fileInput}
-            onChange={handleFileUpload}
-            accept=".txt,.md,.json,.xml,.csv,.yaml,.yml,.py,.js,.ts,.html,.css,.docx,.xlsx,.xls,.pptx,.ppt,.pdf,.jpg,.jpeg,.png,.gif,.webp,.svg,.bmp,.ico,.tiff,.tif,.mp3,.wav,.m4a,.flac,.ogg,.wma,.mp4,.avi,.mov,.mkv,.webm,.wmv"
-            aria-label="上传文件作为问答上下文"
-          />
-          <button
-            className={`${styles.kbToggle} ${kbEnabled ? styles.kbToggleOn : styles.kbToggleOff}`}
-            onClick={() => setKbEnabled(!kbEnabled)}
-            disabled={loading}
-            title={kbEnabled ? '知识库已开启 — 点击关闭' : '知识库已关闭 — 点击开启'}
-          >
-            📚
-          </button>
-          <button
-            className={styles.uploadBtn}
-            onClick={() => fileInputRef.current?.click()}
-            disabled={loading}
-            title="上传文件作为问答上下文"
-          >
-            📎
-          </button>
-          <input
-            ref={inputRef}
-            type="text"
-            className={styles.input}
-            placeholder="输入你的问题… (Enter 发送)"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            disabled={loading}
-          />
-          <button
-            className={styles.sendBtn}
-            onClick={handleSend}
-            disabled={loading || !input.trim()}
-          >
-            {loading ? '思考中…' : '发送'}
-          </button>
+          {/* 工具按钮行：清除对话 / 知识库开关 / 上传文件 */}
+          <div className={styles.inputTools}>
+            <button
+              className={styles.clearBtn}
+              onClick={clearHistory}
+              disabled={messages.length === 0}
+              title="清除对话"
+            >
+              清除
+            </button>
+            {/* Hidden file input */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              className={styles.fileInput}
+              onChange={handleFileUpload}
+              accept=".txt,.md,.json,.xml,.csv,.yaml,.yml,.py,.js,.ts,.html,.css,.docx,.xlsx,.xls,.pptx,.ppt,.pdf,.jpg,.jpeg,.png,.gif,.webp,.svg,.bmp,.ico,.tiff,.tif,.mp3,.wav,.m4a,.flac,.ogg,.wma,.mp4,.avi,.mov,.mkv,.webm,.wmv"
+              aria-label="上传文件作为问答上下文"
+            />
+            <button
+              className={`${styles.kbToggle} ${kbEnabled ? styles.kbToggleOn : styles.kbToggleOff}`}
+              onClick={() => setKbEnabled(!kbEnabled)}
+              disabled={loading}
+              title={kbEnabled ? '知识库已开启 — 点击关闭' : '知识库已关闭 — 点击开启'}
+            >
+              📚
+            </button>
+            <button
+              className={styles.uploadBtn}
+              onClick={() => fileInputRef.current?.click()}
+              disabled={loading}
+              title="上传文件作为问答上下文"
+            >
+              📎
+            </button>
+          </div>
+          {/* 提问输入占整行：多行（默认两行、自动拉伸），发送图标融合在输入框内 */}
+          <div className={styles.inputRow}>
+            <div className={styles.inputWrap}>
+              <textarea
+                ref={inputRef}
+                className={styles.input}
+                placeholder="输入你的问题… (Enter 发送，Shift+Enter 换行)"
+                value={input}
+                onChange={handleInputChange}
+                onKeyDown={handleKeyDown}
+                disabled={loading}
+                rows={2}
+              />
+              <button
+                type="button"
+                className={styles.sendBtn}
+                onClick={handleSend}
+                disabled={loading || !input.trim()}
+                title="发送"
+                aria-label="发送"
+              >
+                {loading ? '…' : '➤'}
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 

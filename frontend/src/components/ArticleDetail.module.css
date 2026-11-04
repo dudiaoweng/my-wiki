@@ -249,22 +249,13 @@
   font-size: 12px;
   font-family: var(--font-body);
   border: none;
-  cursor: default;
-}
-
-button.tag {
   cursor: pointer;
+  text-decoration: none;
   transition: filter var(--transition-fast);
 }
 
-button.tag:hover {
+.tag:hover {
   filter: brightness(0.95);
-}
-
-/* 标签内容导航选中态（与正文 tag-highlight 蓝色呼应） */
-.tagActive {
-  background: rgba(80, 180, 255, 0.35) !important;
-  outline: 1px solid rgba(60, 150, 255, 0.5);
 }
 
 /* ── Tabs (子文章 / 评论) ── */
@@ -320,6 +311,13 @@ button.tag:hover {
 
 .childTreeSection {
   margin: 14px 0 8px;
+}
+
+/* 子文章页操作按钮行（新建文章 / 上传文件） */
+.childActions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
 }
 
 /* 子文章树样式见共用组件 ChildTree.module.css */

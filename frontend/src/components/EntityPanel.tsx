@@ -23,7 +23,6 @@ interface Props {
   selectedArticleIds: string[];
   articles?: Article[];
   mode: ViewMode;
-  onModeChange: (mode: ViewMode) => void;
   onRefresh?: () => void;
   onGraphNodeClick?: (nodeId: string, nodeType: string, label: string, multi?: boolean) => void;
   selectedGraphNodeIds?: Set<string>;
@@ -35,7 +34,6 @@ export function EntityPanel({
   selectedArticleIds,
   articles = [],
   mode,
-  onModeChange,
   onRefresh,
   onGraphNodeClick,
   selectedGraphNodeIds,
@@ -91,6 +89,14 @@ export function EntityPanel({
       (e) => e.name.toLowerCase().includes(q) || (e.type ?? '').toLowerCase().includes(q),
     );
   }, [entities, entitySearch]);
+
+  // 动态加载：实体列表分批展示，每批不超过 20 条；数据/筛选变化时回到第一批
+  const ENTITY_BATCH = 20;
+  const [visibleCount, setVisibleCount] = useState(ENTITY_BATCH);
+  useEffect(() => {
+    setVisibleCount(ENTITY_BATCH);
+  }, [entities, entitySearch]);
+  const visibleEntities = filteredEntities.slice(0, visibleCount);
 
   const handleAddEntity = async () => {
     const name = newEntityName.trim();
@@ -486,6 +492,7 @@ export function EntityPanel({
           </button>
         )}
         <div className={styles.headerRight}>
+          {/* 列表⇄图谱切换按钮已上移至顶部工具栏「知识图谱」 */}
           <span className={styles.count}>
             {mode === 'graph' && filteredGraph
               ? `${filteredGraph.nodes.filter(n => n.type === 'article').length}文 · ${filteredGraph.nodes.filter(n => n.type === 'entity').length}实体`
@@ -493,27 +500,35 @@ export function EntityPanel({
                 ? `${filteredEntities.length}/${entities.length} 个实体`
                 : `${entities.length} 个`}
           </span>
-          <button
-            className={styles.modeBtn}
-            onClick={() => onModeChange(mode === 'list' ? 'graph' : 'list')}
-            title={mode === 'list' ? '切换为图谱视图' : '切换为列表视图'}
-          >
-            {mode === 'list' ? '🔗' : '📋'}
-          </button>
         </div>
       </div>
 
       {mode === 'list' ? (
         <>
           <div className={styles.entitySearchWrap}>
-            <span className={styles.entitySearchIcon}>🔍</span>
+            <span className={styles.entitySearchIcon}>
+              {/* 筛选漏斗图标 */}
+              <svg
+                width="13"
+                height="13"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+              </svg>
+            </span>
             <input
               ref={searchInputRef}
               type="text"
               className={styles.entitySearchInput}
               value={entitySearch}
               onChange={(e) => setEntitySearch(e.target.value)}
-              placeholder="搜索实体…"
+              placeholder="实体筛选…"
               autoComplete="off"
             />
             {entitySearch && (
@@ -554,7 +569,7 @@ export function EntityPanel({
           )}
 
           <div className={styles.list}>
-            {filteredEntities.map((ent) => (
+            {visibleEntities.map((ent) => (
               <div key={`${ent.name}::${ent.type}`}>
                 {editingEntityName === ent.name && editingEntityType === (ent.type ?? null) ? (
                   /* ── Edit mode ── */
@@ -735,6 +750,16 @@ export function EntityPanel({
             ) : filteredEntities.length === 0 ? (
               <div style={{ padding: '4px 8px', fontSize: 11, color: 'var(--c-text-muted)' }}>无匹配实体</div>
             ) : null}
+            {/* 动态加载：每批不超过 20 条 */}
+            {filteredEntities.length > visibleCount && (
+              <button
+                type="button"
+                className={styles.loadMore}
+                onClick={() => setVisibleCount((c) => c + ENTITY_BATCH)}
+              >
+                加载更多（已显示 {visibleCount} / {filteredEntities.length} 条）
+              </button>
+            )}
           </div>
 
         </>

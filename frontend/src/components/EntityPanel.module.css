@@ -12,28 +12,24 @@
   max-height: 100vh;
 }
 
-/* Graph mode: expand to fill right side of main window */
+/* Graph mode: 卡片样式与实体列表一致，宽度与原来一样（扩展占满右侧） */
 .panelGraph {
   flex: 5;
   min-width: 400px;
   width: auto;
   max-height: none;
   position: static;
-  background: transparent;
-  border: none;
-  border-radius: 0;
-  padding: 0;
-  border-left: 1px solid var(--c-border);
 }
 
 /* Header & legend padding in graph mode */
 .panelGraph .header {
-  padding: 0 16px;
   margin-bottom: 8px;
 }
 
 .panelGraph .graphContainer {
-  border-radius: 0;
+  flex: 1;
+  min-height: 380px;
+  border-radius: var(--radius-sm);
   background: var(--c-page);
 }
 
@@ -85,27 +81,6 @@
 .headerAddBtn:disabled {
   opacity: 0.35;
   cursor: not-allowed;
-}
-
-.modeBtn {
-  width: 36px;
-  height: 36px;
-  border: 1px solid var(--c-border);
-  border-radius: var(--radius-sm);
-  background: var(--c-card);
-  font-size: 18px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  line-height: 1;
-  transition: all var(--transition-fast);
-}
-
-.modeBtn:hover {
-  background: var(--c-surface);
-  border-color: var(--c-accent);
 }
 
 .actions {
@@ -167,8 +142,10 @@
   left: 8px;
   top: 50%;
   transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--c-text-muted);
-  font-size: 12px;
   pointer-events: none;
 }
 
@@ -507,14 +484,15 @@
 }
 
 @media (max-width: 1100px) {
+  /* 移动模式：实体列表按内容高度展示（页面整体滚动，不内部滚动） */
   .panel {
     width: 100%;
-    flex: 1 1 0%;
+    flex: none;
     flex-shrink: 1;
     min-height: 0;
     max-height: none;
     position: static;
-    overflow-y: auto;
+    overflow-y: visible;
     border-radius: 0;
     border: none;
     border-top: 1px solid var(--c-border);
@@ -522,7 +500,7 @@
 
   /* List mode: body (search + list) takes remaining space and scrolls */
   .panel .list {
-    flex: 1 1 0%;
+    flex: none;
     min-height: 0;
   }
 
@@ -538,4 +516,26 @@
     flex: 1 1 auto;
     min-height: 0;
   }
+}
+
+/* 动态加载更多（实体列表分批，每批 ≤20 条） */
+.loadMore {
+  display: block;
+  width: 100%;
+  text-align: center;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border: none;
+  background: none;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-body);
+  font-size: 11px;
+  color: var(--c-text-muted);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.loadMore:hover {
+  color: var(--c-accent);
+  background: var(--c-surface);
 }

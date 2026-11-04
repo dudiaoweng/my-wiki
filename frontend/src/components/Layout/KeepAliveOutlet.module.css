@@ -1,0 +1,62 @@
+.window {
+  display: none;
+}
+
+/* 活动窗口撑满主区：QA（flex:1）与文章列表（height:100%）都依赖纵向拉伸 */
+.windowActive {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+/* ── 窗口容器（并排/单窗两种模式保持同一树位置，避免切换时重挂）── */
+
+.plain {
+  height: 100%;
+  min-height: 0;
+}
+
+.mainPane {
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* ── 智能问答面板与活动窗口并排 ── */
+.split {
+  display: flex;
+  flex-direction: row;
+  height: 100%;
+  min-height: 0;
+  gap: 16px;
+}
+
+.splitMain {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.splitQa {
+  flex: none;
+  width: 460px;
+  min-height: 0;
+}
+
+@media (max-width: 768px) {
+  /* 移动端：上下堆叠，按内容高度 */
+  .split {
+    flex-direction: column;
+    height: auto;
+    gap: 0;
+  }
+
+  .splitMain {
+    flex: none;
+  }
+
+  .splitQa {
+    width: 100%;
+  }
+}

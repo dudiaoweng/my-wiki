@@ -8,12 +8,16 @@ from pathlib import Path
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Path as PathParam, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import desc
+from sqlalchemy import desc, and_, or_, not_
+from datetime import datetime, timedelta
 from app.dependencies import get_db
 from app.database import SessionLocal
 from app.models import Article, Category, Comment, EntityInfo
 from app.ancestry import attach_ancestry, attach_children_trees
-from app.schemas import ArticleCreate, ArticleUpdate, ArticleMove, ArticleResponse, ArticleListItem, CommentSummary
+from app.schemas import (
+    ArticleCreate, ArticleUpdate, ArticleMove, ArticleResponse, ArticleListItem,
+    CommentSummary, AdvancedSearchRequest, AdvancedSearchCondition, AdvancedSearchResponse,
+)
 from app.auth import get_client_cert, CertInfo
 from app.llm_extract import extract_chunks_iter, merge_tags, merge_entities
 from app.config import AUTO_PARSE
@@ -72,6 +76,21 @@ def _validate_parent(db: Session, parent_id: str, category_id: str) -> Article:
     return parent
 
 
+def _category_subtree_ids(db: Session, category_id: str) -> list[str]:
+    """目录子树 id 集合（含自身）：搜索/标签 + 目录组合筛选时匹配整个子树，
+    祖先目录点击也能聚合其所有后代目录中的匹配文章。"""
+    ids = {category_id}
+    frontier = [category_id]
+    while frontier:
+        children = [
+            r[0]
+            for r in db.query(Category.id).filter(Category.parent_id.in_(frontier)).all()
+        ]
+        frontier = [c for c in children if c not in ids]
+        ids.update(frontier)
+    return list(ids)
+
+
 def _check_no_cycle(db: Session, article_id: str, parent_id: str) -> None:
     """沿新父文章的祖先链向上走，若遇到 article_id 则拒绝（不能挂到自己的子文章下）。"""
     cur_id: str | None = parent_id
@@ -84,48 +103,8 @@ def _check_no_cycle(db: Session, article_id: str, parent_id: str) -> None:
         cur_id = parent.parent_id if parent else None
 
 
-@router.get("", response_model=list[ArticleListItem])
-def list_articles(
-    category_id: str | None = Query(default=None, alias="category_id"),
-    parent_id: str | None = Query(default=None, alias="parent_id"),
-    search: str | None = Query(default=None),
-    title: str | None = Query(default=None),
-    tag: str | None = Query(default=None),
-    root_only: bool = Query(default=False),
-    skip: int = Query(default=0, ge=0),
-    limit: int = Query(default=MAX_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
-    db: Session = Depends(get_db),
-):
-    q = db.query(Article).options(joinedload(Article.category)).order_by(desc(Article.updated_at))
-
-    if category_id:
-        q = q.filter(Article.category_id == category_id)
-
-    if parent_id:
-        q = q.filter(Article.parent_id == parent_id)
-
-    # 层级浏览模式：只返回直接挂载在当前位置的顶级文章（parent_id 为空），
-    # 深层文章经父文章的 children_tree 导航进入；全局搜索/标签查询不传此参数
-    if root_only:
-        q = q.filter(Article.parent_id.is_(None))
-
-    if search:
-        like = f"%{search}%"
-        q = q.filter(
-            Article.title.ilike(like) | Article.content.ilike(like)
-        )
-
-    # 仅标题匹配（位置选择器筛选框用，不搜正文）
-    if title:
-        q = q.filter(Article.title.ilike(f"%{title}%"))
-
-    if tag:
-        # tags stored as JSON array string: ["tag1","tag2"]
-        # use LIKE with quoted tag value inside the JSON string
-        q = q.filter(Article.tags.like(f'%"{tag}"%'))
-
-    articles = q.offset(skip).limit(limit).all()
-
+def _assemble_list_items(db: Session, articles: list[Article]) -> list[ArticleListItem]:
+    """列表项组装（列表接口 / 高级搜索共用）：实体、子文章树、评论计数与摘要。"""
     # 实体数据组装（Neo4j 唯一存储）：批量查询，结果挂 ORM 临时属性直通响应模型；
     # Neo4j 不可用时降级 entities=None（前端容忍），文章列表照常返回
     if articles:
@@ -187,6 +166,208 @@ def list_articles(
         results.append(item)
 
     return results
+
+
+@router.get("", response_model=list[ArticleListItem])
+def list_articles(
+    category_id: str | None = Query(default=None, alias="category_id"),
+    parent_id: str | None = Query(default=None, alias="parent_id"),
+    search: str | None = Query(default=None),
+    title: str | None = Query(default=None),
+    # 标签累加筛选：可重复传参（?tag=A&tag=B），AND 叠加（必须同时含全部标签）
+    tag: list[str] | None = Query(default=None),
+    root_only: bool = Query(default=False),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=MAX_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    db: Session = Depends(get_db),
+):
+    q = db.query(Article).options(joinedload(Article.category)).order_by(desc(Article.updated_at))
+
+    if category_id:
+        # 与目录树一致：只匹配当前目录直接挂载的文章（子目录经目录入口/结果树逐级下钻）
+        q = q.filter(Article.category_id == category_id)
+
+    if parent_id:
+        q = q.filter(Article.parent_id == parent_id)
+
+    # 层级浏览模式：只返回直接挂载在当前位置的顶级文章（parent_id 为空），
+    # 深层文章经父文章的 children_tree 导航进入；全局搜索/标签查询不传此参数
+    if root_only:
+        q = q.filter(Article.parent_id.is_(None))
+
+    if search:
+        like = f"%{search}%"
+        q = q.filter(
+            Article.title.ilike(like) | Article.content.ilike(like)
+        )
+
+    # 仅标题匹配（位置选择器筛选框用，不搜正文）
+    if title:
+        q = q.filter(Article.title.ilike(f"%{title}%"))
+
+    if tag:
+        # tags stored as JSON array string: ["tag1","tag2"]
+        # use LIKE with quoted tag value inside the JSON string；多标签 AND 叠加
+        for t in tag:
+            q = q.filter(Article.tags.like(f'%"{t}"%'))
+
+    articles = q.offset(skip).limit(limit).all()
+    return _assemble_list_items(db, articles)
+
+
+@router.get("/facets")
+def search_facets(
+    search: str | None = Query(default=None),
+    category_id: str | None = Query(default=None, alias="category_id"),
+    db: Session = Depends(get_db),
+):
+    """搜索结果按目录分布（侧边栏筛选当前搜索结果用）。
+
+    传入 category_id 时只统计该目录子树内的分布（文章列表搜索+目录
+    组合筛选时目录入口与当前结果同步）。
+
+    注意：必须声明在 /{article_id} 之前，否则会被路径参数吞掉。
+    """
+    from sqlalchemy import func
+
+    q = db.query(Article.category_id, func.count(Article.id))
+    if search:
+        like = f"%{search}%"
+        q = q.filter(Article.title.ilike(like) | Article.content.ilike(like))
+    if category_id:
+        q = q.filter(Article.category_id.in_(_category_subtree_ids(db, category_id)))
+    rows = q.group_by(Article.category_id).all()
+
+    cat_ids = [r[0] for r in rows if r[0]]
+    cats: dict[str, Category] = {}
+    if cat_ids:
+        cats = {c.id: c for c in db.query(Category).filter(Category.id.in_(cat_ids)).all()}
+
+    facets = [
+        {
+            "category_id": r[0],
+            "name": cats[r[0]].name if r[0] and r[0] in cats else "未归类",
+            "color": cats[r[0]].color if r[0] and r[0] in cats else "#999999",
+            "count": r[1],
+        }
+        for r in rows
+    ]
+    facets.sort(key=lambda f: -f["count"])
+    return {"total": sum(r[1] for r in rows), "facets": facets}
+
+
+@router.get("/count")
+def count_articles(
+    category_id: str | None = Query(default=None, alias="category_id"),
+    search: str | None = Query(default=None),
+    # 标签累加筛选：与列表接口一致，可重复传参 AND 叠加
+    tag: list[str] | None = Query(default=None),
+    root_only: bool = Query(default=False),
+    db: Session = Depends(get_db),
+):
+    """文章总数（文章列表分页用），过滤条件与列表接口保持一致。
+
+    注意：必须声明在 /{article_id} 之前，否则会被路径参数吞掉。
+    """
+    from sqlalchemy import func
+
+    q = db.query(func.count(Article.id))
+
+    if category_id:
+        # 与列表接口一致：只匹配当前目录直接挂载的文章
+        q = q.filter(Article.category_id == category_id)
+
+    if root_only:
+        q = q.filter(Article.parent_id.is_(None))
+
+    if search:
+        like = f"%{search}%"
+        q = q.filter(Article.title.ilike(like) | Article.content.ilike(like))
+
+    if tag:
+        for t in tag:
+            q = q.filter(Article.tags.like(f'%"{t}"%'))
+
+    return {"total": q.scalar() or 0}
+
+
+def _build_condition_expr(db: Session, cond: AdvancedSearchCondition):
+    """单条件 → SQLAlchemy 表达式；空条件返回 None（不产生过滤效果）。"""
+    cond_type = cond.type
+    if cond_type == "keyword":
+        v = cond.value.strip()
+        if not v:
+            return None
+        like = f"%{v}%"
+        return Article.title.ilike(like) | Article.content.ilike(like)
+    if cond_type == "person":
+        v = cond.value.strip()
+        if not v:
+            return None
+        return Article.created_by.ilike(f"%{v}%")
+    if cond_type == "tag":
+        v = cond.value.strip()
+        if not v:
+            return None
+        return Article.tags.like(f'%"{v}"%')
+    if cond_type == "category":
+        v = cond.value.strip()
+        if not v:
+            return None
+        # 与目录树一致：只匹配该目录直接挂载的文章（子目录逐级下钻）
+        return Article.category_id == v
+    # time：更新时间范围（可只填一端；结束日含当天）
+    expr = None
+    if cond.start:
+        try:
+            start_dt = datetime.fromisoformat(cond.start)
+            expr = Article.updated_at >= start_dt
+        except ValueError:
+            pass
+    if cond.end:
+        try:
+            end_dt = datetime.fromisoformat(cond.end) + timedelta(days=1)
+            e2 = Article.updated_at < end_dt
+            expr = e2 if expr is None else and_(expr, e2)
+        except ValueError:
+            pass
+    return expr
+
+
+@router.post("/search", response_model=AdvancedSearchResponse)
+def advanced_search(
+    body: AdvancedSearchRequest = Body(...),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=MAX_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    db: Session = Depends(get_db),
+):
+    """高级搜索：条件按 connector（与/或）依次组合，negated（非）取反。
+
+    条件类型：keyword（标题+正文）/ person（创建人）/ tag（标签）/
+    time（更新时间范围）。空条件不产生过滤效果。
+    """
+    q = db.query(Article).options(joinedload(Article.category))
+
+    expr = None
+    for cond in body.conditions:
+        sub = _build_condition_expr(db, cond)
+        if sub is None:
+            continue  # 空条件跳过（不参与组合）
+        if cond.negated:
+            sub = not_(sub)
+        if expr is None:
+            expr = sub
+        elif cond.connector == "or":
+            expr = or_(expr, sub)
+        else:
+            expr = and_(expr, sub)
+
+    if expr is not None:
+        q = q.filter(expr)
+
+    total = q.count()
+    articles = q.order_by(desc(Article.updated_at)).offset(skip).limit(limit).all()
+    return AdvancedSearchResponse(total=total, items=_assemble_list_items(db, articles))
 
 
 @router.get("/{article_id}", response_model=ArticleResponse)

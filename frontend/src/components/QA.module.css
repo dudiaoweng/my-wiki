@@ -1,15 +1,102 @@
+/* 与实体列表相同样式：最右侧卡片面板（会话在上、对话在下） */
 .page {
   display: flex;
-  flex: 1;
+  flex-direction: column;
+  width: 460px;
+  margin-left: auto;
+  flex: none;
+  height: 100%;
   min-height: 0;
+  background: var(--c-card);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
 }
 
-/* ── Session sidebar ── */
+/* ── 会话下拉框（切换与管理）── */
+
+.sessionBar {
+  position: relative;
+  flex-shrink: 0;
+  margin-bottom: 8px;
+}
+
+.sessionSelect {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-page);
+  color: var(--c-text);
+  font-size: 13px;
+  font-family: var(--font-body);
+  cursor: pointer;
+}
+
+.sessionSelect:hover {
+  border-color: var(--c-accent);
+}
+
+.sessionSelectTitle {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  font-weight: 500;
+}
+
+.sessionSelectArrow {
+  color: var(--c-text-muted);
+  flex-shrink: 0;
+}
+
+.sessionDrop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 50;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--c-page);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-elevated);
+  padding: 4px;
+}
+
+.sessionNewItem {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  border: none;
+  border-bottom: 1px solid var(--c-border);
+  background: none;
+  color: var(--c-accent);
+  font-size: 13px;
+  font-family: var(--font-body);
+  cursor: pointer;
+}
+
+.sessionNewItem:hover {
+  background: var(--c-accent-wash);
+}
+
+/* ── Session sidebar（面板内顶部会话区）── */
 
 .sidebar {
-  width: 260px;
-  flex-shrink: 0;
-  border-right: 1px solid var(--c-border);
+  width: 100%;
+  flex: none;
+  max-height: 200px;
+  border-right: none;
+  border-bottom: 1px solid var(--c-border);
   background: var(--c-sidebar);
   display: flex;
   flex-direction: column;
@@ -20,8 +107,8 @@
   align-items: center;
   justify-content: center;
   gap: 8px;
-  margin: 16px;
-  padding: 10px 16px;
+  margin: 10px 12px;
+  padding: 8px 14px;
   background: var(--c-accent);
   color: white;
   border: none;
@@ -44,9 +131,10 @@
 }
 
 .sessionList {
-  flex: 1;
+  flex: none;
+  max-height: 130px;
   overflow-y: auto;
-  padding: 0 12px 12px;
+  padding: 0 12px 10px;
 }
 
 .sessionItem {
@@ -114,9 +202,10 @@
 .chatArea {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 24px 0 24px 32px;
+  padding: 14px 16px 16px;
 }
 
 .chat {
@@ -361,25 +450,50 @@
   }
 }
 
-/* Input area */
+/* Input area：工具按钮一行 + 提问输入占整行 */
 .inputArea {
   flex-shrink: 0;
-  padding: 12px 32px 0 0;
+  padding: 12px 0 0;
   border-top: 1px solid var(--c-border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.inputTools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.inputRow {
   display: flex;
   gap: 10px;
 }
 
+/* 多行输入容器：发送图标融合在输入框内 */
+.inputWrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+
 .input {
   flex: 1;
-  padding: 12px 16px;
+  padding: 12px 46px 12px 16px;
   border: 1px solid var(--c-border);
   border-radius: var(--radius-md);
   font-size: 14px;
+  line-height: 1.6;
   font-family: var(--font-body);
   color: var(--c-text);
   background: var(--c-card);
   transition: all var(--transition-fast);
+  resize: none;
+  overflow-y: auto;
+  min-height: 66px;
+  box-sizing: border-box;
 }
 
 .input:focus {
@@ -392,18 +506,24 @@
   color: var(--c-text-muted);
 }
 
+/* 发送图标：融合在输入框内右下角 */
 .sendBtn {
-  padding: 12px 20px;
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: var(--c-accent);
   color: white;
   border: none;
-  border-radius: var(--radius-md);
-  font-size: 14px;
-  font-weight: 500;
+  border-radius: 50%;
+  font-size: 13px;
   cursor: pointer;
   font-family: var(--font-body);
   transition: all var(--transition-fast);
-  white-space: nowrap;
 }
 
 .sendBtn:hover:not(:disabled) {
@@ -411,7 +531,7 @@
 }
 
 .sendBtn:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
@@ -708,6 +828,17 @@
 
 /* ── Mobile ── */
 @media (max-width: 768px) {
+  /* 移动端：问答面板全宽（按内容高度，页面整体滚动） */
+  .page {
+    width: 100%;
+    margin-left: 0;
+    height: auto;
+    flex: 1;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
   .overlay {
     display: block;
     position: fixed;
@@ -741,7 +872,7 @@
   }
 
   .inputArea {
-    padding: 12px 16px 0 0;
+    padding: 12px 0 0;
   }
 
   .message {

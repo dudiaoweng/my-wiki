@@ -41,6 +41,45 @@ def list_categories(db: Session = Depends(get_db)):
     return db.query(Category).order_by(Category.name).all()
 
 
+@router.get("/article-counts")
+def category_article_counts(db: Session = Depends(get_db)):
+    """每个目录的递归文章数（含所有子目录），返回 {category_id: count}。
+
+    文章列表根目录视图（「全部」= 根目录，展示顶级目录及文章数徽章）用。
+    """
+    from sqlalchemy import func
+
+    rows = (
+        db.query(Article.category_id, func.count(Article.id))
+        .group_by(Article.category_id)
+        .all()
+    )
+    direct = dict(rows)
+
+    cats = db.query(Category).all()
+    by_parent: dict[str | None, list[Category]] = {}
+    for c in cats:
+        by_parent.setdefault(c.parent_id, []).append(c)
+
+    result: dict[str, int] = {}
+    seen: set[str] = set()
+
+    def walk(cat_id: str) -> int:
+        if cat_id in seen:
+            return 0  # 数据异常成环防御
+        seen.add(cat_id)
+        total = direct.get(cat_id, 0)
+        for sub in by_parent.get(cat_id, []):
+            total += walk(sub.id)
+        result[cat_id] = total
+        return total
+
+    for c in cats:
+        if not c.parent_id:
+            walk(c.id)
+    return result
+
+
 @router.post("", response_model=CategoryResponse, status_code=201)
 def create_category(body: CategoryCreate, db: Session = Depends(get_db),
                     cert: CertInfo = Depends(get_client_cert)):

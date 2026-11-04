@@ -3,7 +3,10 @@
 .gitignore
 
 # 镜像导出产物（1GB+ tar 不进构建上下文）
-dist/
+# 注：排除目录本身无法再放行其中文件，故用 dist/* + 例外；
+# 数据库升级脚本需进镜像（发布环境执行）
+dist/*
+!dist/upgrade_db.py
 *.tar
 
 # 环境变量（含 API Key，不进构建上下文）

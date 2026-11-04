@@ -1,6 +1,17 @@
 import type { Article } from '../types/article';
+import { Link, useSearchParams } from 'react-router-dom';
 import { ChildTree } from './ChildTree';
 import styles from './ArticleCard.module.css';
+
+/** 标签累加筛选链接：已激活则移除（toggle），否则追加；全部移除后回根目录 */
+export function tagFilterHref(current: string[], clicked: string): string {
+  const next = current.includes(clicked)
+    ? current.filter((t) => t !== clicked)
+    : [...current, clicked];
+  return next.length
+    ? `/articles?${next.map((t) => `tag=${encodeURIComponent(t)}`).join('&')}`
+    : '/articles';
+}
 
 interface Props {
   article: Article;
@@ -9,6 +20,13 @@ interface Props {
   onOpen: (id: string) => void;
   /** 层级深度（0 = 顶级文章），用于树状缩进 */
   depth?: number;
+  /** 拖拽（列表 ⇄ 侧边栏相互移动） */
+  draggable?: boolean;
+  dropHighlight?: 'drop' | 'invalid' | null;
+  onDragStart?: (e: React.DragEvent<HTMLElement>) => void;
+  onDragOver?: (e: React.DragEvent<HTMLElement>) => void;
+  onDragLeave?: () => void;
+  onDrop?: (e: React.DragEvent<HTMLElement>) => void;
 }
 
 function stripMarkdown(md: string): string {
@@ -51,7 +69,14 @@ function formatUser(cn: string | null): string {
   return match ? match[1] : cn;
 }
 
-export function ArticleCard({ article, selected, onSelect, onOpen, depth = 0 }: Props) {
+export function ArticleCard({
+  article, selected, onSelect, onOpen, depth = 0,
+  draggable = false, dropHighlight = null,
+  onDragStart, onDragOver, onDragLeave, onDrop,
+}: Props) {
+  // 当前激活的标签集合（累加筛选；URL ?tag=A&tag=B）
+  const [searchParams] = useSearchParams();
+  const tags = searchParams.getAll('tag');
   const catColor = article.category?.color ?? 'var(--c-border)';
   const catName = article.category?.name ?? '未归类';
   const stripped = stripMarkdown(article.content);
@@ -61,11 +86,16 @@ export function ArticleCard({ article, selected, onSelect, onOpen, depth = 0 }: 
 
   return (
     <div
-      className={`${styles.card} ${selected ? styles.cardSelected : ''} ${depth > 0 ? styles.cardNested : ''}`}
+      className={`${styles.card} ${selected ? styles.cardSelected : ''} ${depth > 0 ? styles.cardNested : ''}${dropHighlight === 'drop' ? ` ${styles.dropTarget}` : ''}${dropHighlight === 'invalid' ? ` ${styles.dropTargetInvalid}` : ''}`}
       style={{ marginLeft: indent, width: `calc(100% - ${indent}px)`, '--card-accent': catColor } as React.CSSProperties}
       role="button"
       tabIndex={0}
       aria-label={`${article.title}${selected ? '（已选中）' : ''}`}
+      draggable={draggable}
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
       onClick={(e) => {
         const target = e.target as HTMLElement;
         if (target.closest('button')) return;
@@ -111,11 +141,22 @@ export function ArticleCard({ article, selected, onSelect, onOpen, depth = 0 }: 
           {article.attachment_name && (
             <span style={{ fontSize: 11, color: 'var(--c-text-muted)' }}>📎</span>
           )}
-          {article.tags.slice(0, 3).map((t) => (
-            <span key={t} className={styles.tag}>
-              {t}
-            </span>
-          ))}
+          {article.tags.slice(0, 3).map((t) => {
+            const isActive = tags.includes(t);
+            return (
+              <Link
+                key={t}
+                to={tagFilterHref(tags, t)}
+                className={styles.tag}
+                title={isActive
+                  ? `取消标签「${t}」筛选`
+                  : `累加筛选标签为「${t}」的文章`}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {t}
+              </Link>
+            );
+          })}
         </div>
         {article.comment_count != null && article.comment_count > 0 && article.latest_comments && article.latest_comments.length > 0 && (
           <div className={styles.commentSummary}>

@@ -21,6 +21,26 @@
   min-height: 0;
 }
 
+/* 侧边栏保活容器：正常时透明穿过（display:contents），QA 全宽时整体隐藏 */
+.sidebarSlot {
+  display: contents;
+}
+
+.sidebarSlotHidden {
+  display: none;
+}
+
+/* 桌面端侧边栏缩进：整体隐藏、主区扩展；移动端忽略（仍为抽屉） */
+.sidebarSlotCollapsed {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .sidebarSlotCollapsed {
+    display: contents;
+  }
+}
+
 .main {
   flex: 1;
   min-width: 0;

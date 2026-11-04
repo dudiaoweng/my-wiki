@@ -677,6 +677,17 @@ button.articleIconWrap:hover .articleExpandBadge {
   font-weight: 600;
 }
 
+/* 「全部」按钮上的搜索匹配数徽章（搜索模式 = 全部结果数量） */
+.allBtnCount {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+}
+
 /* 底部操作区：主按钮 + 两个二级按钮并排 */
 .actionRow {
   display: flex;
@@ -741,3 +752,64 @@ button.articleIconWrap:hover .articleExpandBadge {
   cursor: not-allowed;
 }
 
+
+/* 搜索结果目录筛选（facets） */
+.searchFacets {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.facetItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+  font-size: 13px;
+  color: var(--c-text-soft);
+  transition: all var(--transition-fast);
+}
+
+.facetItem:hover {
+  background: var(--c-surface);
+  color: var(--c-accent);
+}
+
+.facetItemActive {
+  background: var(--c-accent-wash);
+  color: var(--c-accent);
+  font-weight: 600;
+}
+
+.facetIcon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.facetName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 筛选框漏斗图标 */
+.catSearchIcon {
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--c-text-muted);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.catSearchInput {
+  padding-left: 28px;
+}

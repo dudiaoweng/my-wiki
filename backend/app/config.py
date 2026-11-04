@@ -36,6 +36,13 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "embedding-3")
 # ── Q&A ──
 QA_TEMPERATURE = float(os.getenv("QA_TEMPERATURE", "0.4"))
 
+# ── Prompt 配置 ──
+# 提示词目录：每个 prompt 一个同名 .txt 文件（文件名对应 prompts.py 内置默认的
+# prompt 名称，如 GENERATE_TITLE.txt），文件内容即为该提示词全文，存在则覆盖默认值。
+# 路径锚定仓库根目录 prompts/；容器内由 Dockerfile ENV 覆盖为 /app/prompts
+# （compose 挂载 ./prompts:/app/prompts:ro）。修改后重启后端生效。
+PROMPTS_DIR = os.getenv("PROMPTS_DIR", str(Path(__file__).resolve().parents[2] / "prompts"))
+
 # ── 超时配置（秒）──
 # 各类模型调用的超时上限，可用环境变量覆盖；未设置或值非法时回退到代码默认值。
 # 本地模型加载较慢时可调大 LLM_TIMEOUT。

@@ -1,6 +1,6 @@
 # 知识库系统 — 技术文档
 
-> **版本**: 2.5 | **最后更新**: 2026-10-08 | **作者**: dudiaoweng
+> **版本**: 2.8 | **最后更新**: 2026-11-03 | **作者**: dudiaoweng
 
 ---
 
@@ -27,15 +27,18 @@
 
 **my-wiki** 是一个个人知识库管理系统，支持以下核心功能：
 
-- 📄 **文章管理** — 创建、编辑、删除 Markdown 文章，支持分类和标签；仅创建人可编辑/删除
+- 📄 **文章管理** — 创建、编辑、删除 Markdown 文章，支持目录和标签；仅创建人可编辑/删除
+- 🗂️ **目录层级** — 目录可嵌套子目录；文章可挂载在目录下，也可挂载在其他文章下（同目录嵌套）；面包屑路径 全部/目录链/文章/子文章
 - 💬 **文章评论** — 评论 CRUD，支持多附件、内容纳入智能问答；仅评论人可编辑/删除
-- 🔐 **权限控制** — 基于身份证号的创建人验证，文章/评论/实体/分类均受保护
+- 🔐 **权限控制** — 基于身份证号的创建人验证，文章/评论/实体/目录均受保护
 - 📤 **文件上传解析** — 支持 .txt / .md / .docx / .xlsx / .pptx / .pdf / 图片 / 音视频；文档文本异步提取（读取中→解析中两阶段），自动通过 LLM 提取标题、实体和关系（分段提取、逐段落库）
-- 🔍 **智能搜索** — 基于 Qdrant 向量检索的语义搜索
-- 🤖 **智能问答 (RAG)** — 检索增强生成，结合知识库文章和实体附加信息回答用户问题
-- 🕸️ **知识图谱** — D3.js 力导向图，展示文章-分类-实体之间的关系网络
-- 🏷️ **实体管理** — LLM 自动提取实体+关系（实体以「名称+类型」为标识），支持附加信息（类别+内容），用于增强知识图谱和 Q&A 上下文
-- 📱 **响应式设计** — 桌面端三栏布局，移动端自适应堆叠
+- 🔍 **搜索体系** — 顶部关键词即时搜索（数据库匹配）、侧边栏搜索结果树、高级搜索（时间范围/人员/关键词 × 与或非组合）；搜索结果作为文章列表展示的基础（目录分布、目录内筛选）
+- 🗂️ **文章列表** — 分页（每页 10 篇）、组合排序（时间/标题·目录名/创建人 × 倒序/正序，目录与文章分别排序）、目录卡片（创建人/创建时间、修改/删除、拖拽移动）
+- 🤖 **智能问答 (RAG)** — 最右侧面板与文章/实体窗口并排（窗口切换保活、数据不清理），多会话下拉框管理，多行输入框
+- 🕸️ **知识图谱** — D3.js 力导向图，展示文章-目录-实体之间的关系网络
+- 🏷️ **实体管理** — LLM 自动提取实体+关系（实体以「名称+类型」为标识），实体列表动态加载（每批 20 条）
+- 🧩 **Prompt 可配置** — 所有提示词以 txt 文件存于 `prompts/` 目录，可独立编辑，重启生效（Docker 挂载）
+- 📱 **响应式设计** — 桌面端多栏布局，移动端按内容高度自适应
 
 ### 1.1 项目结构总览
 
@@ -50,21 +53,22 @@ my-wiki/
 │   ├── run.py                   # 生产入口：双端口服务 (8000/8444) + SSL 兼容补丁
 │   ├── .env                     # 环境变量 — 仓库根目录 .env（config.py 显式加载）
 │   ├── requirements.txt         # Python 依赖
+│   ├── rebuild_chunks.py        # 一次性全量重建分块（改 MAX_CHUNK_CHARS 后执行）
 │   ├── static/                  # 前端构建产物 (生产模式, vite outDir)
 │   └── app/
 │       ├── main.py              # FastAPI 应用工厂、路由注册、种子数据
 │       ├── database.py          # SQLAlchemy 引擎、会话、表创建、迁移
 │       ├── dependencies.py      # FastAPI 依赖注入 (get_db)
 │       ├── models.py            # ORM 模型 (Category, Article, ArticleChunk, EntityInfo, Comment)
-│       ├── schemas.py           # Pydantic 请求/响应模型
-│       ├── config.py            # 集中化配置：LLM/Vision/ASR/Embedding/QA/TLS (环境变量)
+│       ├── schemas.py           # Pydantic 请求/响应模型（含高级搜索条件）
+│       ├── config.py            # 集中化配置：LLM/Vision/ASR/Embedding/QA/TLS/PROMPTS_DIR (环境变量)
 │       ├── auth.py              # mTLS 身份：签名验证 (openssl verify) + CN 解析（peercert 直连 / nginx X-Client-Cert 头双模式）
-│       ├── prompts.py           # 所有 LLM 提示词模板
+│       ├── prompts.py           # LLM 提示词：内置默认 + prompts/*.txt 可配置覆盖
 │       ├── llm_extract.py       # 共享 LLM 标签+实体提取 (统一超时/重试/容错)
 │       ├── utils.py             # 共享工具函数 (find_ffmpeg 等)
 │       └── routes/
-│           ├── articles.py      # 文章 CRUD + 分页搜索 + 附件重解析
-│           ├── categories.py    # 分类 CRUD
+│           ├── articles.py      # 文章 CRUD + 分页搜索 + 计数 + 高级搜索 + 附件重解析
+│           ├── categories.py    # 目录 CRUD + 移动 + 递归文章数
 │           ├── comments.py      # 评论 CRUD + 附件上传 + LLM 增强
 │           ├── tags.py          # 标签管理 (添加/重命名/删除)
 │           ├── entities.py      # 实体管理 + 附加信息 CRUD + 嵌入重算
@@ -73,7 +77,9 @@ my-wiki/
 │           ├── stats.py         # 仪表盘统计
 │           └── upload.py        # 文件上传 + LLM 实体提取
 │
-├── knowledge-base.html          # 前端入口 (可直接打开)
+├── prompts/                     # Prompt 配置目录（每个提示词一个 .txt，见 README.md）
+├── dist/                        # 发布物目录（镜像 tar 包、数据库升级脚本）
+│   └── upgrade_db.py            # 数据库升级脚本（补列/建索引/清旧列，幂等）
 ├── frontend/                    # React 18 + TypeScript 前端
 │   ├── index.html               # Vite 入口 HTML
 │   ├── package.json             # NPM 依赖
@@ -312,20 +318,17 @@ my-wiki/
 │ id (PK)      │──┐    │ id (PK)              │──┐    │ id (PK)      │
 │ name (UQ)    │  │    │ title                │  │    │ article_id   │
 │ color        │  │    │ content              │  │    │   (FK→Article│
-└──────────────┘  │    │ category_id (FK,IDX) │◄─┘    │   CASCADE)   │
-                  └───►│   → Category         │       │ chunk_index  │
-                       │ tags (JSON TEXT)     │       │ chunk_text   │
-                       │ created_at           │       │ entities     │
-                       │ updated_at (IDX)     │       │   (JSON TEXT)│
-                       │ attachment_path      │       │              │
-                       │ attachment_name      │       └──────────────┘
-                       │ attachment_type      │       ┌──────────────┐
-                       └──────────────────────┘       │ EntityInfo   │
-                                                      ├──────────────┤
-                                                      │ id (PK)      │
-                                                      │ entity_name  │
-                                                      │   (IDX)      │
-                                                      │ name         │
+│ parent_id    │  │    │ category_id (FK,IDX) │◄─┘    │   CASCADE)   │
+│   (FK 自引用, │◄─┘    │   → Category         │       │ chunk_index  │
+│    IDX)      │       │ parent_id            │       │ chunk_text   │
+└──────────────┘       │   (FK 自引用, IDX)   │       └──────────────┘
+                       │ tags (JSON TEXT)     │       ┌──────────────┐
+                       │ created_at           │       │ EntityInfo   │
+                       │ updated_at (IDX)     │       ├──────────────┤
+                       │ attachment_path      │       │ id (PK)      │
+                       │ attachment_name      │       │ entity_name  │
+                       │ attachment_type      │       │   (IDX)      │
+                       └──────────────────────┘       │ name         │
                                                       │ content      │
                                                       │ created_at   │
                                                       │ updated_at   │
@@ -336,13 +339,14 @@ my-wiki/
 
 ### 4.2 表结构详解
 
-#### `categories` — 文章分类
+#### `categories` — 目录（文章分类）
 
 | 列名 | 类型 | 约束 | 说明 |
 |------|------|------|------|
-| `id` | VARCHAR(36) | PK, UUID | 分类唯一标识 |
-| `name` | VARCHAR(100) | UNIQUE, NOT NULL | 分类名称 |
+| `id` | VARCHAR(36) | PK, UUID | 目录唯一标识 |
+| `name` | VARCHAR(100) | UNIQUE, NOT NULL | 目录名称 |
 | `color` | VARCHAR(7) | NOT NULL | 十六进制颜色 (如 `#1E5C8A`) |
+| `parent_id` | VARCHAR(36) | FK 自引用, NULLABLE, INDEX | 上级目录（空 = 顶级目录；**v2.6 子目录**，无环由应用层保证） |
 | `created_by` | VARCHAR(200) | NULLABLE | 创建人 (证书 CN) |
 | `created_at` | DATETIME | NOT NULL | 创建时间 (UTC) |
 | `updated_at` | DATETIME | NOT NULL | 更新时间 (UTC) |
@@ -354,7 +358,8 @@ my-wiki/
 | `id` | VARCHAR(36) | PK, UUID | 文章唯一标识 |
 | `title` | VARCHAR(200) | NOT NULL | 文章标题 |
 | `content` | TEXT | NOT NULL, DEFAULT "" | Markdown 内容 |
-| `category_id` | VARCHAR(36) | FK→categories, ON DELETE SET NULL, INDEX | 所属分类（**v2.4 起必填**：创建/上传时缺省返回 400「文章必须选择分类」；编辑不可置空） |
+| `category_id` | VARCHAR(36) | FK→categories, ON DELETE SET NULL, INDEX | 所属目录（**v2.4 起必填**：创建/上传时缺省返回 400「文章必须选择目录」；编辑不可置空） |
+| `parent_id` | VARCHAR(36) | FK 自引用, NULLABLE, INDEX | 父文章（**v2.5 文章层级**：空 = 直接挂在目录下；同目录 + 无环由应用层保证） |
 | `tags` | TEXT | NOT NULL, DEFAULT "[]" | 手动标签 (JSON 数组) |
 | `processing` | TEXT | NULLABLE | 后台解析状态标志 |
 | `created_by` / `updated_by` | VARCHAR(200) | NULLABLE | 创建人/更新人 (证书 CN) |
@@ -428,10 +433,14 @@ my-wiki/
 
 | 表 | 索引列 | 原因 |
 |----|--------|------|
-| articles | `category_id` | 按分类筛选是最常用操作 |
+| articles | `category_id` | 按目录筛选是最常用操作 |
 | articles | `updated_at` | 文章列表默认按更新时间排序 |
+| articles | `parent_id` | 子文章树批量构建（v2.5 层级） |
+| categories | `parent_id` | 子目录树构建与子树递归筛选 |
 | article_chunks | `article_id` | 按文章查询分块是主访问路径 |
 | entity_infos | `entity_name` | 按实体名查询附加信息 |
+
+> 存量库补列后可能缺少 `parent_id` 索引——用 `dist/upgrade_db.py` 补齐（见 §13.5）。
 
 ---
 
@@ -442,10 +451,14 @@ my-wiki/
 | 前缀 | 文件 | 端点 | 方法 | 说明 |
 |------|------|------|------|------|
 | `/api/articles` | `routes/articles.py` | `/` | GET | 文章列表 (分页/搜索/筛选) |
+| | | `/count` | GET | 文章计数（分页总数，过滤条件与列表一致） |
+| | | `/facets` | GET | 搜索结果目录分布（可传 category_id 收窄到子树） |
+| | | `/search` | POST | 高级搜索（时间/人员/标签/关键词/目录 × 与或非组合） |
 | | | `/{id}` | GET | 文章详情 |
 | | | `/` | POST | 创建文章 |
 | | | `/{id}` | PUT | 更新文章 |
 | | | `/{id}` | DELETE | 删除文章 |
+| | | `/{id}/move` | POST | 拖拽移动文章（换目录/换父文章，创建人 only） |
 | | | `/{id}/download` | GET | 下载附件 |
 | | | `/{id}/reprocess` | POST | 重新解析全部附件 |
 | | | `/{id}/reprocess/{safe_name}` | POST | 重新解析单个附件 |
@@ -456,10 +469,12 @@ my-wiki/
 | | | `/{comment_id}` | DELETE | 删除评论 |
 | | | `/{comment_id}/reprocess` | POST | 重新解析评论内容（只针对内容） |
 | | | `/{comment_id}/reprocess/{safe_name}` | POST | 重新解析评论单个附件（只针对该附件） |
-| `/api/categories` | `routes/categories.py` | `/` | GET | 分类列表 |
-| | | `/` | POST | 创建分类 |
-| | | `/{id}` | PUT | 更新分类 |
-| | | `/{id}` | DELETE | 删除分类 |
+| `/api/categories` | `routes/categories.py` | `/` | GET | 目录列表 |
+| | | `/article-counts` | GET | 每个目录的递归文章数（含子目录，目录卡片徽章用） |
+| | | `/` | POST | 创建目录 |
+| | | `/{id}` | PUT | 更新目录 |
+| | | `/{id}/move` | POST | 拖拽移动目录（换上级目录，创建人 only） |
+| | | `/{id}` | DELETE | 删除目录（有子目录/文章时 409） |
 | `/api/tags` | `routes/tags.py` | `/` | GET | 标签列表 |
 | | | `/` | POST | 添加标签 |
 | | | `/rename` | PUT | 重命名标签 |
@@ -491,13 +506,35 @@ my-wiki/
 **查询参数:**
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `category_id` | string | 按分类 UUID 筛选 |
+| `category_id` | string | 按目录 UUID 筛选（搜索/标签组合时匹配整个目录子树） |
+| `parent_id` | string | 按父文章筛选（子文章树加载） |
 | `search` | string | 按标题+内容搜索 (ILIKE) |
+| `title` | string | 仅标题匹配（位置选择器筛选框） |
 | `tag` | string | 按标签筛选 (JSON 子串匹配) |
+| `root_only` | bool | 仅顶级文章（层级浏览模式） |
 | `skip` | int | 分页偏移 (默认 0) |
-| `limit` | int | 每页数量 (默认 50, 最大 200) |
+| `limit` | int | 每页数量 (默认 200, 最大 200) |
 
 **响应:** `ArticleResponse[]`
+
+#### POST /api/articles/search — 高级搜索（v2.7）
+
+**请求:** `{ "conditions": AdvancedSearchCondition[] }`，条件按 `connector`（and/or）依次组合、`negated` 取反：
+
+| 条件 type | 值 | 说明 |
+|-----------|-----|------|
+| `keyword` | value | 标题+正文 ILIKE |
+| `person` | value | 创建人 ILIKE |
+| `tag` | value | 标签精确匹配 |
+| `time` | start/end | 更新时间范围（ISO 日期，可只填一端，结束日含当天） |
+| `category` | value | 目录子树匹配（前端目录筛选用） |
+
+**响应:** `{ total, items: ArticleListItem[] }`（分页参数 skip/limit 同列表接口）。
+
+#### GET /api/articles/count / GET /api/categories/article-counts
+
+- `/count`：文章总数（分页用），过滤条件与列表接口一致
+- `/article-counts`：每个目录的递归文章数（含所有子目录），返回 `{category_id: count}`
 
 #### POST /api/qa/ask — 智能问答 (RAG 管道)
 
@@ -673,10 +710,10 @@ src/
 ```
 <BrowserRouter>
   <ToastProvider>          ← Toast 通知上下文
-    <AppProvider>          ← 全局 UI 状态 (侧边栏/编辑器/确认框/文章版本号)
+    <AppProvider>          ← 全局 UI 状态 (侧边栏/编辑器/确认框/高级搜索/拖拽/问答面板开关)
       <ReadingProgress />  ← 文章阅读进度条 (全局)
       <Routes>
-        <Route element={<Layout />}>   ← TopBar + Sidebar + <Outlet/>
+        <Route element={<Layout />}>   ← TopBar + Sidebar + <KeepAliveOutlet/>
           <Route path="/" element={<Hero />} />
           <Route path="/articles" element={<ArticleList />} />
           <Route path="/articles/:id" element={<ArticleDetail />} />
@@ -692,6 +729,10 @@ src/
   </ToastProvider>
 </BrowserRouter>
 ```
+
+**窗口保活（KeepAliveOutlet，v2.8）**：`Layout` 的主区出口由 `<Outlet/>` 替换为 `<KeepAliveOutlet/>`——首页/文章列表/文章详情/智能问答四个窗口首次渲染后**保持挂载**（`display:none` 隐藏），隐藏期间用冻结的路由上下文快照（`UNSAFE_LocationContext` / `UNSAFE_NavigationContext` / `UNSAFE_RouteContext`）包裹，URL 变化不影响隐藏窗口内部状态；重新激活时恢复实时上下文且元素引用不变（React 直接跳过重渲染）。侧边栏同样保活（`FrozenRouter` 冻结）。窗口切换（智能问答 ⇄ 文章）**不卸载、数据不清理**——筛选、分页、选中、问答输入等原样保留。
+
+**智能问答面板（v2.8）**：🤖 按钮切换 `qaOpen` 开关——开启时主区变为并排布局 `[活动窗口][问答面板 460px]`（`KeepAliveOutlet` 的 split 模式），问答面板与文章/实体窗口同时可见；窗口容器在两种模式保持同一树位置（仅切换 className），开关面板不触发其他窗口重挂。
 
 ### 6.3 Hooks 设计模式
 
@@ -752,8 +793,10 @@ function qs(params: Record<string, string>): string
 
 // 导出对象
 export const api = {
-  getArticles, getArticle, createArticle, updateArticle, deleteArticle,
-  getCategories, createCategory,
+  getArticles, getArticlesCount, getSearchFacets, advancedSearchArticles,
+  getArticle, createArticle, updateArticle, deleteArticle, moveArticle,
+  getCategories, createCategory, updateCategory, deleteCategory, moveCategory,
+  getCategoryArticleCounts,
   getTags, addTag, renameTag, removeTag, getTagsByArticle,
   addEntity, updateEntity, renameEntity, removeEntity,
   getEntityInfos, createEntityInfo, updateEntityInfo, deleteEntityInfo,
@@ -773,35 +816,47 @@ export const api = {
 | 路径 | 组件 | 说明 |
 |------|------|------|
 | `/` | `Hero` | 首页: 搜索入口 + 统计概览 |
-| `/articles` | `ArticleList` | 文章列表: 卡片 + 实体面板 |
+| `/articles` | `ArticleList` | 文章列表: 目录卡片 + 文章卡片 + 实体面板（分页/排序/筛选） |
 | `/articles?view=:id` | `ArticleList` → `ArticleDetailInline` | 文章列表 + 内联详情 + 实体面板 |
+| `/articles?search=…` | `ArticleList`（搜索结果视图） | 搜索结果根目录视图 / 目录内筛选，侧边栏同步搜索树 |
+| `/articles?adv=1` | `ArticleList`（高级搜索结果） | 高级搜索条件存于 AppProvider 上下文，处理与搜索一致 |
 | `/articles/:id` | `ArticleDetail` | 文章详情独立页 (从知识图谱导航而来) |
-| `/qa` | `QA` | 智能问答: 多会话 + 聊天 UI |
+| `/qa` | `QA` | 智能问答窗口（最右侧面板样式）；`qaOpen` 开关时与文章窗口并排 |
 
 ### 7.2 组件通信
 
 ```
 AppProvider (Context)
-  ├── sidebarOpen, toggleSidebar
+  ├── sidebarOpen, toggleSidebar, sidebarCollapsed ← 侧边栏抽屉/桌面缩进
   ├── editorState, openEditor, closeEditor
   ├── confirmState, requestConfirm
   ├── uploaderOpen, openUploader, closeUploader
-  ├── articleVersion, notifyArticleSaved  ← 全局刷新信号
-  └── searchInputRef                       ← 跨组件聚焦搜索框
+  ├── articleVersion / categoriesVersion         ← 全局刷新信号
+  ├── advancedSearch / advCategoryId             ← 高级搜索条件（列表 adv 模式取数）
+  ├── qaOpen                                     ← 智能问答面板开关（并排显示）
+  ├── dragRef / dropTarget / startDrag / ...     ← 跨组件拖拽（侧边栏 ⇄ 文章列表）
+  └── searchInputRef                             ← 跨组件聚焦搜索框
 
 ArticleList
-  ├── 读取 URL params: category, search, tag, view
+  ├── 读取 URL params: category, search, tag, view, adv
+  ├── 目录卡片 (DirCard)：创建人/创建时间 + 修改/删除 + 拖拽（权限同侧边栏）
   ├── 传递给 EntityPanel: entities (LLM实体), selectedArticleIds, articles
   └── 接收 EntityPanel 回调: onGraphNodeClick (节点点击联动)
 
+Sidebar（与文章列表共享拖拽状态）
+  ├── 浏览模式目录树（分批加载、手风琴展开、目录/文章拖拽）
+  ├── 搜索/高级搜索模式结果树（目录可收缩、全部按钮承载全部结果+数量）
+  └── 全部按钮：搜索时保留 ?search= / ?adv=1
+
 EntityPanel
-  ├── 双模式: list (LLM实体只读列表+附加信息) / graph (D3 知识图谱)
+  ├── 双模式: list (LLM实体列表+附加信息，动态加载每批 20 条) / graph (D3 知识图谱)
   ├── 从 ArticleList 接收选中的文章 ID
   ├── 图谱节点点击 → 回传 ArticleList 筛选文章
   └── 实体点击 → 展开附加信息面板 (CRUD)
 
 QA
-  └── 独立管理对话状态 (localStorage)
+  ├── 会话下拉框切换与管理（localStorage 持久化）
+  └── 多行输入框（默认两行自动拉伸）+ 框内发送图标
 ```
 
 ---
@@ -1113,23 +1168,23 @@ LLM 提取实体/关系 ──► Neo4j（实体节点/提及边/关系边）
 
 | 断点 | 布局 | 侧边栏 | 文章列表 | 实体面板 |
 |------|------|--------|---------|---------|
-| > 1100px | 三栏 | 240px 固定 | flex: 3 (主体) | 320px 固定, sticky |
-| ≤ 1100px | 单栏堆叠 | 覆盖层 | 50% 高度, 可滚动 | 50% 高度, 可滚动 |
+| > 1100px | 多栏 | 可缩进（☰ 切换） | flex: 3 (主体) | 320px 固定, sticky |
+| ≤ 1100px | 单栏堆叠 | 覆盖层抽屉 | 按内容高度 | 按内容高度 |
 
-移动端核心 CSS:
+移动端核心 CSS（v2.8 起按内容高度，页面整体滚动）:
 ```css
 @media (max-width: 1100px) {
   .layout {
     flex-direction: column;
-    height: 100%;
+    height: auto;      /* 按内容高度 */
     gap: 0;
   }
-  .mainCol { flex: 1 1 0%; min-height: 0; overflow-y: auto; }
-  .panel   { flex: 1 1 0%; min-height: 0; overflow-y: auto; }
+  .mainCol { flex: none; min-height: 0; overflow-y: visible; }
+  .panel   { flex: none; min-height: 0; overflow-y: visible; }
 }
 ```
 
-两个区域通过 `flex: 1 1 0%` 等分可用高度。
+桌面端侧边栏可缩进（`sidebarCollapsed` 状态 + ☰ 按钮，主区自动扩展）；移动端侧边栏为覆盖层抽屉，缩进状态不生效。
 
 ### 9.7 手动重新解析体系（v1.4+）
 
@@ -1162,7 +1217,7 @@ LLM 提取实体/关系 ──► Neo4j（实体节点/提及边/关系边）
 | 评论 | created_by | 仅评论人 | 评论人或文章创建人 | 评论人或文章创建人 |
 | 实体 | entities JSON 中的 created_by | 实体创建人或文章创建人 | 同左 | — |
 | 实体附加信息 | EntityInfo.created_by | 仅创建人 | 仅创建人 | — |
-| 分类 | created_by | 仅创建人 | 仅创建人 | — |
+| 目录 | created_by | 仅创建人 | 仅创建人 | — |
 
 - 前端通过身份证号比对隐藏非创建人的编辑/删除按钮
 - 后端 403 兜底拦截，错误详情区分权限错误与认证错误（认证 403 触发登录跳转，权限 403 仅弹 toast）
@@ -1205,6 +1260,47 @@ LLM 提取实体/关系 ──► Neo4j（实体节点/提及边/关系边）
 | **SVG / 媒体响应头** | `main.py` `serve_media` | 所有响应加 `X-Content-Type-Options: nosniff`；非媒体类型（html/txt）强制 `Content-Disposition: attachment`；SVG 保持 inline 但加 `CSP: sandbox`（直开导航时禁脚本） |
 | **媒体替换式写入** | `upload.py`/`articles.py`/`comments.py`（见 §9.3、§9.7） | reprocess 不再追加堆积旧描述/转录段 |
 
+### 9.11 高级搜索（v2.7）
+
+**入口**：顶部搜索框内 ⚙️ 开关（与搜索框融合），面板从搜索框下方弹出。条件行 = 与/或连接符 + 非复选框 + 类型（关键词/人员/时间范围）+ 值输入，可任意添加/删除。提交后进入 `/articles?adv=1` 结果视图。
+
+- **条件组合**：条件按 `connector`（and/or）依次组合，`negated` 取反；后端 `POST /api/articles/search` 构建 SQLAlchemy 表达式（`and_`/`or_`/`not_`），空条件跳过
+- **状态管理**：已提交条件存于 AppProvider 上下文（`advancedSearch`），列表 adv 模式据此取数；目录筛选（`advCategoryId`）以 `category` 条件（子树匹配）追加
+- **激活态**：条件设置后 ⚙️ 图标醒目标识（accent 实底）、普通搜索输入框禁用、清除按钮（✕）重置高级+普通搜索
+- **与搜索结果处理一致**：高级搜索结果的展示处理与关键词搜索完全一致——结果根目录视图（有匹配的顶级目录卡片）、目录内筛选（目录卡片 + 分页结果）、侧边栏结果树（目录可收缩）、面包屑 全部/目录链/条件摘要、详情页链接保留 `?adv=1`
+
+### 9.12 目录层级与拖拽移动
+
+**数据模型**：目录 `parent_id` 自引用（子目录）；文章 `parent_id` 自引用（同目录内挂载）。写路径应用层校验：目录/文章防环（沿祖先链上溯）、文章父子同目录约束、删除保护（有子目录/子文章时 409）。
+
+**移动接口**：`POST /api/categories/{id}/move`（body: parent_id，空串=顶级）、`POST /api/articles/{id}/move`（body: category_id / parent_id）——拖拽移动专用，创建人 only。
+
+**跨组件拖拽（v2.8）**：拖拽源与悬停目标状态提升至 AppProvider（`dragRef`/`dropTarget`），侧边栏与文章列表共享：
+
+- 侧边栏目录/文章 → 文章列表目录卡片（移入目录）、文章卡片（挂为子文章）
+- 文章列表目录卡片/文章卡片 → 侧边栏目录、文章、「全部」按钮（移到顶级）
+- 目录拖到文章上为不可用状态（红色虚线 + dropEffect none）；拖拽源与目标均有创建人权限校验（无创建人旧数据视为可移动）
+- 放置后 `notifyArticleSaved` + `notifyCategoriesChanged` 刷新列表、侧边栏与目录计数
+
+**文章列表目录卡片（DirCard）**：各视图（根目录/浏览/搜索/高级搜索）统一卡片样式——📁 + 名称 + 创建人/创建时间（靠右）+ 递归文章数 + 箭头；✎ 修改（内联表单：名称 + 8 色圆点）/ ✕ 删除（删除保护：有子目录或文章时前端拦截提示、后端 409 兜底），权限控制与侧边栏一致（创建人证件号比对）。
+
+### 9.13 文章列表分页与排序
+
+**分页**：每页 10 篇（`PAGE_SIZE`，与侧边栏/位置选择器分批一致），`/api/articles/count` 提供总数；切换目录/搜索/标签/高级搜索回到第 1 页，总页数减少时自动修正；翻页后平滑回列表顶部；页码窗口前后各 2 个。
+
+**组合排序（v2.8）**：头部「⇅ 排序」面板（portal 固定定位，左对齐按钮）——条件行 = 时间 / 标题·目录名 / 创建人 × ↓倒序/↑正序，多条件按优先级多键比较（标题/创建人按中文拼音序，空值排后）。**目录与文章分别排序**：目录卡片按条件在目录间排序、始终置于文章列表上方；文章按条件在文章间排序（层级缩进保留）。排序面板开关不影响其他窗口（窗口保活）。
+
+### 9.14 Prompt 可配置（v2.7）
+
+- `backend/app/prompts.py`：内置默认 `_DEFAULTS` 字典（11 个提示词）；启动时读取 `prompts/` 目录下同名 `.txt` 文件覆盖（如 `GENERATE_TITLE.txt`），文件缺失/为空回退内置默认，模块级导出名不变
+- 配置文件：仓库根 `prompts/`（每个提示词一个 txt，原始文本无需转义），路径可用 `PROMPTS_DIR` 环境变量覆盖；修改后重启后端生效
+- Docker：`./prompts:/app/prompts:ro` 挂载 + Dockerfile `ENV PROMPTS_DIR=/app/prompts`；修改本机 txt 后 `docker compose restart my-wiki` 生效
+- 模板占位符沿用 Python `.format()` 风格（`{context}`/`{text}` 等），字面花括号写双括号
+
+### 9.15 实体列表动态加载
+
+实体面板列表模式每批展示 **20 条**（`ENTITY_BATCH`），底部「加载更多（已显示 N / 总数 条）」按钮逐批追加；实体数据或筛选词变化时回到第一批。
+
 ---
 
 ## 10. 状态管理
@@ -1232,13 +1328,16 @@ LLM 提取实体/关系 ──► Neo4j（实体节点/提及边/关系边）
 
 ```typescript
 interface AppContextValue {
-  // 侧边栏
+  // 侧边栏（移动端抽屉 / 桌面端缩进）
   sidebarOpen: boolean;
   toggleSidebar: () => void;
+  closeSidebar: () => void;
+  sidebarCollapsed: boolean;          // 桌面端缩进（主区扩展）
+  toggleSidebarCollapsed: () => void;
 
   // 编辑器
-  editorState: { isOpen: boolean; articleId: string | null };
-  openEditor: (articleId: string | null) => void;
+  editorState: { isOpen: boolean; articleId: string | null; parentId?; categoryId? };
+  openEditor: (articleId: string | null, preset?) => void;
   closeEditor: () => void;
 
   // 确认框
@@ -1247,12 +1346,32 @@ interface AppContextValue {
 
   // 上传器
   uploaderOpen: boolean;
-  openUploader: () => void;
+  openUploader: (preset?) => void;
   closeUploader: () => void;
 
   // 刷新信号
   articleVersion: number;
   notifyArticleSaved: () => void;
+  categoriesVersion: number;
+  notifyCategoriesChanged: () => void;
+
+  // 智能问答面板（与文章/实体窗口并排）
+  qaOpen: boolean;
+  setQaOpen: (v: boolean) => void;
+
+  // 高级搜索（条件由顶部搜索框面板提交；列表 adv 模式取数）
+  advancedSearch: AdvancedSearchCondition[] | null;
+  setAdvancedSearch: (c: AdvancedSearchCondition[] | null) => void;
+  advCategoryId: string | null;       // 结果中的目录筛选
+  setAdvCategoryId: (id: string | null) => void;
+
+  // 跨组件拖拽（侧边栏 ⇄ 文章列表）
+  dragRef: React.MutableRefObject<{ type: 'cat' | 'article'; id: string } | null>;
+  dropTarget: string | null;
+  setDropTarget: (v: string | null) => void;
+  startDrag: (e, type, id, allowed) => void;
+  dragOverTarget: (e, key) => void;
+  clearDropTarget: (key) => void;
 
   // 搜索框引用 (用于键盘快捷键)
   searchInputRef: React.RefObject<HTMLInputElement>;
@@ -1460,6 +1579,8 @@ python -m app.main                      # 开发模式 (8000 HTTPS + CERT_OPTION
 python run.py                           # 生产模式 (双端口: 8000/8444)
 python rebuild_chunks.py                # 一次性全量重建分块（改 MAX_CHUNK_CHARS 后执行）
                                         #   : 按新规则重切 → 回填实体标签/附加信息行 → 重嵌入 → Qdrant 同步
+python dist/upgrade_db.py               # 数据库升级脚本（补列/建索引/清旧列，幂等；仓库根目录下执行）
+                                        #   Docker: docker compose exec my-wiki python dist/upgrade_db.py
 ```
 
 ### 13.4 添加新功能
@@ -1494,6 +1615,13 @@ with engine.connect() as conn:
 ```
 
 添加新列时在此处追加类似的 try/except 块。
+
+**独立升级脚本（v2.8）**：`dist/upgrade_db.py`（发布物目录）——显式升级存量数据库，幂等可重复执行：
+
+- 补列：与 models.py 对齐的全部懒迁移列（articles.parent_id / processing / created_by / updated_by、categories.parent_id / created_by / created_at / updated_at、comments.attachments、entity_infos.created_by）
+- 建索引：`ix_articles_parent_id`、`ix_categories_parent_id`（补列后缺失，init_db 懒迁移不建索引）
+- 清旧列：`article_chunks.embedding` / `entities`（SQLite ≥ 3.35）
+- 每步先检查再变更、输出明细；末尾 ANALYZE。路径默认取 `DATABASE_URL`，可用 `--db` 指定
 
 **v2.3 特例——DROP COLUMN 不在 init_db 执行**：`articles.entities` / `comments.entities` 两列由启动懒迁移 `neo4j_store.migrate_and_drop_columns()` 在数据加载进 Neo4j **之后**才执行 `ALTER TABLE … DROP COLUMN`（SQLite ≥ 3.35）。不能放进 `init_db()`——否则列会先于 Neo4j 加载被删除，历史实体数据丢失。
 
@@ -1555,6 +1683,7 @@ my-wiki ── NEO4J_URI ──► neo4j:7687   (实体/关系存储)
 - **Qdrant 连接**：统一在 `.env` 中配置 `QDRANT_URL`——Docker 部署用 `http://qdrant:6333`（compose 网络按服务名解析），本地开发用 `http://localhost:6333`；`my-wiki` 经 `depends_on: qdrant (service_healthy)` 保证 Qdrant 先就绪
 - **Neo4j 连接**：统一在 `.env` 中配置 `NEO4J_URI`——Docker 部署用 `bolt://neo4j:7687`，本地开发用 `bolt://localhost:7687`；`my-wiki` 经 `depends_on: neo4j (service_healthy)` 保证 Neo4j 先就绪。**密码注意**：`NEO4J_AUTH=neo4j/${NEO4J_PASSWORD}` 仅在 `./data/neo4j` 数据卷**首次初始化**时生效，改密需重置数据卷或用 `neo4j-admin set-initial-password`
 - **环境变量**：模型参数（KEY/BASE/MODEL）、超时、开关、白名单**统一在仓库根目录 `.env`**（Docker 挂载为 `/app/.env`，本地开发由 `config.py` 显式加载），docker-compose 不做覆盖
+- **Prompt 配置**：`./prompts:/app/prompts:ro` 只读挂载（Dockerfile `ENV PROMPTS_DIR=/app/prompts`），修改本机 `prompts/*.txt` 后 `docker compose restart my-wiki` 生效；目录缺失时回退内置默认
 - **证书**：`./certs:/certs:ro` 只读挂载（镜像不含证书，启动必须提供）；SSL 路径使用容器内绝对路径（`/certs/server.crt` 等）；nginx 容器挂载同一目录（`/etc/nginx/certs`）
 - 修改 `.env` 后执行 `docker compose restart` 即生效（`.env` 挂载 + `load_dotenv()` 在进程启动时读取）；**修改 `docker-compose.yml` 则需 `docker compose up -d` 重建容器**（容器创建时 bake 的环境变量不会随 restart 刷新，且 `load_dotenv` 不覆盖已存在的环境变量）
 - 环境变量优先级：容器环境（Dockerfile `ENV`）> `/app/.env` 文件（`load_dotenv` 不覆盖已存在的环境变量）
@@ -1683,11 +1812,15 @@ pydantic-settings==2.7.0
 GET    /api/health                         健康检查
 GET    /api/auth/status                    证书认证状态 + 用户信息
 GET    /api/auth/login                     登录跳转 (生产模式)
-GET    /api/articles?category_id=&search=&tag=&skip=&limit=   文章列表
+GET    /api/articles?category_id=&search=&tag=&root_only=&skip=&limit=   文章列表
+GET    /api/articles/count                 文章计数（分页总数）
+GET    /api/articles/facets?search=&category_id=   搜索结果目录分布
+POST   /api/articles/search                高级搜索（与或非组合条件，分页）
 GET    /api/articles/:id                   文章详情
 POST   /api/articles                       创建文章
 PUT    /api/articles/:id                   更新文章
 DELETE /api/articles/:id                   删除文章
+POST   /api/articles/:id/move              拖拽移动文章（换目录/换父文章）
 GET    /api/articles/:id/download          下载附件
 POST   /api/articles/:id/reprocess         重新解析全部附件
 POST   /api/articles/:id/reprocess/:name   重新解析单个附件
@@ -1698,10 +1831,12 @@ PUT    /api/articles/:id/comments/:cid     更新评论
 DELETE /api/articles/:id/comments/:cid     删除评论
 POST   /api/articles/:id/comments/:cid/reprocess        重新解析评论内容
 POST   /api/articles/:id/comments/:cid/reprocess/:name  重新解析评论单个附件
-GET    /api/categories                     分类列表
-POST   /api/categories                     创建分类
-PUT    /api/categories/:id                 更新分类
-DELETE /api/categories/:id                 删除分类
+GET    /api/categories                     目录列表
+GET    /api/categories/article-counts      每个目录的递归文章数
+POST   /api/categories                     创建目录
+PUT    /api/categories/:id                 更新目录
+POST   /api/categories/:id/move            拖拽移动目录（换上级目录）
+DELETE /api/categories/:id                 删除目录
 GET    /api/tags                           标签列表
 POST   /api/tags                           添加标签
 PUT    /api/tags/rename                    重命名标签
@@ -1726,4 +1861,4 @@ GET    /api/media/:filename                媒体文件直链
 
 ---
 
-> 📝 本文档由 Claude Code 基于项目源码自动生成，最后更新于 2026-09-02。
+> 📝 本文档由 Claude Code 基于项目源码自动生成，最后更新于 2026-11-03。

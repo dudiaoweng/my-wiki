@@ -358,6 +358,9 @@ async def sync_qdrant() -> None:
                 points = []
                 restart = False
                 for ch in db.query(ArticleChunk).filter(ArticleChunk.id.in_(batch)).all():
+                    if not (ch.chunk_text or "").strip():
+                        # 空分块无法嵌入（API 对空 prompt 返回 400），直接跳过
+                        continue
                     try:
                         vec = await get_embedding(ch.chunk_text)
                     except Exception:

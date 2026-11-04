@@ -1,4 +1,5 @@
 import { Fragment, useState, useEffect, useMemo, useRef, useDeferredValue, useCallback } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import type { CSSProperties } from 'react';
 import { Link } from 'react-router-dom';
 import Markdown from 'react-markdown';
@@ -17,6 +18,7 @@ import { useArticleSearch } from '../hooks/useArticleSearch';
 import { EntityOccurrenceBar } from './EntityOccurrenceBar';
 import { SearchNavBar } from './SearchNavBar';
 import { ChildTree, countDescendants } from './ChildTree';
+import { tagFilterHref } from './ArticleCard';
 import { useCategories } from '../hooks/useCategories';
 import type { Article } from '../types/article';
 import styles from './ArticleDetail.module.css';
@@ -50,10 +52,6 @@ interface ArticleDetailViewProps {
   selectedEntity?: string | null;
   /** Called when user selects or clears an entity. */
   onEntitySelect?: (name: string | null) => void;
-  /** Selected tag for content navigation highlight（与实体同机制，选中即高亮导航）. */
-  selectedTag?: string | null;
-  /** Called when user clicks a tag（选中/取消，触发内容导航）. */
-  onTagClick?: (tag: string) => void;
   /** Show edit/delete buttons in top bar instead of at page bottom. */
   actionsInTopBar?: boolean;
   /** 智能返回：优先父文章，其次所在目录；不传则退回 onBack */
@@ -62,9 +60,9 @@ interface ArticleDetailViewProps {
 
 export function ArticleDetailView({
   articleId, onBack, prevArticleId, nextArticleId, onNavigate,
-  selectedEntity, onEntitySelect, selectedTag, onTagClick, actionsInTopBar, onReturn,
+  selectedEntity, onEntitySelect, actionsInTopBar, onReturn,
 }: ArticleDetailViewProps) {
-  const { openEditor, requestConfirm, notifyArticleSaved, articleVersion, userIdNumber } = useApp();
+  const { openEditor, openUploader, requestConfirm, notifyArticleSaved, articleVersion, userIdNumber } = useApp();
   const { showToast } = useToast();
   const [article, setArticle] = useState<Article | null>(null);
   const [loading, setLoading] = useState(true);
@@ -128,10 +126,10 @@ export function ArticleDetailView({
   const MAX_PREVIEW_CHARS = 3000;
   const isLong = cleanContent.length > MAX_PREVIEW_CHARS;
 
-  // 内容导航高亮词：标签优先（选中标签清空实体，反之亦然，由父级保证）
-  const highlightTerm = selectedTag ?? selectedEntity ?? null;
-  const highlightClass = selectedTag ? 'tag-highlight' : 'entity-highlight';
-  const highlightActiveClass = selectedTag ? 'tag-highlight-active' : 'entity-highlight-active';
+  // 内容导航高亮词（实体；标签点击已改为按标签筛选文章列表）
+  const highlightTerm = selectedEntity ?? null;
+  const highlightClass = 'entity-highlight';
+  const highlightActiveClass = 'entity-highlight-active';
 
   const [searchQuery, setSearchQuery] = useState('');
   const deferredSearchQuery = useDeferredValue(searchQuery);
@@ -202,6 +200,19 @@ export function ArticleDetailView({
   const effectiveTab = tabSelection?.articleId === articleId ? tabSelection.tab : 'comments';
 
   // 文章所属目录的祖先链（子目录嵌套场景，含自身，根→叶子）
+  const [detailSearchParams] = useSearchParams();
+  const activeSearch = detailSearchParams.get('search') ?? '';
+  // 面包屑与子文章链接保留当前筛选状态（普通搜索 ?search= / 标签 ?tag= / 高级搜索 ?adv=1），
+  // 高级搜索条件存于上下文，URL 仅需保留 adv 标记
+  const keepFilter = (path: string) => {
+    const usp = new URLSearchParams();
+    if (activeSearch) usp.set('search', activeSearch);
+    if (detailSearchParams.get('tag')) usp.set('tag', detailSearchParams.get('tag')!);
+    if (detailSearchParams.get('adv')) usp.set('adv', '1');
+    const s = usp.toString();
+    return s ? `${path}${path.includes('?') ? '&' : '?'}${s}` : path;
+  };
+
   const { categories } = useCategories();
   const categoryChain = useMemo(() => {
     if (!article?.category) return [];
@@ -267,12 +278,12 @@ export function ArticleDetailView({
     <div className={styles.detail}>
       {/* 面包屑路径：全部 / 目录（含上级目录链）/ 文章 / 子文章 / … / 当前文章 */}
       <nav className={styles.breadcrumb} aria-label="面包屑导航">
-        <Link to="/articles">全部</Link>
-        <span className={styles.breadcrumbSep}>/</span>
+        {/* 🏠：筛选时为基于搜索/标签结果的根目录（保留 ?search= / ?tag=），浏览时为根目录 */}
+        <Link to={keepFilter('/articles')}>🏠</Link>
         {categoryChain.map((c) => (
           <Fragment key={c.id}>
             <Link
-              to={`/articles?category=${c.id}`}
+              to={keepFilter(`/articles?category=${c.id}`)}
               className={styles.crumbCategory}
               style={{ '--crumb-cat': c.color } as CSSProperties}
               title={`查看「${c.name}」目录下的所有文章`}
@@ -284,7 +295,7 @@ export function ArticleDetailView({
         ))}
         {article.ancestors.map((anc) => (
           <Fragment key={anc.id}>
-            <Link to={`/articles?view=${anc.id}`} title={anc.title}>{anc.title}</Link>
+            <Link to={keepFilter(`/articles?view=${anc.id}`)} title={anc.title}>{anc.title}</Link>
             <span className={styles.breadcrumbSep}>/</span>
           </Fragment>
         ))}
@@ -356,13 +367,6 @@ export function ArticleDetailView({
           {isSearchActive && !isSearchPending && searchCount === 0 && (
             <span className={styles.searchNoResults}>无匹配</span>
           )}
-          <button
-            className={styles.btn}
-            onClick={() => openEditor(null, { parentId: article.id, categoryId: article.category_id })}
-            title="在该文章下新建子文章"
-          >
-            ＋ 新建子文章
-          </button>
           {isCreator && (
             <div className={styles.actions}>
               <button
@@ -403,16 +407,22 @@ export function ArticleDetailView({
 
       {article.tags.length > 0 && (
         <div className={styles.tags}>
-          {article.tags.map((t) => (
-            onTagClick ? (
-              <button key={t}
-                className={`${styles.tag}${t === selectedTag ? ` ${styles.tagActive}` : ''}`}
-                onClick={() => onTagClick(t)}
-                title={t === selectedTag ? '取消内容导航' : `内容导航：定位文中所有「${t}」（再点取消）`}>{t}</button>
-            ) : (
-              <span key={t} className={styles.tag}>{t}</span>
-            )
-          ))}
+          {article.tags.map((t) => {
+            const activeTags = detailSearchParams.getAll('tag');
+            const isActive = activeTags.includes(t);
+            return (
+              <Link
+                key={t}
+                to={tagFilterHref(activeTags, t)}
+                className={styles.tag}
+                title={isActive
+                  ? `取消标签「${t}」筛选`
+                  : `累加筛选标签为「${t}」的文章`}
+              >
+                {t}
+              </Link>
+            );
+          })}
         </div>
       )}
 
@@ -494,9 +504,28 @@ export function ArticleDetailView({
 
       <div role="tabpanel" className={effectiveTab === 'children' ? undefined : styles.tabHidden}>
         <div className={styles.childTreeSection}>
+          {/* 子文章页操作：新建文章 / 上传文件，均挂载到当前文章下 */}
+          <div className={styles.childActions}>
+            <button
+              type="button"
+              className={`${styles.btn} ${styles.btnPrimary}`}
+              onClick={() => openEditor(null, { parentId: article.id, categoryId: article.category_id })}
+              title="新建文章并挂载到当前文章下"
+            >
+              ✏️ 新建文章
+            </button>
+            <button
+              type="button"
+              className={styles.btn}
+              onClick={() => openUploader({ parentId: article.id, categoryId: article.category_id })}
+              title="上传文件并挂载到当前文章下"
+            >
+              📤 上传文件
+            </button>
+          </div>
           <ChildTree
             nodes={article.children_tree}
-            getHref={(id) => `/articles?view=${id}`}
+            getHref={(id) => keepFilter(`/articles?view=${id}`)}
           />
         </div>
       </div>
@@ -504,17 +533,12 @@ export function ArticleDetailView({
       {highlightTerm && occurrenceCount > 0 && (
         <EntityOccurrenceBar
           entityName={highlightTerm}
-          entityType={selectedTag
-            ? undefined
-            : article.entities?.entities?.find((e) => e.name === highlightTerm)?.type}
+          entityType={article.entities?.entities?.find((e) => e.name === highlightTerm)?.type}
           totalCount={occurrenceCount}
           activeIndex={activeOccurrenceIndex}
           occurrences={occurrences}
           onNavigate={scrollToOccurrence}
-          onClose={() => {
-            if (selectedTag) onTagClick?.(selectedTag);
-            else onEntitySelect?.(null);
-          }}
+          onClose={() => onEntitySelect?.(null)}
         />
       )}
     </div>

@@ -40,6 +40,8 @@ RUN pip install --no-cache-dir -r requirements.txt \
 # 后端代码
 COPY backend/app ./app
 COPY backend/run.py ./
+# 数据库升级脚本（发布环境执行：docker compose exec my-wiki python dist/upgrade_db.py）
+COPY dist/upgrade_db.py ./dist/upgrade_db.py
 
 # 前端构建产物
 COPY --from=frontend-build /build/backend/static ./static
@@ -54,6 +56,7 @@ VOLUME ["/app/data"]
 # 数据统一在 /app/data（数据库 + 上传文件，compose 挂载 ./data:/app/data）
 ENV DATABASE_URL=sqlite:////app/data/knowledge_base.db \
     UPLOAD_DIR=/app/data/uploads \
+    PROMPTS_DIR=/app/prompts \
     HOST=0.0.0.0 \
     SSL_KEYFILE=/certs/server.key \
     SSL_CERTFILE=/certs/server.crt \

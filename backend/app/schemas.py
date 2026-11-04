@@ -1,6 +1,6 @@
 import json
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Literal
 from pydantic import BaseModel, Field, field_validator, field_serializer
 
 
@@ -28,6 +28,32 @@ class CategoryMove(BaseModel):
     """目录移动：parent_id 空串 = 移到顶级，否则为目标上级目录 ID。"""
 
     parent_id: str = Field(default="")
+
+
+# ─── 高级搜索 ────────────────────────────────────────
+
+class AdvancedSearchCondition(BaseModel):
+    """高级搜索条件：类型 + 值 + 与上一条的连接关系（与/或）+ 非（取反）。
+
+    - keyword：关键词（标题+正文模糊匹配，value）
+    - person：人员（创建人模糊匹配，value）
+    - tag：标签（精确匹配，value）
+    - time：时间范围（按更新时间，start/end 为 ISO 日期，可只填一端）
+    - category：目录（匹配整个目录子树，value=目录 ID；前端目录筛选用）
+    """
+
+    type: Literal["keyword", "person", "tag", "time", "category"] = "keyword"
+    value: str = ""
+    start: Optional[str] = None
+    end: Optional[str] = None
+    connector: Literal["and", "or"] = "and"
+    negated: bool = False
+
+
+class AdvancedSearchRequest(BaseModel):
+    """高级搜索请求：条件列表按 connector 依次组合（首条的 connector 忽略）。"""
+
+    conditions: list[AdvancedSearchCondition] = Field(default_factory=list)
 
 
 class ArticleMove(BaseModel):
@@ -275,6 +301,13 @@ class CommentResponse(BaseModel):
 class ArticleListItem(ArticleResponse):
     comment_count: int = 0
     latest_comments: list[CommentSummary] = []
+
+
+class AdvancedSearchResponse(BaseModel):
+    """高级搜索响应：总数 + 分页列表项。"""
+
+    total: int
+    items: list[ArticleListItem] = Field(default_factory=list)
 
 
 # ─── Stats ──────────────────────────────────────────

@@ -16,7 +16,12 @@ const CATEGORY_COLORS = [
 ];
 
 export function Sidebar() {
-  const { sidebarOpen, closeSidebar, openEditor, openUploader, articleVersion, requestConfirm, userIdNumber, notifyCategoriesChanged, notifyArticleSaved } = useApp();
+  const {
+    sidebarOpen, closeSidebar, openEditor, openUploader, articleVersion, requestConfirm,
+    userIdNumber, notifyCategoriesChanged, notifyArticleSaved,
+    advancedSearch, advCategoryId, setAdvCategoryId,
+    dragRef, dropTarget, setDropTarget, startDrag, dragOverTarget, clearDropTarget,
+  } = useApp();
   const { categories, createCategory, updateCategory, deleteCategory } = useCategories();
   const { articles, refetch } = useArticles();
   const { showToast } = useToast();
@@ -55,10 +60,8 @@ export function Sidebar() {
   const [expandedCats, setExpandedCats] = useState<Set<string>>(new Set());
   const [expandedArticleIds, setExpandedArticleIds] = useState<Set<string>>(new Set());
 
-  // ── 拖拽移动（自己的目录/文章可拖动，拖到目标目录/文章/全部按钮上变更位置）──
-  const dragRef = useRef<{ type: 'cat' | 'article'; id: string } | null>(null);
-  const [dropTarget, setDropTarget] = useState<string | null>(null);
-
+  // ── 拖拽移动（与文章列表共享状态：自己的目录/文章可拖动，
+  //    拖到目标目录/文章/全部按钮上变更位置）──
   // 文章创建人校验（无创建人的旧数据视为可移动）
   const canMoveArticle = (a: Article) => {
     if (!userIdNumber) return false;
@@ -69,27 +72,6 @@ export function Sidebar() {
   const finishMove = () => {
     notifyArticleSaved();       // 触发已展开节点的重载
     notifyCategoriesChanged();  // 目录结构刷新
-  };
-
-  const startDrag = (e: DragEvent<HTMLElement>, type: 'cat' | 'article', id: string, allowed: boolean) => {
-    if (!allowed) {
-      e.preventDefault();
-      return;
-    }
-    dragRef.current = { type, id };
-    e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('text/plain', id);
-  };
-
-  const dragOverTarget = (e: DragEvent<HTMLElement>, key: string) => {
-    e.preventDefault();
-    e.stopPropagation(); // 防止冒泡到外层目录行覆盖高亮目标
-    e.dataTransfer.dropEffect = 'move';
-    if (dropTarget !== key) setDropTarget(key);
-  };
-
-  const clearDropTarget = (key: string) => {
-    setDropTarget((t) => (t === key ? null : t));
   };
 
   const handleDropOnCat = async (e: DragEvent<HTMLElement>, catId: string) => {
@@ -230,6 +212,176 @@ export function Sidebar() {
   const catFilter = catQuery.trim().toLowerCase();
   const isFiltering = catFilter !== '';
 
+  // 全局搜索状态（由顶部搜索 Enter / 列表页搜索写入 URL ?search= 驱动）
+  const listSearch = searchParams.get('search') ?? '';
+  // 标签筛选状态（点击文章标签写入 URL ?tag= 驱动）
+  // 标签累加筛选：URL 可携带多个 ?tag=A&tag=B（AND 叠加）
+  const listTags = useMemo(() => searchParams.getAll('tag'), [searchParams]);
+  const tagMode = listTags.length > 0;
+  const tagQs = useMemo(
+    () => listTags.map((t) => `tag=${encodeURIComponent(t)}`).join('&'),
+    [listTags],
+  );
+
+  // 侧边栏筛选：基于当前搜索结果的筛选（搜索模式下过滤 facets；
+  // 浏览模式下过滤目录名 + 后端标题查询），不写 URL，与顶部搜索解耦
+  const handleCatQueryChange = (value: string) => {
+    setCatQuery(value);
+  };
+
+  const searchMode = listSearch.trim() !== '';
+  // 高级搜索模式（?adv=1 + 已提交条件）：侧边栏与搜索结果处理一致，展示结果目录树
+  const advMode = searchParams.get('adv') === '1' && !!advancedSearch;
+
+  const facetHref = (catId: string | null) =>
+    `/articles?search=${encodeURIComponent(listSearch)}${catId ? `&category=${catId}` : ''}`;
+
+  // 标签筛选模式的目录链接（?tag= + category 下钻）
+  const tagHref = (catId: string) =>
+    `/articles?${tagQs}&category=${catId}`;
+
+  // 结果树目录链接：高级搜索模式条件存于上下文（非 URL），点击时设置目录筛选
+  const treeCatHref = (catId: string) => (advMode ? '/articles?adv=1' : tagMode ? tagHref(catId) : facetHref(catId));
+  const handleTreeCatClick = (catId: string) => {
+    if (advMode) setAdvCategoryId(catId);
+    closeSidebar();
+  };
+  // 结果树中的当前目录高亮（高级搜索用上下文目录，搜索用 URL category）
+  const activeCatId = advMode ? advCategoryId : activeCategoryId;
+
+  // 搜索树目录收缩状态：默认全部展开；搜索词/高级搜索条件/标签变化时重置
+  const [searchCollapsedCats, setSearchCollapsedCats] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    setSearchCollapsedCats(new Set());
+  }, [listSearch, advancedSearch, listTags]);
+  const toggleSearchCat = (catId: string) => {
+    setSearchCollapsedCats((prev) => {
+      const next = new Set(prev);
+      if (next.has(catId)) next.delete(catId); else next.add(catId);
+      return next;
+    });
+  };
+
+  // 搜索/高级搜索/标签筛选模式：目录-文章树数据（匹配文章按目录组织，上限 200 条）
+  const [searchTreeArticles, setSearchTreeArticles] = useState<Article[] | null>(null);
+  useEffect(() => {
+    if (!searchMode && !advMode && !tagMode) {
+      setSearchTreeArticles(null);
+      return;
+    }
+    let cancelled = false;
+    if (advMode && advancedSearch) {
+      api.advancedSearchArticles(advancedSearch, 0, 200)
+        .then((d) => {
+          if (cancelled) return;
+          setSearchTreeArticles(d.items);
+        })
+        .catch(() => { if (!cancelled) setSearchTreeArticles([]); });
+    } else if (tagMode) {
+      api.getArticles({ tag: listTags, limit: 200 })
+        .then((data) => { if (!cancelled) setSearchTreeArticles(data); })
+        .catch(() => { if (!cancelled) setSearchTreeArticles([]); });
+    } else {
+      api.getArticles({ search: listSearch, limit: 200 })
+        .then((data) => { if (!cancelled) setSearchTreeArticles(data); })
+        .catch(() => { if (!cancelled) setSearchTreeArticles([]); });
+    }
+    return () => { cancelled = true; };
+  }, [searchMode, advMode, tagMode, listSearch, listTags, advancedSearch]);
+
+  // 搜索树结构：按侧边栏筛选词过滤匹配文章 → 目录可见集（含祖先链）
+  const searchTree = useMemo(() => {
+    if (!searchTreeArticles) return null;
+    const matched = catFilter
+      ? searchTreeArticles.filter((a) => a.title.toLowerCase().includes(catFilter))
+      : searchTreeArticles;
+    const byCat = new Map<string, Article[]>();
+    for (const a of matched) {
+      if (!a.category_id) continue;
+      byCat.set(a.category_id, [...(byCat.get(a.category_id) ?? []), a]);
+    }
+    const visible = new Set<string>(byCat.keys());
+    const byId = new Map(categories.map((c) => [c.id, c]));
+    for (const catId of [...byCat.keys()]) {
+      let cur = byId.get(catId);
+      const seen = new Set<string>();
+      while (cur && !seen.has(cur.id)) {
+        seen.add(cur.id);
+        visible.add(cur.id);
+        cur = cur.parent_id ? byId.get(cur.parent_id) : undefined;
+      }
+    }
+    return { byCat, visible, matchedCount: matched.length };
+  }, [searchTreeArticles, catFilter, categories]);
+
+  /** 搜索模式：按目录层级递归渲染匹配文章树（默认全部展开，目录可收缩）。 */
+  const renderSearchTreeNodes = (catList: Category[], depth: number): JSX.Element => (
+    <ul className={styles.articleTree}>
+      {catList.map((cat) => {
+        const kids = (categoryChildren.get(cat.id) ?? [])
+          .filter((k) => searchTree?.visible.has(k.id) ?? false);
+        const arts = searchTree?.byCat.get(cat.id) ?? [];
+        const isCollapsed = searchCollapsedCats.has(cat.id);
+        return (
+          <li key={cat.id}>
+            <div className={styles.catRowMain} style={{ paddingLeft: depth * 14 }}>
+              <button
+                type="button"
+                className={styles.catToggle}
+                onClick={() => toggleSearchCat(cat.id)}
+                title={isCollapsed ? '展开' : '收起'}
+                aria-expanded={!isCollapsed}
+              >
+                <span className={styles.catFolderWrap}>
+                  <span className={styles.catFolderIcon}>{isCollapsed ? '📁' : '📂'}</span>
+                  <span className={styles.catFolderDot} style={{ background: cat.color }} />
+                </span>
+              </button>
+              <NavLink
+                to={treeCatHref(cat.id)}
+                className={`${styles.item} ${activeCatId === cat.id ? styles.itemActive : ''}`}
+                onClick={() => handleTreeCatClick(cat.id)}
+                title={`筛选到目录「${cat.name}」`}
+              >
+                <span className={styles.catName}>{cat.name}</span>
+                <span className={styles.count}>{arts.length}</span>
+              </NavLink>
+            </div>
+            {!isCollapsed && kids.length > 0 && renderSearchTreeNodes(kids, depth + 1)}
+            {!isCollapsed && arts.length > 0 && (
+              <div className={styles.catArticles} style={{ marginLeft: (depth + 1) * 14 }}>
+                {arts.map((a) => (
+                  <NavLink
+                    key={a.id}
+                    to={advMode
+                      ? `/articles?adv=1&view=${a.id}`
+                      : tagMode
+                        ? `/articles?${tagQs}&view=${a.id}`
+                        : `/articles?search=${encodeURIComponent(listSearch)}&view=${a.id}`}
+                    className={`${styles.articleItem}${currentArticleId === a.id ? ` ${styles.articleItemActive}` : ''}`}
+                    onClick={closeSidebar}
+                    title={a.title}
+                  >
+                    <span className={styles.articleIcon}>📄</span>
+                    <span className={styles.articleTitle}>{a.title}</span>
+                  </NavLink>
+                ))}
+              </div>
+            )}
+          </li>
+        );
+      })}
+    </ul>
+  );
+
+  // 可见目录的顶级节点（按名称排序）
+  const searchTreeRoots = useMemo(() => {
+    if (!searchTree) return [];
+    return categories
+      .filter((c) => !c.parent_id && searchTree.visible.has(c.id))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [categories, searchTree]);
+
   // 目录名匹配（客户端）；文章标题匹配走后端 title 查询（分批）
   const nameMatchedCats = isFiltering
     ? categories.filter((c) => c.name.toLowerCase().includes(catFilter))
@@ -257,7 +409,7 @@ export function Sidebar() {
 
   useEffect(() => {
     const q = catQuery.trim();
-    if (!q) {
+    if (!q || searchMode || tagMode) {
       searchSeqRef.current++;
       setSearchResults([]);
       setSearchHasMore(false);
@@ -265,11 +417,12 @@ export function Sidebar() {
       return;
     }
     runSearch(q, 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [catQuery, runSearch]);
 
-  // 筛选时自动展开并载入「目录名命中」的目录
+  // 筛选时自动展开并载入「目录名命中」的目录（搜索/标签模式下不执行——侧边栏仅过滤结果树）
   useEffect(() => {
-    if (!isFiltering) return;
+    if (!isFiltering || searchMode || tagMode) return;
     nameMatchedCats.forEach((c) => {
       setExpandedCats((prev) => (prev.has(c.id) ? prev : new Set(prev).add(c.id)));
       if ((loaded[catKey(c.id)]?.length ?? 0) === 0) loadBatch(catKey(c.id), 0);
@@ -466,12 +619,10 @@ export function Sidebar() {
                   </span>
                 </button>
               ) : (
-                /* 无文章目录：灰显图标，不可展开 */
-                <span className={styles.catFolderIconDim}>
-                  <span className={styles.catFolderWrap}>
-                    <span className={styles.catFolderIcon}>📁</span>
-                    <span className={styles.catFolderDot} style={{ background: cat.color }} />
-                  </span>
+                /* 无文章目录：不灰显（正常图标 + 颜色点），仍不可展开 */
+                <span className={styles.catFolderWrap}>
+                  <span className={styles.catFolderIcon}>📁</span>
+                  <span className={styles.catFolderDot} style={{ background: cat.color }} />
                 </span>
               )}
               <NavLink
@@ -607,7 +758,7 @@ export function Sidebar() {
       if ((loaded[id]?.length ?? 0) === 0) loadBatch(id, 0);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentArticleId, loadBatch]);
+  }, [currentArticleId, loadBatch, articles]);
 
   // Refetch when articles change (e.g. after upload / save)：按已载入数量刷新已展开的节点
   useEffect(() => {
@@ -724,31 +875,58 @@ export function Sidebar() {
       <div className={styles.navHeader}>
         <div className={styles.sectionHeader}>
           <NavLink
-            to="/articles"
-            className={`${styles.allBtn} ${!activeCategoryId ? styles.allBtnActive : ''}${dropTarget === 'root' ? ` ${styles.dropTarget}` : ''}`}
-            onClick={closeSidebar}
-            title="查看全部文章（拖拽目录/文章到此 = 移到顶级）"
+            to={advMode
+              ? '/articles?adv=1'
+              : searchMode
+                ? `/articles?search=${encodeURIComponent(listSearch)}`
+                : tagMode
+                  ? `/articles?${tagQs}`
+                  : '/articles'}
+            className={`${styles.allBtn} ${advMode ? (advCategoryId ? '' : styles.allBtnActive) : !activeCategoryId ? styles.allBtnActive : ''}${dropTarget === 'root' ? ` ${styles.dropTarget}` : ''}`}
+            onClick={() => {
+              // 浏览模式：全部 = 根目录；筛选模式：全部 = 基于当前搜索/标签的结果根目录
+              if (advMode) setAdvCategoryId(null);
+              closeSidebar();
+            }}
+            title={advMode || searchMode || tagMode
+              ? '查看全部筛选结果（拖拽目录/文章到此 = 移到顶级）'
+              : '查看全部文章 — 根目录（拖拽目录/文章到此 = 移到顶级）'}
             onDragOver={(e) => dragOverTarget(e, 'root')}
             onDragLeave={() => clearDropTarget('root')}
             onDrop={handleDropOnRoot}
           >
             <span className={styles.allBtnIcon}>🏠</span>
-            <span className={styles.allBtnText}>全部</span>
           </NavLink>
           <div className={styles.catSearch}>
+            <span className={styles.catSearchIcon}>
+              {/* 筛选漏斗图标 */}
+              <svg
+                width="13"
+                height="13"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+              </svg>
+            </span>
             <input
               type="text"
               className={styles.catSearchInput}
               placeholder="筛选目录或文章标题…"
               value={catQuery}
-              onChange={(e) => setCatQuery(e.target.value)}
+              onChange={(e) => handleCatQueryChange(e.target.value)}
               autoComplete="off"
             />
             {catQuery && (
               <button
                 type="button"
                 className={styles.catSearchClear}
-                onClick={() => setCatQuery('')}
+                onClick={() => handleCatQueryChange('')}
                 title="清除筛选"
               >
                 ✕
@@ -766,6 +944,19 @@ export function Sidebar() {
       >
         <div className={styles.section}>
 
+          {searchMode || advMode || tagMode ? (
+            /* ── 按搜索/高级搜索/标签筛选结果组织的目录-文章树（「全部结果」由顶部「全部」按钮承担）── */
+            <div className={styles.searchFacets}>
+              {!searchTree ? (
+                <div className={styles.articleLoading}>统计中…</div>
+              ) : searchTreeRoots.length === 0 ? (
+                <div className={styles.articleLoading}>无匹配文章</div>
+              ) : (
+                renderSearchTreeNodes(searchTreeRoots, 0)
+              )}
+            </div>
+          ) : (
+            <>
           {isFiltering && nameMatchedCats.length === 0 && searchResults.length === 0 && !searchLoading && (
             <div className={styles.catSearchEmpty}>无匹配目录或文章</div>
           )}
@@ -812,6 +1003,8 @@ export function Sidebar() {
                 </button>
               )}
             </div>
+          )}
+            </>
           )}
         </div>
       </nav>

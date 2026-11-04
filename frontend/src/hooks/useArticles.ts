@@ -3,8 +3,13 @@ import { api } from '../api/client';
 import type { Article, ArticleCreate, ArticleUpdate } from '../types/article';
 import { useToast } from './useToast';
 
-export function useArticles(params?: { category_id?: string; search?: string; tag?: string; root_only?: boolean }) {
+export function useArticles(params?: {
+  category_id?: string; search?: string; tag?: string[]; root_only?: boolean;
+  skip?: number; limit?: number;
+}) {
   const [articles, setArticles] = useState<Article[]>([]);
+  // 分页模式（显式传 limit）下的服务器总数；未分页时为 null（列表页分页器用）
+  const [total, setTotal] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const { showToast } = useToast();
@@ -22,7 +27,7 @@ export function useArticles(params?: { category_id?: string; search?: string; ta
     } finally {
       setLoading(false);
     }
-  }, [params?.category_id, params?.search, params?.tag, params?.root_only, showToast]);
+  }, [params?.category_id, params?.search, params?.tag, params?.root_only, params?.skip, params?.limit, showToast]);
 
   useEffect(() => {
     let cancelled = false;
@@ -45,7 +50,30 @@ export function useArticles(params?: { category_id?: string; search?: string; ta
     return () => {
       cancelled = true;
     };
-  }, [params?.category_id, params?.search, params?.tag, params?.root_only, showToast]);
+  }, [params?.category_id, params?.search, params?.tag, params?.root_only, params?.skip, params?.limit, showToast]);
+
+  // 分页模式：并行拉取服务器总数（过滤条件与列表一致）；未分页时清空
+  const paginated = params?.limit != null;
+  useEffect(() => {
+    if (!paginated) {
+      setTotal(null);
+      return;
+    }
+    let cancelled = false;
+    api.getArticlesCount({
+      category_id: params?.category_id,
+      search: params?.search,
+      tag: params?.tag,
+      root_only: params?.root_only,
+    })
+      .then(({ total: t }) => {
+        if (!cancelled) setTotal(t);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [paginated, params?.category_id, params?.search, params?.tag, params?.root_only]);
 
   const createArticle = async (data: ArticleCreate): Promise<Article | null> => {
     try {
@@ -53,7 +81,8 @@ export function useArticles(params?: { category_id?: string; search?: string; ta
       // Only prepend to list if no active filter (or if article matches filter)
       setArticles((prev) => {
         const matchesCategory = !params?.category_id || article.category_id === params.category_id;
-        const matchesTag = !params?.tag || article.tags.includes(params.tag);
+        // 多标签 AND：新文章必须包含全部筛选标签
+        const matchesTag = !params?.tag?.length || params.tag.every((t) => article.tags.includes(t));
         if (matchesCategory && matchesTag) {
           return [article, ...prev];
         }
@@ -94,5 +123,5 @@ export function useArticles(params?: { category_id?: string; search?: string; ta
     }
   };
 
-  return { articles, loading, error, createArticle, updateArticle, deleteArticle, refetch: fetchArticles };
+  return { articles, total, loading, error, createArticle, updateArticle, deleteArticle, refetch: fetchArticles };
 }

@@ -129,7 +129,7 @@ export function KnowledgeGraph() {
             className={`${styles.catItem} ${!selectedCategoryId ? styles.catActive : ''}`}
             onClick={() => { setSelectedCategoryId(null); closeSidebar(); }}
           >
-            <span className={styles.catDot} style={{ background: 'var(--c-text-muted)' }} /> 全部
+            <span className={styles.catDot} style={{ background: 'var(--c-text-muted)' }} /> 🏠
           </button>
           {categories.map((cat) => (
             <button

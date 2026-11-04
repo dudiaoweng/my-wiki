@@ -181,6 +181,23 @@
   border-radius: var(--radius-md);
   padding: 7px 10px;
   background: var(--c-card);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.positionRow:hover {
+  border-color: var(--c-accent);
+}
+
+.positionRow:focus-visible {
+  outline: none;
+  border-color: var(--c-accent);
+  box-shadow: 0 0 0 3px var(--c-accent-wash);
+}
+
+.positionRowOpen {
+  border-color: var(--c-accent);
+  box-shadow: 0 0 0 3px var(--c-accent-wash);
 }
 
 .positionValue {
@@ -188,9 +205,10 @@
   min-width: 0;
   font-size: 13px;
   color: var(--c-text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* 完整路径允许换行展示（超长时在分隔符处折行），不截断 */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.5;
 }
 
 .positionPlaceholder {
@@ -198,23 +216,12 @@
   font-size: 12px;
 }
 
-.positionSelectBtn {
-  padding: 4px 14px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--c-border);
-  background: var(--c-card);
-  color: var(--c-text-soft);
-  font-family: var(--font-body);
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
+/* 右侧展开箭头（整个字段即触发器，无专门按钮） */
+.positionArrow {
   flex-shrink: 0;
-  transition: all var(--transition-fast);
-}
-
-.positionSelectBtn:hover {
-  color: var(--c-accent);
-  border-color: var(--c-accent);
+  font-size: 11px;
+  color: var(--c-text-muted);
+  pointer-events: none;
 }
 
 .positionDropdown {

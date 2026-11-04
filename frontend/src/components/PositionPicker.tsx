@@ -15,11 +15,22 @@ export interface Position {
 /** 分批载入大小：展开子文章 / 标题筛选每次最多载入条数。 */
 const BATCH_SIZE = 10;
 
-/** 位置选择结果文案：目录名 或 目录 / 祖先… / 父文章。 */
+/** 位置选择结果文案：完整路径 = 目录链（祖先 / … / 本目录）/ 祖先文章… / 父文章。 */
 export function buildPositionText(position: Position, categories: Category[], articles: Article[]): string {
   if (!position.categoryId) return '';
-  const catName = categories.find((c) => c.id === position.categoryId)?.name ?? '';
-  if (!position.parentId) return catName;
+  // 目录链：从本目录向上追溯到顶级目录（嵌套子目录场景显示完整路径）
+  const catById = new Map(categories.map((c) => [c.id, c]));
+  const catChain: string[] = [];
+  const seenC = new Set<string>();
+  let cc: Category | undefined = catById.get(position.categoryId);
+  while (cc && !seenC.has(cc.id)) {
+    seenC.add(cc.id);
+    catChain.unshift(cc.name);
+    cc = cc.parent_id ? catById.get(cc.parent_id) : undefined;
+  }
+  const catPath = catChain.join(' / ');
+  if (!position.parentId) return catPath;
+  // 父文章链：从父文章向上追溯到顶级文章
   const byId = new Map(articles.map((a) => [a.id, a]));
   const chain: string[] = [];
   const seen = new Set<string>();
@@ -29,7 +40,7 @@ export function buildPositionText(position: Position, categories: Category[], ar
     chain.unshift(cur.title);
     cur = cur.parent_id ? byId.get(cur.parent_id) : undefined;
   }
-  return `${catName} / ${chain.join(' / ')}`;
+  return `${catPath} / ${chain.join(' / ')}`;
 }
 
 interface PositionPickerProps {
@@ -468,20 +479,30 @@ export function PositionField({
 
   const text = buildPositionText(value, categories, articles);
 
+  // 点击/键盘切换下拉（整个字段区域即触发器，不设专门「选择」按钮）
+  const toggleDropdown = () => (open ? setOpen(false) : openDropdown());
+
   return (
     <>
-      <div className={styles.positionRow} ref={rowRef}>
+      <div
+        className={`${styles.positionRow}${open ? ` ${styles.positionRowOpen}` : ''}`}
+        ref={rowRef}
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onClick={toggleDropdown}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            toggleDropdown();
+          }
+        }}
+        title="点击选择文章位置"
+      >
         <span className={styles.positionValue} title={text || undefined}>
           {text || <span className={styles.positionPlaceholder}>请选择文章所属的目录或父文章</span>}
         </span>
-        <button
-          type="button"
-          className={styles.positionSelectBtn}
-          onClick={() => (open ? setOpen(false) : openDropdown())}
-          aria-expanded={open}
-        >
-          选择{open ? ' ▴' : ' ▾'}
-        </button>
+        <span className={styles.positionArrow}>{open ? '▴' : '▾'}</span>
       </div>
 
       {open && dropdownStyle && createPortal(

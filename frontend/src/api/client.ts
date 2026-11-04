@@ -16,6 +16,16 @@ export interface EntityInfoItem {
   updated_at: string;
 }
 
+/** 高级搜索条件：类型 + 值 + 与上一条的连接关系（与/或）+ 非（取反） */
+export interface AdvancedSearchCondition {
+  type: 'keyword' | 'person' | 'tag' | 'time' | 'category';
+  value?: string;
+  start?: string | null;
+  end?: string | null;
+  connector?: 'and' | 'or';
+  negated?: boolean;
+}
+
 const BASE = '/api';
 
 class ApiError extends Error {
@@ -73,10 +83,18 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
-function qs(params: Record<string, string | boolean | number>): string {
+function qs(params: Record<string, string | boolean | number | (string | number)[]>): string {
   const usp = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
     if (v === undefined || v === null || v === '') continue;
+    if (Array.isArray(v)) {
+      // 数组参数重复追加（如 ?tag=A&tag=B），标签累加筛选用
+      for (const item of v) {
+        if (item === undefined || item === null || item === '') continue;
+        usp.append(k, String(item));
+      }
+      continue;
+    }
     usp.set(k, typeof v === 'boolean' ? (v ? '1' : '0') : String(v));
   }
   const s = usp.toString();
@@ -87,12 +105,42 @@ export const api = {
   // ── Articles ──
   getArticles(params?: {
     category_id?: string; parent_id?: string; search?: string; title?: string;
-    tag?: string; root_only?: boolean; skip?: number; limit?: number;
+    tag?: string[]; root_only?: boolean; skip?: number; limit?: number;
   }) {
     return request<Article[]>(`/articles${params ? qs(params) : ''}`);
   },
+  getArticlesCount(params?: {
+    category_id?: string; search?: string; tag?: string[]; root_only?: boolean;
+  }) {
+    return request<{ total: number }>(`/articles/count${params ? qs(params) : ''}`);
+  },
+  /** 每个目录的递归文章数（含子目录）——根目录视图徽章用 */
+  getCategoryArticleCounts() {
+    return request<Record<string, number>>('/categories/article-counts');
+  },
+  /** 高级搜索：条件按 connector（与/或）依次组合，negated（非）取反 */
+  advancedSearchArticles(
+    conditions: AdvancedSearchCondition[],
+    skip = 0,
+    limit = 10,
+  ) {
+    const q = `skip=${skip}&limit=${limit}`;
+    return request<{ total: number; items: Article[] }>(`/articles/search?${q}`, {
+      method: 'POST',
+      body: JSON.stringify({ conditions }),
+    });
+  },
   getArticle(id: string) {
     return request<Article>(`/articles/${id}`);
+  },
+  getSearchFacets(search: string, categoryId?: string) {
+    const usp = new URLSearchParams();
+    if (search) usp.set('search', search);
+    if (categoryId) usp.set('category_id', categoryId);
+    const s = usp.toString();
+    return request<{ total: number; facets: { category_id: string | null; name: string; color: string; count: number }[] }>(
+      `/articles/facets${s ? `?${s}` : ''}`,
+    );
   },
   async createArticle(data: ArticleCreate, files?: File[]): Promise<Article> {
     const formData = new FormData();

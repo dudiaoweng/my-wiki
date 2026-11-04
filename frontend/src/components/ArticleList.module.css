@@ -64,8 +64,10 @@
   left: 12px;
   top: 50%;
   transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--c-text-muted);
-  font-size: 14px;
   pointer-events: none;
 }
 
@@ -97,6 +99,160 @@
   color: var(--c-text-muted);
   white-space: nowrap;
   flex-shrink: 0;
+}
+
+/* ── 排序 ── */
+.sortWrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.sortBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 12px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-card);
+  color: var(--c-text-soft);
+  font-size: 13px;
+  font-family: var(--font-body);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+}
+
+.sortBtn:hover {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+
+.sortPanel {
+  position: fixed;
+  z-index: 400;
+  width: 300px;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--c-page);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-elevated);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  animation: fadeSlideIn 150ms ease;
+}
+
+.sortPanelTitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--c-text);
+}
+
+.sortRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sortIndex {
+  width: 16px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--c-text-muted);
+  flex-shrink: 0;
+}
+
+.sortField {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-card);
+  color: var(--c-text);
+  font-size: 13px;
+  font-family: var(--font-body);
+}
+
+.sortOrderBtn {
+  padding: 5px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-card);
+  color: var(--c-text-soft);
+  font-size: 12px;
+  font-family: var(--font-body);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.sortOrderBtn:hover {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+
+.sortRemoveBtn {
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--c-text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.sortRemoveBtn:hover:not(:disabled) {
+  background: var(--c-danger-wash);
+  color: var(--c-danger);
+}
+
+.sortRemoveBtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.sortActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sortAddBtn {
+  padding: 6px 12px;
+  border: 1px dashed var(--c-border);
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--c-text-soft);
+  font-size: 12px;
+  font-family: var(--font-body);
+  cursor: pointer;
+}
+
+.sortAddBtn:hover {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+
+.sortResetBtn {
+  margin-left: auto;
+  padding: 6px 14px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-card);
+  color: var(--c-text-soft);
+  font-size: 12px;
+  font-family: var(--font-body);
+  cursor: pointer;
+}
+
+.sortResetBtn:hover {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
 }
 
 .list {
@@ -142,57 +298,271 @@
 }
 
 @media (max-width: 1100px) {
+  /* 移动模式：文章列表与实体列表按内容高度排布，页面整体滚动 */
   .layout {
     flex-direction: column;
-    height: 100%;
+    height: auto;
     gap: 0;
   }
 
   .mainCol {
-    flex: 1;
+    flex: none;
     min-height: 0;
-    overflow-y: auto;
+    overflow-y: visible;
   }
 }
 
-/* 同级子目录入口（目录芯片行） */
-.dirRow {
+/* ── 目录卡片列表（根目录视图 / 文章列表目录入口统一样式）── */
+.rootDirs {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 8px;
   margin-bottom: 14px;
 }
 
-.dirChip {
-  display: inline-flex;
+.rootDirCard {
+  display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 7px 14px;
+  gap: 12px;
+  padding: 13px 16px;
   border: 1px solid var(--c-border);
   border-radius: var(--radius-md);
   background: var(--c-card);
   color: var(--c-text-soft);
   text-decoration: none;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   font-family: var(--font-body);
   transition: all var(--transition-fast);
 }
 
-.dirChip:hover {
+.rootDirCard:hover {
   border-color: var(--dir-accent, var(--c-accent));
   color: var(--c-accent);
   box-shadow: var(--shadow-elevated);
 }
 
-.dirChipIcon {
+.rootDirIcon {
   font-size: 22px;
   line-height: 1;
+  flex-shrink: 0;
 }
 
-.dirChipName {
+.rootDirName {
+  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 创建人/创建时间：靠右显示，空间不足时收缩省略 */
+.rootDirMeta {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--c-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+.rootDirCount {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--c-text-muted);
+  flex-shrink: 0;
+}
+
+/* 目录卡片操作按钮（修改/删除；权限同侧边栏） */
+.dirActions {
+  display: inline-flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.dirActionBtn {
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--c-text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.dirActionBtn:hover {
+  background: var(--c-surface);
+  color: var(--c-text);
+}
+
+.dirActionBtnDanger:hover {
+  background: var(--c-danger-wash);
+  color: var(--c-danger);
+}
+
+/* 目录卡片内联编辑表单 */
+.dirEditForm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.dirEditInput {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-family: var(--font-body);
+  color: var(--c-text);
+  background: var(--c-page);
+  box-sizing: border-box;
+}
+
+.dirEditInput:focus {
+  outline: none;
+  border-color: var(--c-accent);
+  box-shadow: 0 0 0 3px var(--c-accent-wash);
+}
+
+.dirColorRow {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.dirColorDot {
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  padding: 0;
+  transition: transform var(--transition-fast);
+}
+
+.dirColorDotActive {
+  transform: scale(1.3);
+  box-shadow: 0 0 0 2px var(--c-text);
+}
+
+.dirEditActions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.dirEditBtn {
+  padding: 5px 14px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-card);
+  color: var(--c-text-soft);
+  font-size: 12px;
+  font-family: var(--font-body);
+  cursor: pointer;
+}
+
+.dirEditBtn:hover:not(:disabled) {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+
+.dirEditBtnPrimary {
+  background: var(--c-accent);
+  border-color: var(--c-accent);
+  color: white;
+}
+
+.dirEditBtnPrimary:hover:not(:disabled) {
+  background: var(--c-accent-hover);
+  color: white;
+}
+
+.dirEditBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.rootDirArrow {
+  color: var(--c-text-muted);
+  flex-shrink: 0;
+}
+
+/* 分页器 */
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 18px;
+  padding-bottom: 8px;
+}
+
+.pageBtn {
+  min-width: 32px;
+  height: 32px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-card);
+  color: var(--c-text-soft);
+  font-size: 13px;
+  font-family: var(--font-body);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.pageBtn:hover:not(:disabled):not(.pageBtnActive) {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+
+.pageBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.pageBtnActive {
+  background: var(--c-accent);
+  border-color: var(--c-accent);
+  color: white;
+  cursor: default;
+}
+
+/* 筛选框清除按钮 */
+.searchClearBtn {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: none;
+  background: none;
+  color: var(--c-text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px;
+  border-radius: 4px;
+  transition: all var(--transition-fast);
+}
+
+.searchClearBtn:hover {
+  color: var(--c-text);
+  background: var(--c-surface);
+}
+
+/* 拖拽放置目标高亮（与侧边栏相互移动） */
+.rootDirCard.dropTarget {
+  outline: 2px dashed var(--c-accent);
+  outline-offset: -2px;
+  background: var(--c-accent-wash);
 }

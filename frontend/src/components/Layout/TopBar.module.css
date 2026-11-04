@@ -21,7 +21,7 @@
 }
 
 .menuBtn {
-  display: none;
+  display: block;
   background: none;
   border: none;
   font-size: 22px;
@@ -35,7 +35,6 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  text-decoration: none;
 }
 
 .logo {
@@ -62,12 +61,11 @@
   white-space: nowrap;
 }
 
-/* ── Center: search ── */
+/* ── Right: search（靠右，与智能问答/用户图标一组）── */
 
 .searchWrap {
-  flex: 1;
-  max-width: 480px;
-  margin: 0 auto;
+  width: 340px;
+  flex-shrink: 0;
   position: relative;
 }
 
@@ -103,12 +101,73 @@
   color: var(--c-text-muted);
 }
 
+/* 问答窗口：搜索框禁用模式（保留原内容，仅不可交互） */
+.searchInput:disabled {
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  border-color: var(--c-border);
+  box-shadow: none;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+/* ── 标签累加筛选 chips（点击文章标签后显示于顶部工具栏，可多个并存）── */
+
+.tagChips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.tagChip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  max-width: 260px;
+  padding: 6px 6px 6px 10px;
+  background: var(--c-tag-bg);
+  color: var(--c-tag-text);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  overflow: hidden;
+}
+
+.tagChipIcon {
+  flex-shrink: 0;
+}
+
+.tagChipName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tagChipClose {
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  opacity: 0.7;
+  font-family: var(--font-body);
+}
+
+.tagChipClose:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.08);
+}
+
 /* ── Right: tools ── */
 
 .right {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 10px;
   flex-shrink: 0;
   margin-left: auto;
 }
@@ -126,6 +185,9 @@
   font-family: var(--font-body);
   transition: all var(--transition-fast);
   white-space: nowrap;
+  background: none;
+  border: none;
+  cursor: pointer;
 }
 
 .toolBtn:hover {
@@ -186,8 +248,14 @@
     display: none;
   }
 
+  .right {
+    gap: 6px;
+  }
+
   .searchWrap {
-    max-width: none;
+    width: auto;
+    flex: 1;
+    min-width: 0;
   }
 
   .toolLabel {
@@ -197,4 +265,359 @@
   .toolBtn {
     padding: 8px 10px;
   }
+}
+
+/* 搜索清除按钮 + 高级搜索开关（输入框右侧） */
+.searchInput {
+  padding-right: 64px;
+}
+
+.searchClear {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: none;
+  background: none;
+  color: var(--c-text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px;
+  border-radius: 4px;
+  transition: all var(--transition-fast);
+}
+
+.searchClear:hover {
+  color: var(--c-text);
+  background: var(--c-surface);
+}
+
+.advToggle {
+  position: absolute;
+  right: 30px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 4px;
+  border-radius: 4px;
+  opacity: 0.7;
+  transition: all var(--transition-fast);
+}
+
+.advToggle:hover:not(:disabled) {
+  opacity: 1;
+  background: var(--c-surface);
+}
+
+/* 面板打开：柔和高亮 */
+.advToggleOpen {
+  opacity: 1;
+  color: var(--c-accent);
+  background: var(--c-accent-wash);
+}
+
+/* 条件已设置：醒目标识（accent 实底白字） */
+.advToggleActive {
+  opacity: 1;
+  color: white;
+  background: var(--c-accent);
+}
+
+.advToggleActive:hover:not(:disabled) {
+  background: var(--c-accent-hover);
+}
+
+.advToggle:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ── 高级搜索面板（与搜索框融合，从下方弹出）── */
+
+.advPanel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 400;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--c-page);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-elevated);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  animation: fadeSlideIn 150ms ease;
+}
+
+.advPanelTitle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--c-text);
+}
+
+.advClearLink {
+  border: none;
+  background: none;
+  color: var(--c-text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  font-family: var(--font-body);
+  text-decoration: underline;
+}
+
+.advClearLink:hover {
+  color: var(--c-danger);
+}
+
+.advEmpty {
+  text-align: center;
+  padding: 12px;
+  font-size: 12px;
+  color: var(--c-text-muted);
+  border: 1px dashed var(--c-border);
+  border-radius: var(--radius-md);
+}
+
+.advRow {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-card);
+}
+
+.advRowTop {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.advConnector {
+  width: 52px;
+  padding: 4px 6px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-page);
+  color: var(--c-text);
+  font-size: 12px;
+  font-family: var(--font-body);
+}
+
+.advConnectorGhost {
+  width: 52px;
+  flex-shrink: 0;
+}
+
+.advNegate {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--c-text-soft);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.advNegate input {
+  accent-color: var(--c-accent);
+  cursor: pointer;
+}
+
+.advField {
+  padding: 4px 8px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-page);
+  color: var(--c-text);
+  font-size: 12px;
+  font-family: var(--font-body);
+}
+
+.advRemove {
+  margin-left: auto;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--c-text-muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.advRemove:hover {
+  background: var(--c-danger-wash);
+  color: var(--c-danger);
+}
+
+.advValue {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-family: var(--font-body);
+  color: var(--c-text);
+  background: var(--c-page);
+  box-sizing: border-box;
+}
+
+.advValue:focus {
+  outline: none;
+  border-color: var(--c-accent);
+  box-shadow: 0 0 0 3px var(--c-accent-wash);
+}
+
+.advTimeRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.advDate {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-family: var(--font-body);
+  color: var(--c-text);
+  background: var(--c-page);
+}
+
+.advTimeSep {
+  font-size: 12px;
+  color: var(--c-text-muted);
+}
+
+.advActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.advAddBtn {
+  padding: 6px 12px;
+  border: 1px dashed var(--c-border);
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--c-text-soft);
+  font-size: 12px;
+  font-family: var(--font-body);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.advAddBtn:hover {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+
+.advSearchBtn {
+  margin-left: auto;
+  padding: 7px 18px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--c-accent);
+  color: white;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: var(--font-body);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.advSearchBtn:hover {
+  background: var(--c-accent-hover);
+}
+
+/* ── 数据库即时搜索下拉 ── */
+
+.searchDropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 400;
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--c-page);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-elevated);
+  padding: 4px;
+  animation: fadeSlideIn 150ms ease;
+}
+
+.searchResultItem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+  color: var(--c-text);
+  transition: background var(--transition-fast);
+}
+
+.searchResultItem:hover {
+  background: var(--c-surface);
+}
+
+.searchResultTitle {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.searchResultCat {
+  flex-shrink: 0;
+  font-size: 11px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.searchHint {
+  padding: 10px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--c-text-muted);
+}
+
+.searchMoreBtn {
+  display: block;
+  width: 100%;
+  padding: 8px;
+  border: none;
+  background: none;
+  border-top: 1px solid var(--c-border);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  font-family: var(--font-body);
+  font-size: 12px;
+  color: var(--c-accent);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.searchMoreBtn:hover {
+  background: var(--c-accent-wash);
 }

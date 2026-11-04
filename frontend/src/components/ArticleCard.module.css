@@ -145,6 +145,13 @@
   border-radius: 3px;
   font-size: 11px;
   font-weight: 500;
+  cursor: pointer;
+  text-decoration: none;
+  transition: filter var(--transition-fast);
+}
+
+.tag:hover {
+  filter: brightness(0.9);
 }
 
 .commentSummary {
@@ -216,4 +223,19 @@
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.6; }
+}
+
+/* 拖拽放置目标高亮（与侧边栏相互移动） */
+.dropTarget {
+  outline: 2px dashed var(--c-accent);
+  outline-offset: -2px;
+  background: var(--c-accent-wash);
+}
+
+/* 拖拽不可用目标（如目录拖到文章上） */
+.dropTargetInvalid {
+  outline: 2px dashed var(--c-danger);
+  outline-offset: -2px;
+  background: var(--c-danger-wash);
+  cursor: not-allowed;
 }
