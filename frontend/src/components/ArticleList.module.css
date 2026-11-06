@@ -27,7 +27,9 @@
   gap: 6px;
   font-size: 13px;
   color: var(--c-text-muted);
-  flex-shrink: 0;
+  /* 面包屑可收缩换行，把右侧工具组稳定留在同一行 */
+  flex: 1 1 240px;
+  min-width: 0;
 }
 
 .breadcrumb a {
@@ -52,11 +54,25 @@
   color: var(--c-text);
 }
 
+/* 最后一级目录：可点击刷新当前目录 */
+.breadcrumbCurrentBtn {
+  padding: 0;
+  border: none;
+  background: none;
+  line-height: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.breadcrumbCurrentBtn:hover {
+  text-decoration: underline;
+}
+
 .searchWrap {
-  width: 260px;
+  width: 240px;
   flex-shrink: 0;
-  margin-left: auto;
   position: relative;
+  /* 右对齐由 .headerTools 统一处理 */
 }
 
 .searchIcon {
@@ -92,6 +108,15 @@
 .searchInput::placeholder {
   color: var(--c-text-muted);
   font-size: 13px;
+}
+
+/* 右侧工具组：文章数量 + 排序 + 筛选框 */
+.headerTools {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 .resultCount {
@@ -565,4 +590,81 @@
   outline: 2px dashed var(--c-accent);
   outline-offset: -2px;
   background: var(--c-accent-wash);
+}
+
+/* ── 手机端：标题行、筛选框、目录卡与分页适配窄屏 ── */
+@media (max-width: 768px) {
+  /* 移动端尽量保持单行：面包屑横向滚动，工具组紧随其后 */
+  .header {
+    gap: 8px;
+    row-gap: 8px;
+    margin-bottom: 14px;
+  }
+
+  .breadcrumb {
+    flex: 1 1 auto;
+    min-width: 44px;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    white-space: nowrap;
+    scrollbar-width: none;
+  }
+
+  .breadcrumb::-webkit-scrollbar {
+    display: none;
+  }
+
+  .headerTools {
+    width: auto;
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
+    gap: 6px;
+    margin-left: 0;
+  }
+
+  .resultCount {
+    margin-right: 0;
+    font-size: 12px;
+  }
+
+  .searchWrap {
+    width: 110px;
+    flex: 0 1 110px;
+    min-width: 80px;
+  }
+
+  .searchInput {
+    padding: 6px 24px 6px 28px;
+    font-size: 12px;
+  }
+
+  .sortBtn {
+    padding: 7px 8px;
+  }
+
+  .breadcrumbCurrent {
+    font-size: 17px;
+  }
+
+  .rootDirCard {
+    padding: 11px 12px;
+    gap: 10px;
+  }
+
+  /* 上一页/下一页 + 页码可能超过一行：允许换行 */
+  .pager {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .pageBtn {
+    min-width: 30px;
+    height: 30px;
+    padding: 0 8px;
+  }
+
+  .empty {
+    padding: 40px 16px;
+  }
 }

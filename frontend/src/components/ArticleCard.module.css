@@ -11,7 +11,9 @@
   position: relative;
   overflow: hidden;
   text-align: left;
-  width: 100%;
+  /* 嵌套缩进由 --tree-indent 控制（内联变量）；移动端可在媒体查询中封顶 */
+  margin-left: var(--tree-indent, 0px);
+  width: calc(100% - var(--tree-indent, 0px));
   font-family: var(--font-body);
 }
 
@@ -238,4 +240,24 @@
   outline-offset: -2px;
   background: var(--c-danger-wash);
   cursor: not-allowed;
+}
+
+/* ── 移动端：紧凑卡片 + 嵌套缩进封顶 ── */
+@media (max-width: 768px) {
+  .card {
+    padding: 14px 16px;
+    gap: 12px;
+    /* 深层嵌套在窄屏最多缩进 72px（约 3 级），避免卡片过窄 */
+    margin-left: min(var(--tree-indent, 0px), 72px);
+    width: calc(100% - min(var(--tree-indent, 0px), 72px));
+  }
+
+  .title {
+    font-size: 16px;
+  }
+
+  .meta {
+    gap: 8px;
+    margin-top: 8px;
+  }
 }

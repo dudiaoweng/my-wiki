@@ -56,11 +56,21 @@ interface ArticleDetailViewProps {
   actionsInTopBar?: boolean;
   /** 智能返回：优先父文章，其次所在目录；不传则退回 onBack */
   onReturn?: (parentId: string | null, categoryId: string | null) => void;
+  /**
+   * 点击目录面包屑时由父级处理（内联详情用）。
+   * 内联详情可能由本地 viewedArticleId 打开、URL 无 view 参数；若点击的是
+   * 当前目录，目标 URL 与当前完全相同，Link 导航不会触发筛选变化，必须由
+   * 父级显式关闭详情。未提供时保持普通 Link 导航（独立详情页/问答内详情）。
+   */
+  onCategorySelect?: (categoryId: string) => void;
+  /** 点击 🏠 根面包屑时由父级处理（同理：当前无目录时目标 URL 与当前相同） */
+  onRootSelect?: () => void;
 }
 
 export function ArticleDetailView({
   articleId, onBack, prevArticleId, nextArticleId, onNavigate,
   selectedEntity, onEntitySelect, actionsInTopBar, onReturn,
+  onCategorySelect, onRootSelect,
 }: ArticleDetailViewProps) {
   const { openEditor, openUploader, requestConfirm, notifyArticleSaved, articleVersion, userIdNumber } = useApp();
   const { showToast } = useToast();
@@ -279,7 +289,17 @@ export function ArticleDetailView({
       {/* 面包屑路径：全部 / 目录（含上级目录链）/ 文章 / 子文章 / … / 当前文章 */}
       <nav className={styles.breadcrumb} aria-label="面包屑导航">
         {/* 🏠：筛选时为基于搜索/标签结果的根目录（保留 ?search= / ?tag=），浏览时为根目录 */}
-        <Link to={keepFilter('/articles')}>🏠</Link>
+        <Link
+          to={keepFilter('/articles')}
+          onClick={(e) => {
+            // 当前不在具体目录时目标 URL 与当前相同（内联详情无 view 参数），
+            // Link 导航不触发筛选变化，必须显式关闭详情。
+            if (onRootSelect && !detailSearchParams.get('category')) {
+              e.preventDefault();
+              onRootSelect();
+            }
+          }}
+        >🏠</Link>
         {categoryChain.map((c) => (
           <Fragment key={c.id}>
             <Link
@@ -287,6 +307,15 @@ export function ArticleDetailView({
               className={styles.crumbCategory}
               style={{ '--crumb-cat': c.color } as CSSProperties}
               title={`查看「${c.name}」目录下的所有文章`}
+              onClick={(e) => {
+                // 内联详情交给父级关闭详情并切换/确认目录；独立详情页保持 Link 导航。
+                // 尤其是点击「最后一级目录」时目标 URL 可能与当前完全相同，
+                // 普通 Link 不会触发任何状态变化，必须显式关闭内联详情。
+                if (onCategorySelect) {
+                  e.preventDefault();
+                  onCategorySelect(c.id);
+                }
+              }}
             >
               {c.name}
             </Link>

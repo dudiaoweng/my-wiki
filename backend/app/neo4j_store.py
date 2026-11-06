@@ -334,9 +334,16 @@ _Q_MERGE_RELATIONS = """
 MATCH (a:Article {id: $aid})
 UNWIND $rels AS r
 MATCH (s:Entity {name: r.source})
-WHERE (r.source_type IS NULL AND EXISTS { (a)-[:MENTIONS]->(s) }) OR s.type = r.source_type
+WHERE ((r.source_type IS NULL AND EXISTS { (a)-[:MENTIONS]->(s) }) OR s.type = r.source_type)
 MATCH (t:Entity {name: r.target})
-WHERE (r.target_type IS NULL AND EXISTS { (a)-[:MENTIONS]->(t) }) OR t.type = r.target_type
+WHERE ((r.target_type IS NULL AND EXISTS { (a)-[:MENTIONS]->(t) }) OR t.type = r.target_type)
+  // 用户手工删除的关系留下 deleted 墓碑（source='deleted'）：
+  // 重新抽取/重新上传时不得把它自动加回来；手工重新添加会清除墓碑。
+  AND NOT EXISTS {
+    // 无向匹配：抽取方向可能不稳定，删除过的关系不应以反方向复活
+    MATCH (s)-[dr:RELATES {label: r.label, article_id: $aid}]-(t)
+    WHERE dr.deleted = true
+  }
 MERGE (s)-[:RELATES {label: r.label, article_id: $aid, source: $source}]->(t)
 """
 
@@ -354,28 +361,39 @@ DELETE r
 
 _Q_REMOVE_ARTICLE_NODE = "MATCH (a:Article {id: $aid}) DETACH DELETE a"
 
-_Q_RENAME_ENTITY = "MATCH (e:Entity {name: $old}) SET e.name = $new"
+_Q_RENAME_ENTITY = """
+MATCH (e:Entity {name: $old})
+WHERE $old_type IS NULL OR e.type = $old_type
+SET e.name = $new
+"""
 
 _Q_UPDATE_ENTITY_PROPS = """
 MATCH (e:Entity {name: $old})
+WHERE $old_type IS NULL OR e.type = $old_type
 SET e.name = CASE WHEN $new_name IS NULL THEN e.name ELSE $new_name END,
     e.type = CASE WHEN $new_type IS NULL THEN e.type ELSE $new_type END
 """
 
 _Q_REMOVE_ENTITY_MENTIONS = """
 MATCH (a:Article)-[m:MENTIONS]->(e:Entity {name: $name})
-WHERE $aids IS NULL OR a.id IN $aids
+WHERE ($etype IS NULL OR e.type = $etype)
+  AND ($aids IS NULL OR a.id IN $aids)
 DELETE m
 """
 
 _Q_REMOVE_ENTITY_RELATES = """
 MATCH (e1:Entity)-[r:RELATES]->(e2:Entity)
-WHERE (e1.name = $name OR e2.name = $name) AND ($aids IS NULL OR r.article_id IN $aids)
+WHERE (
+    (e1.name = $name AND ($etype IS NULL OR e1.type = $etype))
+    OR (e2.name = $name AND ($etype IS NULL OR e2.type = $etype))
+  )
+  AND ($aids IS NULL OR r.article_id IN $aids)
 DELETE r
 """
 
 _Q_HAS_ENTITY_NAME = """
 MATCH (a:Article {id: $aid})-[:MENTIONS]->(e:Entity {name: $name})
+WHERE $etype IS NULL OR e.type = $etype
 RETURN count(e) > 0 AS has
 """
 
@@ -485,30 +503,57 @@ async def remove_article(article_id: str) -> None:
     ])
 
 
-async def rename_entity(old_name: str, new_name: str) -> None:
-    """按名称重命名全部类型变体；关系边指向节点，端点名自动跟随。"""
-    await _run_async(_Q_RENAME_ENTITY, {"old": old_name, "new": new_name}, write=True)
-
-
-async def update_entity_props(old_name: str, new_name: str | None, new_type: str | None) -> None:
+async def rename_entity(old_name: str, new_name: str, old_type: str | None = None) -> None:
+    """重命名实体（可按类型限定）；关系边指向节点，端点名自动跟随。"""
     await _run_async(
-        _Q_UPDATE_ENTITY_PROPS,
-        {"old": old_name, "new_name": new_name, "new_type": new_type},
+        _Q_RENAME_ENTITY,
+        {"old": old_name, "new": new_name, "old_type": _norm_rel_type(old_type)},
         write=True,
     )
 
 
-async def remove_entity(name: str, article_ids: list[str] | None = None) -> None:
-    """从（指定）文章中移除实体的提及边与两端关系边；孤儿实体节点由 GC 清理。"""
+async def update_entity_props(
+    old_name: str,
+    new_name: str | None,
+    new_type: str | None,
+    old_type: str | None = None,
+) -> None:
+    await _run_async(
+        _Q_UPDATE_ENTITY_PROPS,
+        {
+            "old": old_name,
+            "new_name": new_name,
+            "new_type": new_type,
+            "old_type": _norm_rel_type(old_type),
+        },
+        write=True,
+    )
+
+
+async def remove_entity(
+    name: str,
+    article_ids: list[str] | None = None,
+    etype: str | None = None,
+) -> None:
+    """从（指定）文章中移除实体（可按类型）的提及边与两端关系边；孤儿节点由 GC 清理。"""
+    params = {"name": name, "aids": article_ids, "etype": _norm_rel_type(etype)}
     await _write_tx([
-        (_Q_REMOVE_ENTITY_MENTIONS, {"name": name, "aids": article_ids}),
-        (_Q_REMOVE_ENTITY_RELATES, {"name": name, "aids": article_ids}),
+        (_Q_REMOVE_ENTITY_MENTIONS, params),
+        (_Q_REMOVE_ENTITY_RELATES, params),
         (_Q_GC_ORPHANS, {}),
     ])
 
 
-async def article_has_entity_name(article_id: str, name: str) -> bool:
-    recs = await _run_async(_Q_HAS_ENTITY_NAME, {"aid": article_id, "name": name})
+async def article_has_entity_name(
+    article_id: str,
+    name: str,
+    etype: str | None = None,
+) -> bool:
+    recs = await _run_async(_Q_HAS_ENTITY_NAME, {
+        "aid": article_id,
+        "name": name,
+        "etype": _norm_rel_type(etype),
+    })
     return bool(recs and recs[0]["has"])
 
 
@@ -536,24 +581,347 @@ def remove_article_sync(article_id: str) -> None:
     ])
 
 
-def rename_entity_sync(old_name: str, new_name: str) -> None:
-    _run_sync(_Q_RENAME_ENTITY, {"old": old_name, "new": new_name}, write=True)
-
-
-def update_entity_props_sync(old_name: str, new_name: str | None, new_type: str | None) -> None:
+def rename_entity_sync(old_name: str, new_name: str, old_type: str | None = None) -> None:
     _run_sync(
-        _Q_UPDATE_ENTITY_PROPS,
-        {"old": old_name, "new_name": new_name, "new_type": new_type},
+        _Q_RENAME_ENTITY,
+        {"old": old_name, "new": new_name, "old_type": _norm_rel_type(old_type)},
         write=True,
     )
 
 
-def remove_entity_sync(name: str, article_ids: list[str] | None = None) -> None:
+def update_entity_props_sync(
+    old_name: str,
+    new_name: str | None,
+    new_type: str | None,
+    old_type: str | None = None,
+) -> None:
+    _run_sync(
+        _Q_UPDATE_ENTITY_PROPS,
+        {
+            "old": old_name,
+            "new_name": new_name,
+            "new_type": new_type,
+            "old_type": _norm_rel_type(old_type),
+        },
+        write=True,
+    )
+
+
+def remove_entity_sync(
+    name: str,
+    article_ids: list[str] | None = None,
+    etype: str | None = None,
+) -> None:
+    params = {"name": name, "aids": article_ids, "etype": _norm_rel_type(etype)}
     _write_tx_sync([
-        (_Q_REMOVE_ENTITY_MENTIONS, {"name": name, "aids": article_ids}),
-        (_Q_REMOVE_ENTITY_RELATES, {"name": name, "aids": article_ids}),
+        (_Q_REMOVE_ENTITY_MENTIONS, params),
+        (_Q_REMOVE_ENTITY_RELATES, params),
         (_Q_GC_ORPHANS, {}),
     ])
+
+
+# ─── 实体关系编辑（RELATES 手工增删改）───
+# 关系边按 (label, article_id, source) MERGE；手工关系 source='manual'，
+# 不会被重新抽取的 replace（按 source 删除 body/comment 边）覆盖。
+
+_Q_ENTITY_RELATIONS = """
+MATCH (e1:Entity {name: $name})-[r:RELATES]-(e2:Entity)
+WHERE ($etype IS NULL OR e1.type = $etype)
+  AND ($aids IS NULL OR r.article_id IN $aids)
+  AND coalesce(r.deleted, false) = false
+RETURN startNode(r).name AS source_name, startNode(r).type AS source_type,
+       endNode(r).name AS target_name, endNode(r).type AS target_type,
+       r.label AS label, r.article_id AS aid
+"""
+
+# 两端实体共同出现的文章（新增/修改时校验：对端必须在本文章实体中）
+_Q_ARTICLES_MENTIONING_BOTH = """
+MATCH (s:Entity {name: $source_name})
+WHERE $source_type IS NULL OR s.type = $source_type
+MATCH (t:Entity {name: $target_name})
+WHERE $target_type IS NULL OR t.type = $target_type
+MATCH (a:Article)-[:MENTIONS]->(s)
+MATCH (a)-[:MENTIONS]->(t)
+WHERE $aids IS NULL OR a.id IN $aids
+RETURN DISTINCT a.id AS aid
+"""
+
+_Q_CREATE_ENTITY_RELATION = """
+MATCH (s:Entity {name: $source_name})
+WHERE $source_type IS NULL OR s.type = $source_type
+MATCH (t:Entity {name: $target_name})
+WHERE $target_type IS NULL OR t.type = $target_type
+MATCH (a:Article)-[:MENTIONS]->(s)
+MATCH (a)-[:MENTIONS]->(t)
+WHERE $aids IS NULL OR a.id IN $aids
+MERGE (s)-[r:RELATES {label: $label, article_id: a.id}]->(t)
+// 已有自动抽取边 → 升级为手工边，避免后续重新抽取时被 replace 删除；
+// 已有删除墓碑 → 手工重新添加即恢复（清除墓碑）。
+ON CREATE SET r.source = 'manual'
+ON MATCH SET r.source = 'manual', r.deleted = null
+RETURN count(r) AS n
+"""
+
+_Q_DELETE_ENTITY_RELATION = """
+MATCH (s:Entity {name: $source_name})-[r:RELATES]->(t:Entity {name: $target_name})
+WHERE ($source_type IS NULL OR s.type = $source_type)
+  AND ($target_type IS NULL OR t.type = $target_type)
+  AND r.label = $label
+  AND ($aids IS NULL OR r.article_id IN $aids)
+  AND coalesce(r.deleted, false) = false
+WITH collect(r) AS rs
+// 软删除：保留关系作为墓碑，重新抽取时由 _Q_MERGE_RELATIONS 跳过，
+// 避免用户删除的自动抽取关系在重跑识别/重新上传后自动复活。
+FOREACH (r IN rs | SET r.deleted = true, r.source = 'deleted')
+RETURN size(rs) AS n
+"""
+
+# 仅改关系名（两端不变）：直接改属性，不删旧建新。
+# 这样带类型但未在该文章 MENTIONS 中出现的端点也能改名（重建时无法通过
+# “两端共同提及”校验），也不会把自动抽取边变成手工边。
+_Q_RENAME_ENTITY_RELATION_LABEL = """
+MATCH (s:Entity {name: $source_name})-[r:RELATES]->(t:Entity {name: $target_name})
+WHERE ($source_type IS NULL OR s.type = $source_type)
+  AND ($target_type IS NULL OR t.type = $target_type)
+  AND r.label = $old_label
+  AND ($aids IS NULL OR r.article_id IN $aids)
+  AND coalesce(r.deleted, false) = false
+// 改名后标记为手工边：重新抽取的 replace 只删 body/comment 边，不会把改名冲掉
+SET r.label = $new_label, r.source = 'manual'
+WITH s, t, r
+// 同时为旧关系名留下墓碑：防止重新抽取又把旧名字加回来
+MERGE (s)-[d:RELATES {label: $old_label, article_id: r.article_id}]->(t)
+SET d.deleted = true, d.source = 'deleted'
+RETURN count(r) AS n
+"""
+
+# 仅切换方向（两端集合不变）：在旧关系存在的文章范围内反向建边。
+# 不要求 MENTIONS：旧边已经证明这两个端点在文章中存在关联。
+_Q_REORIENT_ENTITY_RELATION = """
+MATCH (s:Entity {name: $source_name})-[r:RELATES]->(t:Entity {name: $target_name})
+WHERE ($source_type IS NULL OR s.type = $source_type)
+  AND ($target_type IS NULL OR t.type = $target_type)
+  AND r.label = $old_label
+  AND ($aids IS NULL OR r.article_id IN $aids)
+  AND coalesce(r.deleted, false) = false
+WITH collect(r) AS rs, collect(DISTINCT r.article_id) AS aids
+FOREACH (r IN rs | SET r.deleted = true, r.source = 'deleted')
+WITH aids
+UNWIND aids AS aid
+MATCH (a:Article {id: aid})
+MATCH (ns:Entity {name: $new_source_name})
+WHERE $new_source_type IS NULL OR ns.type = $new_source_type
+MATCH (nt:Entity {name: $new_target_name})
+WHERE $new_target_type IS NULL OR nt.type = $new_target_type
+MERGE (ns)-[nr:RELATES {label: $new_label, article_id: aid}]->(nt)
+ON CREATE SET nr.source = 'manual'
+ON MATCH SET nr.source = 'manual', nr.deleted = null
+RETURN count(nr) AS n
+"""
+
+# 修改关系前先查出旧关系实际存在于哪些文章：只在这些文章中删旧建新，
+# 不能因为两端在范围内其他文章共同出现就凭空新增边。
+_Q_ENTITY_RELATION_ARTICLE_IDS = """
+MATCH (s:Entity {name: $source_name})-[r:RELATES]->(t:Entity {name: $target_name})
+WHERE ($source_type IS NULL OR s.type = $source_type)
+  AND ($target_type IS NULL OR t.type = $target_type)
+  AND r.label = $label
+  AND ($aids IS NULL OR r.article_id IN $aids)
+  AND coalesce(r.deleted, false) = false
+RETURN DISTINCT r.article_id AS aid
+"""
+
+
+def _norm_rel_type(etype: str | None) -> str | None:
+    """关系查询的类型参数：None = 不限定类型；'' 是合法类型（旧数据可能缺类型）。
+
+    不能把空串折叠成 None——否则空类型实体会匹配/删除同名其他类型实体的关系。
+    """
+    return etype.strip() if isinstance(etype, str) else None
+
+
+def get_entity_relations_sync(
+    name: str,
+    etype: str | None = None,
+    article_ids: list[str] | None = None,
+) -> list[dict]:
+    """某实体的全部关系（两端聚合）：同一 (source,target,label) 的多篇文章边合并。"""
+    recs = _run_sync(_Q_ENTITY_RELATIONS, {
+        "name": name,
+        "etype": _norm_rel_type(etype),
+        "aids": article_ids or None,
+    })
+    agg: dict[tuple, dict] = {}
+    for rec in recs:
+        src_name = rec["source_name"] or ""
+        tgt_name = rec["target_name"] or ""
+        if not src_name or not tgt_name:
+            continue
+        key = (src_name, rec["source_type"] or "", tgt_name, rec["target_type"] or "", rec["label"] or "关联")
+        item = agg.get(key)
+        if item is None:
+            item = {
+                "source_name": key[0],
+                "source_type": key[1],
+                "target_name": key[2],
+                "target_type": key[3],
+                "label": key[4],
+                "article_ids": [],
+            }
+            agg[key] = item
+        aid = rec["aid"]
+        if aid and aid not in item["article_ids"]:
+            item["article_ids"].append(aid)
+    return sorted(agg.values(), key=lambda r: (r["label"], r["target_name"], r["target_type"]))
+
+
+def articles_mentioning_both_sync(
+    source_name: str,
+    source_type: str | None,
+    target_name: str,
+    target_type: str | None,
+    article_ids: list[str] | None = None,
+) -> list[str]:
+    recs = _run_sync(_Q_ARTICLES_MENTIONING_BOTH, {
+        "source_name": source_name,
+        "source_type": _norm_rel_type(source_type),
+        "target_name": target_name,
+        "target_type": _norm_rel_type(target_type),
+        "aids": article_ids or None,
+    })
+    return [rec["aid"] for rec in recs]
+
+
+def create_entity_relation_sync(
+    source_name: str,
+    source_type: str | None,
+    target_name: str,
+    target_type: str | None,
+    label: str,
+    article_ids: list[str] | None = None,
+) -> int:
+    recs = _run_sync(_Q_CREATE_ENTITY_RELATION, {
+        "source_name": source_name,
+        "source_type": _norm_rel_type(source_type),
+        "target_name": target_name,
+        "target_type": _norm_rel_type(target_type),
+        "label": label or "关联",
+        "aids": article_ids or None,
+    }, write=True)
+    return int(recs[0]["n"]) if recs else 0
+
+
+def delete_entity_relation_sync(
+    source_name: str,
+    source_type: str | None,
+    target_name: str,
+    target_type: str | None,
+    label: str,
+    article_ids: list[str] | None = None,
+) -> int:
+    recs = _run_sync(_Q_DELETE_ENTITY_RELATION, {
+        "source_name": source_name,
+        "source_type": _norm_rel_type(source_type),
+        "target_name": target_name,
+        "target_type": _norm_rel_type(target_type),
+        "label": label or "关联",
+        "aids": article_ids or None,
+    }, write=True)
+    return int(recs[0]["n"]) if recs else 0
+
+
+def rename_entity_relation_label_sync(
+    old: dict,
+    new_label: str,
+    article_ids: list[str] | None = None,
+) -> int:
+    """只改关系名：原地 SET label（不删边，保留自动抽取来源/边属性）。"""
+    recs = _run_sync(_Q_RENAME_ENTITY_RELATION_LABEL, {
+        "source_name": old["source_name"],
+        "source_type": _norm_rel_type(old.get("source_type")),
+        "target_name": old["target_name"],
+        "target_type": _norm_rel_type(old.get("target_type")),
+        "old_label": old.get("label") or "关联",
+        "new_label": new_label or "关联",
+        "aids": article_ids or None,
+    }, write=True)
+    return int(recs[0]["n"]) if recs else 0
+
+
+def reorient_entity_relation_sync(
+    old: dict,
+    new: dict,
+    article_ids: list[str] | None = None,
+) -> int:
+    """仅切换方向：在旧关系存在的文章内反向建边（不要求两端 MENTIONS）。"""
+    recs = _run_sync(_Q_REORIENT_ENTITY_RELATION, {
+        "source_name": old["source_name"],
+        "source_type": _norm_rel_type(old.get("source_type")),
+        "target_name": old["target_name"],
+        "target_type": _norm_rel_type(old.get("target_type")),
+        "old_label": old.get("label") or "关联",
+        "new_source_name": new["source_name"],
+        "new_source_type": _norm_rel_type(new.get("source_type")),
+        "new_target_name": new["target_name"],
+        "new_target_type": _norm_rel_type(new.get("target_type")),
+        "new_label": new.get("label") or "关联",
+        "aids": article_ids or None,
+    }, write=True)
+    return int(recs[0]["n"]) if recs else 0
+
+
+def get_entity_relation_article_ids_sync(
+    source_name: str,
+    source_type: str | None,
+    target_name: str,
+    target_type: str | None,
+    label: str,
+    article_ids: list[str] | None = None,
+) -> list[str]:
+    """旧关系实际存在的文章 id（修改关系的作用域：只改这些文章中的边）。"""
+    recs = _run_sync(_Q_ENTITY_RELATION_ARTICLE_IDS, {
+        "source_name": source_name,
+        "source_type": _norm_rel_type(source_type),
+        "target_name": target_name,
+        "target_type": _norm_rel_type(target_type),
+        "label": label or "关联",
+        "aids": article_ids or None,
+    })
+    return [rec["aid"] for rec in recs if rec.get("aid")]
+
+
+def update_entity_relation_sync(
+    old: dict,
+    new: dict,
+    article_ids: list[str] | None = None,
+) -> int:
+    """改关系：同一事务内删旧边、建新边（调用方已校验新对端在本文章实体中）。
+
+    old/new 均含 source_name/source_type/target_name/target_type/label。
+    调用方应传入旧关系实际存在的文章范围（get_entity_relation_article_ids_sync），
+    避免在旧关系不存在的文章中凭空新增。
+    """
+    aids = article_ids or None
+    statements = [
+        (_Q_DELETE_ENTITY_RELATION, {
+            "source_name": old["source_name"],
+            "source_type": _norm_rel_type(old.get("source_type")),
+            "target_name": old["target_name"],
+            "target_type": _norm_rel_type(old.get("target_type")),
+            "label": old.get("label") or "关联",
+            "aids": aids,
+        }),
+        (_Q_CREATE_ENTITY_RELATION, {
+            "source_name": new["source_name"],
+            "source_type": _norm_rel_type(new.get("source_type")),
+            "target_name": new["target_name"],
+            "target_type": _norm_rel_type(new.get("target_type")),
+            "label": new.get("label") or "关联",
+            "aids": aids,
+        }),
+    ]
+    _write_tx_sync(statements)
+    return len(article_ids or [])
 
 
 # ─── 读操作（同步版）───
@@ -568,8 +936,8 @@ ORDER BY e.created_at
 
 _Q_ARTICLE_RELATIONS = """
 MATCH (e1:Entity)-[r:RELATES]->(e2:Entity)
-WHERE r.article_id IN $ids
-RETURN r.article_id AS aid, e1.name AS source, e1.type AS source_type,
+WHERE r.article_id IN $ids AND coalesce(r.deleted, false) = false
+RETURN DISTINCT r.article_id AS aid, e1.name AS source, e1.type AS source_type,
        e2.name AS target, e2.type AS target_type, r.label AS label
 """
 
@@ -714,18 +1082,50 @@ def all_entity_names_sync() -> list[str]:
     return [rec["name"] for rec in recs if rec["name"]]
 
 
-def entity_creator_and_articles_sync(name: str) -> tuple[str | None, list[str]]:
-    """实体创建人（最早节点胜）与其全部提及文章 id（权限检查用）。"""
+def entity_creator_and_articles_sync(
+    name: str,
+    etype: str | None = None,
+) -> tuple[str | None, list[str]]:
+    """实体创建人（最早节点胜）与其全部提及文章 id（权限检查用）。
+
+    etype 非 None 时按 (name, type) 精确定位——同名不同类型的实体各有权限主体；
+    None 保留旧的按名称匹配语义。
+    """
+    params = {"name": name, "etype": _norm_rel_type(etype)}
     creator_recs = _run_sync(
-        "MATCH (e:Entity {name: $name}) RETURN e.created_by AS created_by ORDER BY e.created_at LIMIT 1",
-        {"name": name},
+        "MATCH (e:Entity {name: $name}) "
+        "WHERE $etype IS NULL OR e.type = $etype "
+        "RETURN e.created_by AS created_by ORDER BY e.created_at LIMIT 1",
+        params,
     )
     creator = creator_recs[0]["created_by"] if creator_recs else None
     aid_recs = _run_sync(
-        "MATCH (a:Article)-[:MENTIONS]->(e:Entity {name: $name}) RETURN DISTINCT a.id AS aid",
-        {"name": name},
+        "MATCH (a:Article)-[:MENTIONS]->(e:Entity {name: $name}) "
+        "WHERE $etype IS NULL OR e.type = $etype "
+        "RETURN DISTINCT a.id AS aid",
+        params,
     )
     return creator, [rec["aid"] for rec in aid_recs]
+
+
+def count_entity_nodes_named_sync(name: str) -> int:
+    """名称下剩余的实体节点数（类型限定重命名后判断是否还有其他类型变体）。"""
+    recs = _run_sync(
+        "MATCH (e:Entity {name: $name}) RETURN count(e) AS n",
+        {"name": name},
+    )
+    return int(recs[0]["n"]) if recs else 0
+
+
+def entity_exists_sync(name: str, etype: str | None = None) -> bool:
+    """(name, type) 实体是否存在（etype=None 时按名称判断）。"""
+    recs = _run_sync(
+        "MATCH (e:Entity {name: $name}) "
+        "WHERE $etype IS NULL OR e.type = $etype "
+        "RETURN count(e) > 0 AS exists",
+        {"name": name, "etype": _norm_rel_type(etype)},
+    )
+    return bool(recs and recs[0]["exists"])
 
 
 def entity_mentioned_anywhere_sync(name: str) -> bool:
@@ -758,9 +1158,46 @@ def graph_data_sync() -> tuple[list[dict], list[dict], list[dict]]:
     ments = _run_sync("MATCH (a:Article)-[:MENTIONS]->(e:Entity) RETURN a.id AS aid, e.name AS name, e.type AS type")
     rels = _run_sync(
         "MATCH (e1:Entity)-[r:RELATES]->(e2:Entity) "
-        "RETURN e1.name AS source, e1.type AS source_type, e2.name AS target, e2.type AS target_type, r.label AS label"
+        "WHERE coalesce(r.deleted, false) = false "
+        "RETURN DISTINCT e1.name AS source, e1.type AS source_type, "
+        "e2.name AS target, e2.type AS target_type, r.label AS label"
     )
     return [dict(r) for r in ents], [dict(r) for r in ments], [dict(r) for r in rels]
+
+
+def expand_graph_sync(node_match: str, params: dict, depth: int) -> tuple[list, list]:
+    """n 层邻域展开：Neo4j 直查全量（不受 /graph 2000 节点截断影响）。
+
+    node_match 形如 "MATCH (n0:Article {id: $start_id})" 或
+    "MATCH (n0:Entity {name: $name, type: $etype})"；
+    返回 (节点记录, 关系记录) 原始 neo4j 对象列表，由调用方映射为图谱 DTO。
+    """
+    depth = max(1, min(int(depth), 5))
+    # 上限护栏：防止枢纽节点 n=5 时变量长路径爆炸（前端 D3 也扛不住全量渲染）。
+    # LIMIT 必须放在 collect 之前：先流式截断路径行，避免 collect 先把全部路径
+    # 聚合成内存列表再截断（枢纽节点上会先materialize海量行）。
+    nodes = _run_sync(
+        f"{node_match} "
+        f"OPTIONAL MATCH (n0)-[:MENTIONS|RELATES*1..{depth}]-(x) "
+        "WITH n0, x LIMIT 1200 "
+        "WITH collect(DISTINCT n0) + collect(DISTINCT x) AS allnodes "
+        "UNWIND allnodes AS n RETURN DISTINCT n",
+        params,
+    )
+    rels = _run_sync(
+        f"{node_match} "
+        f"OPTIONAL MATCH (n0)-[r:MENTIONS|RELATES*1..{depth}]-(x) "
+        # 先按“路径”限流再 UNWIND：稠密邻域中 DISTINCT 只有在扫完全部
+        # 指数级路径后才能收敛，必须在展开阶段就截断（安全上限）。
+        "WITH r LIMIT 5000 "
+        # 端点必须用 startNode/endNode 显式返回：driver 5.26 中 rel.nodes
+        # 从 UNWIND 列表解出的关系携带的是未水合（无 labels/属性）的节点壳
+        "UNWIND r AS rel "
+        "WITH rel WHERE NOT (rel:RELATES AND coalesce(rel.deleted, false)) "
+        "RETURN DISTINCT rel, startNode(rel) AS s, endNode(rel) AS e LIMIT 5000",
+        params,
+    )
+    return nodes, rels
 
 
 # ─── 读操作（异步版，供 async 的 QA 路径）───

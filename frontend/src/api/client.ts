@@ -16,6 +16,16 @@ export interface EntityInfoItem {
   updated_at: string;
 }
 
+/** 实体关系（RELATES 边聚合）：同一两端/关系名的多篇文章边合并为一条 */
+export interface EntityRelation {
+  source_name: string;
+  source_type: string;
+  target_name: string;
+  target_type: string;
+  label: string;
+  article_ids: string[];
+}
+
 /** 高级搜索条件：类型 + 值 + 与上一条的连接关系（与/或）+ 非（取反） */
 export interface AdvancedSearchCondition {
   type: 'keyword' | 'person' | 'tag' | 'time' | 'category';
@@ -287,22 +297,31 @@ export const api = {
       body: JSON.stringify({ entity: { name, type }, article_ids: articleIds }),
     });
   },
-  updateEntity(oldName: string, name?: string, type?: string) {
+  updateEntity(oldName: string, name?: string, type?: string, oldType?: string | null) {
     return request<{ old: string; name: string | null; type: string | null; count: number }>('/entities/update', {
       method: 'PUT',
-      body: JSON.stringify({ old_name: oldName, name: name ?? null, type: type ?? null }),
+      body: JSON.stringify({
+        old_name: oldName,
+        old_type: oldType ?? null,
+        name: name ?? null,
+        type: type ?? null,
+      }),
     });
   },
-  renameEntity(oldName: string, newName: string) {
+  renameEntity(oldName: string, newName: string, oldType?: string | null) {
     return request<{ old: string; new: string; count: number }>('/entities/rename', {
       method: 'PUT',
-      body: JSON.stringify({ old_name: oldName, new_name: newName }),
+      body: JSON.stringify({ old_name: oldName, old_type: oldType ?? null, new_name: newName }),
     });
   },
-  removeEntity(entityName: string, articleIds?: string[]) {
+  removeEntity(entityName: string, articleIds?: string[], entityType?: string | null) {
     return request<{ entity: string; count: number }>('/entities/remove', {
       method: 'DELETE',
-      body: JSON.stringify({ entity_name: entityName, article_ids: articleIds ?? null }),
+      body: JSON.stringify({
+        entity_name: entityName,
+        entity_type: entityType ?? null,
+        article_ids: articleIds ?? null,
+      }),
     });
   },
 
@@ -326,9 +345,77 @@ export const api = {
     return request<void>(`/entities/${encodeURIComponent(entityName)}/info/${infoId}`, { method: 'DELETE' });
   },
 
+  // ── Entity Relations (RELATES 增删改) ──
+  queryEntityRelations(data: {
+    entity_name: string;
+    entity_type?: string | null;
+    article_ids?: string[] | null;
+  }) {
+    return request<EntityRelation[]>('/entities/relations/query', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+  createEntityRelation(data: {
+    owner_name: string;
+    owner_type: string;
+    source_name: string;
+    source_type: string;
+    target_name: string;
+    target_type: string;
+    label: string;
+    article_ids?: string[] | null;
+  }) {
+    return request<{ created: number }>('/entities/relations', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+  updateEntityRelation(data: {
+    owner_name: string;
+    owner_type: string;
+    source_name: string;
+    source_type: string;
+    target_name: string;
+    target_type: string;
+    old_label: string;
+    new_source_name: string;
+    new_source_type: string;
+    new_target_name: string;
+    new_target_type: string;
+    new_label: string;
+    article_ids?: string[] | null;
+  }) {
+    return request<{ updated: number; skipped?: number }>('/entities/relations', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  },
+  deleteEntityRelation(data: {
+    owner_name: string;
+    owner_type: string;
+    source_name: string;
+    source_type: string;
+    target_name: string;
+    target_type: string;
+    label: string;
+    article_ids?: string[] | null;
+  }) {
+    return request<{ deleted: number }>('/entities/relations', {
+      method: 'DELETE',
+      body: JSON.stringify(data),
+    });
+  },
+
   // ── Graph ──
   getGraphData() {
     return request<GraphData>('/graph');
+  },
+  // 展开选中节点的 n 层关系（Neo4j 直查全量，n=1..5）
+  expandGraph(nodeId: string, depth: number) {
+    return request<GraphData>(
+      `/graph/expand?node_id=${encodeURIComponent(nodeId)}&depth=${depth}`,
+    );
   },
 
   // ── Q&A ──

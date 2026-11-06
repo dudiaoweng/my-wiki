@@ -1,6 +1,6 @@
 # 知识库系统 — 技术文档
 
-> **版本**: 2.8 | **最后更新**: 2026-11-03 | **作者**: dudiaoweng
+> **版本**: 2.9 | **最后更新**: 2026-11-06 | **作者**: dudiaoweng
 
 ---
 
@@ -35,8 +35,8 @@
 - 🔍 **搜索体系** — 顶部关键词即时搜索（数据库匹配）、侧边栏搜索结果树、高级搜索（时间范围/人员/关键词 × 与或非组合）；搜索结果作为文章列表展示的基础（目录分布、目录内筛选）
 - 🗂️ **文章列表** — 分页（每页 10 篇）、组合排序（时间/标题·目录名/创建人 × 倒序/正序，目录与文章分别排序）、目录卡片（创建人/创建时间、修改/删除、拖拽移动）
 - 🤖 **智能问答 (RAG)** — 最右侧面板与文章/实体窗口并排（窗口切换保活、数据不清理），多会话下拉框管理，多行输入框
-- 🕸️ **知识图谱** — D3.js 力导向图，展示文章-目录-实体之间的关系网络
-- 🏷️ **实体管理** — LLM 自动提取实体+关系（实体以「名称+类型」为标识），实体列表动态加载（每批 20 条）
+- 🕸️ **知识图谱** — D3.js 力导向图，展示文章-目录-实体关系网络；实体列表⇄图谱联动、n 层展开/移除/撤销、关系增删改、图谱 JSON 打开/保存/截图与单独浏览模式
+- 🏷️ **实体管理** — LLM 自动提取实体+关系（实体以「名称+类型」为标识，同名不同类型独立），实体列表动态加载（每批 20 条）；关联渐进加载（每批 10 条），支持方向切换与类型化对端选择
 - 🧩 **Prompt 可配置** — 所有提示词以 txt 文件存于 `prompts/` 目录，可独立编辑，重启生效（Docker 挂载）
 - 📱 **响应式设计** — 桌面端多栏布局，移动端按内容高度自适应
 
@@ -116,7 +116,7 @@ my-wiki/
 │       │   ├── ArticleCard.tsx  # 文章卡片
 │       │   ├── ArticleDetail.tsx        # 文章详情页 (独立路由)
 │       │   ├── ArticleDetailInline.tsx  # 文章内联详情
-│       │   ├── EntityPanel.tsx  # 实体面板 (LLM实体只读列表+知识图谱双模式)
+│       │   ├── EntityPanel.tsx  # 实体面板 (实体/关系编辑列表 + 知识图谱双模式)
 │       │   ├── KnowledgeGraph.tsx       # 全屏知识图谱页
 │       │   ├── QA.tsx           # 智能问答页
 │       │   ├── CommentSection.tsx       # 评论组件 (共用)
@@ -377,11 +377,15 @@ my-wiki/
 (a:Article {id})                          -- 仅作 MENTIONS 边源；标题等元数据仍在 SQLite
 (e:Entity {name, type, created_by, created_at})
 (a)-[:MENTIONS {source}]->(e)             -- source: 'body' | 'comment:<评论id>'
-(e1)-[:RELATES {label, article_id, source}]->(e2)
+(e1)-[:RELATES {label, article_id, source, deleted?}]->(e2)
 ```
 
 - **实体身份规则**：实体以「名称+类型」为标识（`entity:{name}::{type}`），同名不同类型是两个节点；`(name,type)` 建普通索引而非唯一约束（改名/改类型可产生合法重复，读路径按 `(name,type)` 去重、created_at 最早者胜）
 - **出处溯源**：MENTIONS/RELATES 边携带 `source` 属性（`'body'` 或 `'comment:<id>'`），评论删除/重新解析时按 source 精确删边（旧版 JSON 按三元组减法可能误删正文关系）；关系边另带 `article_id` 支持附件重解析的覆盖语义
+- **手工关系（manual）**：实体面板新增/修改（改名/换向/换对端）产生的关系标记 `source='manual'`；`ON MATCH` 会把已存在的自动抽取边升级为 manual。`replace_article_mentions` 只删对应 `source` 的边，因此重新识别/重新上传不会冲掉手工关系
+- **删除墓碑（deleted）**：删除关系不物理删除，而是 `SET r.deleted=true, r.source='deleted'`；`_Q_MERGE_RELATIONS` 在重新抽取时按「同 label + article_id + 任一端点方向」跳过墓碑，防止删除后的关系（含反向重抽取）复活；手工重新添加会清除墓碑。所有读取/图谱/文章组装查询均过滤 `deleted=true` 的边
+- **关系写规则**：`POST/PUT/DELETE /api/entities/relations` 必须提供 `article_ids`、两端明确类型和 `owner`（权限主体必须是关系端点）；修改只作用于旧关系实际存在的文章，新对端无法共同出现的文章保留原关系并计入 `skipped`；仅改关系名走原地 SET + 旧名墓碑，仅换方向走向重建边
+- **类型化权限**：实体修改/关系写入按 `(name, type)` 查创建人与提及文章创建人；同名不同类型的实体不共享权限主体（`owner_type` 精确匹配端点类型）
 - **孤儿 GC**：每次删边后执行「无 MENTIONS 的实体节点 DETACH DELETE」——保持"实体存在 = 至少被一篇文章提及"语义
 - **悬空 GC 护栏**：启动清理引用已删除文章/评论的边；若 Neo4j 与 SQLite 的文章 id 不相交（不含固定种子 a1-a5），视为连错库并跳过清理（2026-09-30 存储统一过渡期曾因无此护栏清空过图）
 - **熔断降级（v2.4）**：Neo4j 连接级故障后 30 秒内所有调用快速失败（避免每次读路径等满 10s 超时拖垮线程池），任何操作成功即复位
@@ -413,6 +417,8 @@ my-wiki/
 | `created_by` | VARCHAR(200) | NULLABLE | 创建人 (证书 CN) |
 | `created_at` | DATETIME | NOT NULL | 创建时间 (UTC) |
 | `updated_at` | DATETIME | NOT NULL | 更新时间 (UTC) |
+
+> 附加信息以 `entity_name` 为键，同名不同类型共享；实体类型化重命名时，仅当旧名称下已无其他类型变体才级联更新 `entity_name`。
 
 #### `comments` — 文章评论 (v1.3 新增)
 
@@ -482,14 +488,19 @@ my-wiki/
 | | | `/by-article` | GET | 按文章分组标签 |
 | `/api/entities` | `routes/entities.py` | `/` | GET | 实体列表 |
 | | | `/` | POST | 添加实体 |
-| | | `/update` | PUT | 更新实体 |
-| | | `/rename` | PUT | 重命名实体 |
-| | | `/remove` | DELETE | 删除实体 |
+| | | `/update` | PUT | 更新实体（`old_type` 可限定类型变体） |
+| | | `/rename` | PUT | 重命名实体（`old_type` 可限定类型变体） |
+| | | `/remove` | DELETE | 删除实体（`entity_type` 可限定类型变体） |
+| | | `/relations/query` | POST | 查询实体关系（可按实体类型/文章范围过滤） |
+| | | `/relations` | POST | 新增实体关系（owner + 两端类型 + article_ids 必填） |
+| | | `/relations` | PUT | 修改实体关系（改名/换向/换对端，只改旧边存在的文章） |
+| | | `/relations` | DELETE | 删除实体关系（软删除墓碑，防重新抽取复活） |
 | | | `/{name}/info` | GET | 实体附加信息列表 |
 | | | `/{name}/info` | POST | 创建实体附加信息 |
 | | | `/{name}/info/{id}` | PUT | 更新实体附加信息 |
 | | | `/{name}/info/{id}` | DELETE | 删除实体附加信息 |
 | `/api/graph` | `routes/graph.py` | `/` | GET | 知识图谱数据 |
+| | | `/expand` | GET | 按节点 id 展开 n 层邻域（1–5 层） |
 | `/api/qa` | `routes/qa.py` | `/ask` | POST | 问答 (RAG) |
 | | | `/parse-file` | POST | 解析上传文件为问答上下文 |
 | `/api/stats` | `routes/stats.py` | `/` | GET | 统计数据 |
@@ -672,18 +683,95 @@ my-wiki/
 **节点类型:**
 | 前缀 | 类型 | 说明 | 视觉样式 |
 |------|------|------|---------|
-| `category:` | category | 文章分类 | 彩色圆点 |
-| `article:` | article | 文章 | 彩色矩形卡片 |
-| `entity:` | entity | LLM 提取的实体（节点 id = `entity:{名称}::{类型}`） | 图标按类型，标签只显示名称 |
+| `category:` | category | 文章分类 | 方框（图标 + 目录名，宽度自适应） |
+| `article:` | article | 文章 | 方框（图标 + 标题，宽度 80–200px） |
+| `entity:` | entity | LLM 提取的实体（节点 id = `entity:{名称}::{类型}`） | 圆形图标按类型，标签只显示名称 |
 
 **边类型:**
 | 标签 | 源→目标 | 说明 |
 |------|---------|------|
 | `"属于"` | article → category | 文章归属分类 |
 | `"提及"` | article → entity | 文章提及实体 |
-| `(自定义)` | entity → entity | 实体间关系 (来自 LLM 提取) |
+| `(自定义)` | entity → entity | 实体间关系 (LLM 提取 + 手工编辑；读取端按两端+关系名去重) |
 
-**安全限制:** 最多 2000 个节点，防止图谱过于庞大。
+**安全限制:** 最多 2000 个节点，防止图谱过于庞大；超出时同步过滤端点被截断的边。
+
+#### GET /api/graph/expand — n 层邻域展开
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `node_id` | string | `article:{id}` 或 `entity:{name}::{type}`；目录节点返回空图 |
+| `depth` | int | 1–5，默认 1 |
+
+- Neo4j 直查，不受 `/api/graph` 2000 节点上限影响
+- 节点查询 `WITH n0, x LIMIT 1200`、关系查询 `WITH r LIMIT 5000`（路径级限流，再 UNWIND/DISTINCT），防止稠密图指数级路径枚举
+- 返回前过滤 `deleted=true` 的关系、端点缺失的边，以及只能经墓碑边到达的孤立节点；起点节点始终保留
+- 文章节点标题仍从 SQLite 组装
+
+#### POST /api/entities/relations/query — 查询实体关系
+
+```json
+{
+  "entity_name": "张三",
+  "entity_type": "人物",
+  "article_ids": ["article-id-1", "article-id-2"]
+}
+```
+- 返回聚合后的 `EntityRelation[]`：`source_name/source_type/target_name/target_type/label/article_ids`
+- `article_ids` 为空 = 全部文章（仅查询语义）；`entity_type` 为空字符串表示精确匹配空类型，`null` 才是不限类型
+
+#### POST /api/entities/relations — 新增关系
+
+```json
+{
+  "owner_name": "张三",
+  "owner_type": "人物",
+  "source_name": "张三",
+  "source_type": "人物",
+  "target_name": "李四",
+  "target_type": "人物",
+  "label": "同事",
+  "article_ids": ["article-id-1"]
+}
+```
+- `article_ids` **必填**（关系按文章存储，禁止“全部文章”写入）
+- `owner` 必须是关系的一端；权限按 `(owner_name, owner_type)` 校验（创建人或提及文章创建人）
+- 两端类型必须明确（空字符串是合法类型）；对端必须与本端在范围内文章共同被提及
+- 已存在同名同类型关系时升级为 `source='manual'`
+
+#### PUT /api/entities/relations — 修改关系
+
+```json
+{
+  "owner_name": "张三", "owner_type": "人物",
+  "source_name": "张三", "source_type": "人物",
+  "target_name": "李四", "target_type": "人物",
+  "old_label": "同事",
+  "new_source_name": "张三", "new_source_type": "人物",
+  "new_target_name": "王五", "new_target_type": "人物",
+  "new_label": "朋友",
+  "article_ids": ["article-id-1", "article-id-2"]
+}
+```
+- 只改关系名：原地 `SET label` 并提升为 `source='manual'`，同时写入旧名墓碑（改名后重新抽取不会还原旧名）
+- 仅换方向：在旧边所在文章内反向建边（要求两端集合不变）
+- 换对端：只在「旧边存在且新对端也能成立」的文章替换；其余文章保留原关系，响应 `{updated, skipped}`
+- 响应 `updated` = 实际处理数量（换对端时为文章数，改名时为边数），`skipped` = 保留原关系的文章数（仅换对端时可能非 0）
+
+#### DELETE /api/entities/relations — 删除关系
+
+```json
+{
+  "owner_name": "张三", "owner_type": "人物",
+  "source_name": "张三", "source_type": "人物",
+  "target_name": "李四", "target_type": "人物",
+  "label": "同事",
+  "article_ids": ["article-id-1"]
+}
+```
+- 软删除：边保留为 `deleted=true, source='deleted'` 墓碑
+- 重新抽取/重新上传会跳过墓碑（无向匹配，反向也不会复活）；手工重新添加会清除墓碑
+- `article_ids` 必填，owner 必须是关系端点
 
 ---
 
@@ -799,8 +887,9 @@ export const api = {
   getCategoryArticleCounts,
   getTags, addTag, renameTag, removeTag, getTagsByArticle,
   addEntity, updateEntity, renameEntity, removeEntity,
+  queryEntityRelations, createEntityRelation, updateEntityRelation, deleteEntityRelation,
   getEntityInfos, createEntityInfo, updateEntityInfo, deleteEntityInfo,
-  getGraphData,
+  getGraphData, expandGraph,
   askQuestion,
   parseFileForQA, // 解析上传文件为问答上下文
   uploadFile,     // FormData 方式, 不用 JSON
@@ -841,7 +930,7 @@ ArticleList
   ├── 读取 URL params: category, search, tag, view, adv
   ├── 目录卡片 (DirCard)：创建人/创建时间 + 修改/删除 + 拖拽（权限同侧边栏）
   ├── 传递给 EntityPanel: entities (LLM实体), selectedArticleIds, articles
-  └── 接收 EntityPanel 回调: onGraphNodeClick (节点点击联动)
+  └── 接收 EntityPanel 回调: onGraphNodeClick（图谱多选 id 集合）、onEntitySelect（实体→文章筛选）、onClearAllSelections
 
 Sidebar（与文章列表共享拖拽状态）
   ├── 浏览模式目录树（分批加载、手风琴展开、目录/文章拖拽）
@@ -849,10 +938,11 @@ Sidebar（与文章列表共享拖拽状态）
   └── 全部按钮：搜索时保留 ?search= / ?adv=1
 
 EntityPanel
-  ├── 双模式: list (LLM实体列表+附加信息，动态加载每批 20 条) / graph (D3 知识图谱)
-  ├── 从 ArticleList 接收选中的文章 ID
-  ├── 图谱节点点击 → 回传 ArticleList 筛选文章
-  └── 实体点击 → 展开附加信息面板 (CRUD)
+  ├── 双模式: list (LLM实体列表+附加信息，动态加载每批 20 条) / graph (实体列表 + D3 知识图谱分栏)
+  ├── 从 ArticleList 接收选中的文章 ID（关联查询/写入的文章范围）
+  ├── 图谱节点点击：实体节点联动实体列表行 + 信息面板；文章/目录节点仅图谱内高亮（不筛选文章列表）
+  ├── 图操作：展开 n 层 / 移除 / 撤销；图谱文件新建/打开/保存/截图；打开/新建进入单独浏览模式
+  └── 实体点击 → 附加信息 + 关联信息面板（关联渐进加载 10/批，可增删改）
 
 QA
   ├── 会话下拉框切换与管理（localStorage 持久化）
@@ -939,6 +1029,22 @@ const notifyArticleSaved = useCallback(() => {
 - 浏览器前进/后退
 - 链接分享
 - 键盘导航 (Ctrl+K → 跳转 /articles 并聚焦搜索框)
+
+### 8.5 实体关系编辑流程
+
+```
+实体列表/图谱选中实体
+  → 信息面板 POST /api/entities/relations/query（article_ids = selectedArticleIds，渐进 10 条）
+  → 新增：RelationTargetPicker 仅列当前文章实体（名称+类型，可筛选）
+     提交 owner/source/target + 两端类型 + label + article_ids
+  → 修改：可改关系名、方向、对端
+     后端先查旧边实际存在的文章 → 只在这些文章删旧建新
+     旧边存在但新对端不成立的文章保留原关系，响应 skipped → 前端提示
+  → 删除：软删除墓碑（deleted=true），重新抽取不会复活
+  → 成功后重新查询关联 + refetchGraph（画布增量更新，不重排版）
+```
+
+单独浏览模式下不调用 API：上述增删改直接作用于 `workingGraph.edges`，并写入撤销历史；不做权限校验。
 
 ---
 
@@ -1079,27 +1185,51 @@ def _collect_entity_info(question, top_chunks, db) -> str:
 
 使用 D3.js v7 力导向图，通过共享 Hook (`useD3ForceGraph`) 实现代码复用：
 
-**数据来源（v2.3）**：`GET /api/graph` 混合组装——文章/分类节点来自 SQLite（标题/颜色），实体节点 + 提及边 + 关系边由 `neo4j_store.graph_data_sync()` 三条 Cypher 直查 Neo4j。v2.2 前的 30 秒 TTL 缓存（避免全表 JSON 扫描）已移除，`invalidate_graph_cache` 全部调用点随之删除；Neo4j 不可用时返回 503「知识图谱服务（Neo4j）不可用」。前端数据形状（节点/边 id 约定）不变，零改动。
+**数据来源（v2.3）**：`GET /api/graph` 混合组装——文章/分类节点来自 SQLite（标题/颜色），实体节点 + 提及边 + 关系边由 `neo4j_store.graph_data_sync()` 三条 Cypher 直查 Neo4j。v2.2 前的 30 秒 TTL 缓存（避免全表 JSON 扫描）已移除，`invalidate_graph_cache` 全部调用点随之删除；Neo4j 不可用时返回 503「知识图谱服务（Neo4j）不可用」。前端节点/边 id 约定保持不变；`EntityPanel` 在此基础上增加了实体列表联动、n 层展开/移除/撤销、关系编辑与图谱文件（打开/保存/新建/截图、单独浏览）功能。
 
 **节点视觉设计:**
-- `category` — 彩色圆点 (使用分类颜色)
-- `article` — 彩色矩形，显示文章标题 (~160px 宽)
+- `category` — 方框样式与文章一致，图标 📁 + 目录名（宽度同样自适应）
+- `article` — 方框，图标 📄 + 标题，宽度按内容自适应（80–200px，超长省略）
 - `entity` — 圆形，图标按实体类型（人物👤/组织🏢/地点📍/事件⚡/产品📦/作品📄…），标签只显示实体名
 
 **实体节点标识:** 实体以「名称+类型」为标识，节点 id = `entity:{name}::{type}`——同名不同类型（如「中华人民共和国」地点/组织）是两个独立节点；类型经 `entity_type` 字段下发，前端据此渲染图标。旧数据产生的无类型节点（`entity:{name}::`）按名称匹配兜底。
 
 **交互功能:**
-- 缩放/平移 (d3.zoom)
-- 节点拖拽 (d3.drag)
-- 悬停工具提示 (title + 类型)
-- 节点点击联动筛选文章列表
-- 多节点选择 (Ctrl+Click)
+- 缩放/平移 (d3.zoom)、节点拖拽 (d3.drag)、悬停工具提示 (title + 类型 + 实体附加信息)
+- **节点点击**：`EntityPanel` 内切换节点选中/高亮——实体节点联动实体列表（选中行 + 信息面板），文章/目录节点仅在图谱内高亮、不筛选文章列表；全屏 `KnowledgeGraph` 页仍按节点 `url` 跳转
+- Ctrl+点击多选；点击空白取消全部选中；选中仅更新视觉高亮，不重建图谱
+- **图操作工具栏**（`EntityPanel`）：展开选中节点 n 层（1–5 层，Neo4j 直查）、从视图移除选中节点、撤销上一步；无节点选中/无历史时按钮灰显
+- **关系编辑**（`EntityPanel` 实体信息面板）：关联按当前文章范围渐进加载（每批 10 条）；支持新增/修改/删除、方向切换、对端类型图标与筛选；写操作要求文章范围，修改只作用于旧边存在的文章
+- **图谱文件**（`EntityPanel` 右上角菜单）：新建 / 打开 / 保存 / 截图；JSON 保存节点位置与视口，可再次打开还原布局。打开或新建后进入**单独浏览模式**：文件名标签可关闭，实体列表仅与载入图联动，本地实体/关系编辑只改内存、不写数据库、不做权限校验
+- **增量更新**：数据 join 保留已有节点对象、位置与缩放；节点/边增删才重启力模拟（边-only 变化也会重启以写入新 path），避免每次刷新重排版
+
+**单独浏览模式（载入图谱）:**
+- 打开或新建图谱后 `loadedGraphName` 非空、`workingGraph` 持有载入图；图谱模式下实体列表/关联/图谱全部从载入图派生，不查询数据库
+- 本地实体/关系编辑只修改 `workingGraph` 并写入撤销历史，不写 SQLite/Neo4j、不做权限校验；撤销不会退出该模式
+- 顶部文件名标签的 ✕ 是唯一退出入口；切换列表模式/窗口、在列表模式选择实体都不会清空载入图（保护条件基于 `loadedGraphName` 而非当前 `mode`）
+- 保存使用 File System Access API（打开文件时记住可写句柄），JSON 含 `version/exportedAt/viewport/nodes(x,y)/edges`；浏览器不支持或写入失败时回退下载副本；保存对话框可修改位置/文件名，文件名变更同步到顶部标签
+- 新建图谱名称按 `知识图谱_YYYY-MM-DD` 追加 `_2`/`_3` 序号；单独模式不显示源实体、不加载数据库附加信息、不查询关联；展开仍可用（按当前标签/类型解析节点 id 后查 Neo4j）
+
+```json
+{
+  "version": 1,
+  "exportedAt": "2026-11-06T08:00:00.000Z",
+  "viewport": { "x": 120, "y": 80, "k": 1.2 },
+  "nodes": [
+    { "id": "entity:张三::人物", "label": "张三", "type": "entity",
+      "url": "", "color": null, "entity_type": "人物", "x": 100, "y": 200 }
+  ],
+  "edges": [
+    { "source": "entity:张三::人物", "target": "entity:李四::人物", "label": "同事" }
+  ]
+}
+```
 
 **SVG 箭头标记:**
 ```xml
-<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5"
+<marker id="arrow-d3" viewBox="0 0 10 10" refX="10" refY="5"
         markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-  <path d="M 0 0 L 10 5 L 0 10 z" fill="#999" />
+  <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--c-border)" opacity="0.7" />
 </marker>
 ```
 
@@ -1109,13 +1239,18 @@ v2.3 起实体/关系存于 Neo4j，检索路径同时受益：实体直召与�
 
 **路径一：图谱节点 → 文章搜索（图 → 文）**
 
-实体节点的 `url` 指向 `/articles?search={name}`（`graph.py`）——点击图谱中的实体节点即按实体名对文章标题+正文做 ILIKE 搜索。前端文章列表还支持图谱节点选择（`selectedGraphNodeIds`，按 `entity:{name}::{type}` / `article:{id}` / `category:{id}` 匹配）与实体面板选择（`name::type` 精确匹配）**组合叠加的本地筛选**（`ArticleList.tsx`）。
+实体节点的 `url` 指向 `/articles?search={name}`（`graph.py`）——全屏 `KnowledgeGraph` 页点击节点按 `url` 跳转；`EntityPanel` 内点击实体节点则联动实体列表/信息面板（不筛选文章列表），文章/目录节点仅在图谱内高亮。文章列表的本地实体筛选由实体列表选择（`name::type` 精确匹配）触发；图谱多选 id 集合（`selectedGraphNodeIds`）只用于图谱高亮，不再过滤文章列表（用户明确要求图谱文章/目录节点与文章列表不联动）。
 
 **路径二：实体标签写入向量分块，提升召回（召回前）**
 
 手动添加实体时（`entities.py` `add_entity`），把 `[实体: 名称 (类型)]` 标签行追加到所有提及该实体的分块文本末尾（无分块提及时挂到第一个分块或新建 `entity_tag` 块），随后 `_schedule_embedding_recompute()` 异步重算受影响分块的 embedding。效果：用户问句措辞与正文不一致时，只要命中实体名，向量相似度即可匹配到带标签的块——实体标注相当于给检索打了可控的「锚点」。实体改名/删除时同步维护分块标签行并重嵌入（`rename_entity` / `remove_entity`）。
 
-**实体改名级联（v2.4）**：前端改名（实体面板/图谱气泡）统一走 `PUT /api/entities/rename`——Neo4j 节点改名 + EntityInfo 附加信息级联 + chunk 标签行替换（正则要求实体名后紧跟类型括号，防「AI」误伤「AI 助手」的前缀污染）；`PUT /update` 仅用于改类型。改名后关系边端点自动跟随（边指向节点）。
+**实体改名/改类型级联**：实体以 `(name, type)` 为身份，改名和改类型都按 `old_type` 限定，避免同名其他类型节点被一起改掉。
+
+- `PUT /api/entities/rename`：Neo4j 节点改名；chunk 标签行按类型精确替换（正则要求实体名后紧跟类型括号，防「AI」误伤「AI 助手」的前缀污染）。EntityInfo 按名称共享——只有旧名称下已无其他类型变体时才级联改名，否则保留旧名称的共享附加信息。改名后关系边端点自动跟随（边指向节点）。
+- `PUT /api/entities/update`：只改类型时同样按 `old_type` 限定，并同步 chunk 标签行中的类型（`[实体: 名称 (旧类型)]` → 新类型）。
+- `DELETE /api/entities/remove` 支持 `entity_type`；类型化删除只删该类型的 MENTIONS/RELATES 和标签行，同名其他类型保留。
+- 上述操作的权限均按 `(name, type)` 判定创建人/提及文章创建人；目标不存在时返回 404，避免无节点却级联 SQLite。
 
 **路径三：实体附加信息同步分块 + QA 注入（召回后）**
 
@@ -1153,7 +1288,7 @@ v2.3 起实体/关系存于 Neo4j，检索路径同时受益：实体直召与�
 ```
 LLM 提取实体/关系 ──► Neo4j（实体节点/提及边/关系边）
         │
-        ├──► 图谱可视化（graph.py：SQLite 文章/分类 + Neo4j 实体/边）──► 点击实体节点 ──► /articles?search=实体名
+        ├──► 图谱可视化（graph.py：SQLite 文章/分类 + Neo4j 实体/边）──► 全屏页点击节点按 url 跳转；EntityPanel 内点击实体节点联动实体列表/信息面板
         │
         ├──► 实体标签/附加信息写入分块 + 重嵌入 ──► 提升向量召回
         │
@@ -1215,12 +1350,15 @@ LLM 提取实体/关系 ──► Neo4j（实体节点/提及边/关系边）
 |------|-----------|---------|---------|------------|
 | 文章 | created_by | 仅创建人 | 仅创建人 | 仅创建人 |
 | 评论 | created_by | 仅评论人 | 评论人或文章创建人 | 评论人或文章创建人 |
-| 实体 | entities JSON 中的 created_by | 实体创建人或文章创建人 | 同左 | — |
+| 实体 | Neo4j `Entity.created_by`（按 name+type） | 实体创建人或提及文章创建人 | 同左 | — |
+| 实体关系 | 以 `owner` 端点权限判定（按 name+type） | owner 创建人或 owner 提及文章创建人 | 同左 | — |
 | 实体附加信息 | EntityInfo.created_by | 仅创建人 | 仅创建人 | — |
 | 目录 | created_by | 仅创建人 | 仅创建人 | — |
 
 - 前端通过身份证号比对隐藏非创建人的编辑/删除按钮
 - 后端 403 兜底拦截，错误详情区分权限错误与认证错误（认证 403 触发登录跳转，权限 403 仅弹 toast）
+- **关系写操作额外约束**：`owner` 必须是关系端点；两端必须提供明确类型；`article_ids` 必填；修改/删除先按旧边实际存在的文章取范围，避免越权或扩散到其他文章
+- **同名不同类型**：权限查询使用 `(name, type)` 精确匹配，拥有 `张三(人物)` 不自动拥有 `张三(组织)` 的修改权（无创建人记录时沿用宽松回退）
 
 ### 9.9 分段提取（v2.0，v2.3 移除块级标注快照）
 
@@ -1299,7 +1437,9 @@ LLM 提取实体/关系 ──► Neo4j（实体节点/提及边/关系边）
 
 ### 9.15 实体列表动态加载
 
-实体面板列表模式每批展示 **20 条**（`ENTITY_BATCH`），底部「加载更多（已显示 N / 总数 条）」按钮逐批追加；实体数据或筛选词变化时回到第一批。
+实体面板列表模式每批展示 **20 条**（`ENTITY_BATCH`），底部「加载更多（已显示 N / 总数 条）」按钮逐批追加；实体数据或筛选词变化时回到第一批。编辑中或已选中的实体若位于第一批之外，会保留其可见批次并滚动到该行，避免清除筛选/数据刷新后编辑表单与信息面板消失。
+
+关联信息同样渐进加载：每次 **10 条**（`RELATION_BATCH`），点击「加载更多」追加；切换选中实体时回到第一批。关联按当前文章范围从 Neo4j 查询（`POST /api/entities/relations/query`），单独浏览模式下改为从载入图的 `workingGraph.edges` 即时派生，不查数据库。
 
 ---
 
@@ -1451,7 +1591,7 @@ interface AppContextValue {
 | **直连兼容** | 开发模式 uvicorn 单端口 8000 (CERT_OPTIONAL)，`auth.py` 从 TLS peercert 提取 CN（双模式：peercert 直连 / X-Client-Cert 头） | `main.py`, `auth.py` |
 | **证书吊销** | 已完全移除 — 服务器证书不含 CRL 分发点（`gen_server.py` 签发），CRL 分发端点已删除 | `main.py`, `run.py` |
 | **应用白名单** | `ALLOWED_CERT_SUBJECTS` 控制允许的证书 CN（空 = 全部允许） | `auth.py`, `config.py` |
-| **资源权限** | 文章/评论/实体/附加信息/分类基于身份证号比对 created_by，仅创建人可修改/删除 | 各路由模块 |
+| **资源权限** | 文章/评论/实体/附加信息/分类基于身份证号比对 created_by，仅创建人可修改/删除；实体与关系权限按 `(name, type)` 精确匹配，关系 `owner` 必须是端点 | 各路由模块 |
 | **SHA-1 兼容** | `run.py` SSL 兼容补丁：`VERIFY_X509_PARTIAL_CHAIN` + 强制 TLS 1.2 + 显式套件列表 (`@SECLEVEL=0`)；nginx 同样限制 TLS 1.2 + 套件 | `run.py`, `nginx/mtls.conf` |
 | **路径穿越** | 文件名净化 + `/api/media/` 端点 `Path.resolve()` 范围校验 | `upload.py`, `main.py` |
 | **文件大小** | 500MB 上传限制 / 50MB 问答文件限制 | `upload.py`, `qa.py` |
@@ -1462,7 +1602,8 @@ interface AppContextValue {
 | **CORS** | 可配置的允许来源列表 | `main.py` |
 | **外键** | `PRAGMA foreign_keys = ON` | `database.py` |
 | **请求体限制** | QA 历史最多 20 条/50 条消息，文章分页最多 200，文件上下文最多 5 个 | `qa.py`, `articles.py` |
-| **图谱节点限制** | MAX_NODES = 2000 | `graph.py` |
+| **图谱节点限制** | `/api/graph` MAX_NODES = 2000；`/api/graph/expand` 路径级 LIMIT 1200/5000 + 端点/墓碑过滤 | `graph.py`, `neo4j_store.py` |
+| **关系写校验** | `article_ids` 必填；owner 必须是端点；两端类型明确；修改范围限定旧边实际存在的文章 | `entities.py`, `neo4j_store.py` |
 | **竞态保护** | `ensure_embeddings` 使用 `asyncio.Lock` 防止并发重复计算 | `qa.py` |
 | **闭包内存** | 后台任务不捕获 `content_bytes`，改为从磁盘重新读取 | `upload.py` |
 

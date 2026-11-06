@@ -87,7 +87,7 @@ export function ArticleCard({
   return (
     <div
       className={`${styles.card} ${selected ? styles.cardSelected : ''} ${depth > 0 ? styles.cardNested : ''}${dropHighlight === 'drop' ? ` ${styles.dropTarget}` : ''}${dropHighlight === 'invalid' ? ` ${styles.dropTargetInvalid}` : ''}`}
-      style={{ marginLeft: indent, width: `calc(100% - ${indent}px)`, '--card-accent': catColor } as React.CSSProperties}
+      style={{ '--tree-indent': `${indent}px`, '--card-accent': catColor } as React.CSSProperties}
       role="button"
       tabIndex={0}
       aria-label={`${article.title}${selected ? '（已选中）' : ''}`}

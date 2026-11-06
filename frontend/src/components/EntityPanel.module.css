@@ -15,10 +15,36 @@
 /* Graph mode: 卡片样式与实体列表一致，宽度与原来一样（扩展占满右侧） */
 .panelGraph {
   flex: 5;
-  min-width: 400px;
+  min-width: 520px;
   width: auto;
   max-height: none;
   position: static;
+}
+
+/* 图谱模式左右分栏：左栏实体列表（打开图谱时保持可见）+ 右栏知识图谱 */
+.graphSplit {
+  display: flex;
+  gap: 16px;
+  flex: 1;
+  min-height: 0;
+}
+
+.graphSplitList {
+  width: 260px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--c-border);
+  padding-right: 16px;
+}
+
+.graphSplitGraph {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 /* Header & legend padding in graph mode */
@@ -52,6 +78,93 @@
   align-items: center;
   gap: 8px;
   margin-left: auto;
+}
+
+/* 顶部操作按钮组：+ 新增 / ✎ 修改 / ✕ 删除（修改删除作用于选中实体） */
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+}
+
+/* 仅图标：紧凑的方形按钮，图标放大 */
+.headerActions .headerAddBtn {
+  padding: 1px 8px;
+  font-size: 16px;
+  line-height: 1.3;
+}
+
+/* 删除按钮悬停用危险色 */
+.headerDeleteBtn:hover:not(:disabled) {
+  border-color: var(--c-danger);
+  color: var(--c-danger);
+  background: var(--c-danger-wash);
+}
+
+/* 图谱顶部源实体：纯文本形式，靠左显示在标题旁（记录实体列表选中的源实体） */
+.sourceText {
+  color: var(--c-accent);
+  font-size: 12px;
+  font-family: var(--font-body);
+  white-space: nowrap;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
+}
+
+/* 单独浏览模式：载入图谱名称标签（可关闭退出） */
+.loadedGraphTag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 240px;
+  padding: 1px 3px 1px 8px;
+  background: var(--c-accent-wash);
+  border: 1px solid var(--c-accent);
+  border-radius: 10px;
+  color: var(--c-accent);
+  font-family: var(--font-body);
+  font-size: 11px;
+  flex-shrink: 1;
+}
+
+.loadedGraphName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.loadedGraphTagClose {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--c-accent);
+  font-size: 9px;
+  line-height: 1;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.loadedGraphTagClose:hover {
+  background: var(--c-danger-wash);
+  color: var(--c-danger);
+}
+
+/* 单独浏览模式：实体列表 + 图谱的共同窗体边框突出显示 */
+.panelIsolated {
+  border-color: var(--c-accent);
+  box-shadow: 0 0 0 3px var(--c-accent-wash), 0 0 18px rgba(30, 92, 138, 0.18);
 }
 
 .header .count {
@@ -457,7 +570,466 @@
   background: var(--c-accent-wash);
 }
 
+/* ── 关联信息（实体信息面板内，附加信息之后）── */
+
+.relationsBlock {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--c-border);
+}
+
+.relationsHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.relationsTitle {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--c-text-soft);
+}
+
+.relationsAddBtn {
+  padding: 0;
+  border: none;
+  background: none;
+  font-family: var(--font-body);
+  font-size: 11px;
+  color: var(--c-text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color var(--transition-fast);
+}
+
+.relationsAddBtn:hover {
+  color: var(--c-accent);
+}
+
+.relationsHint {
+  font-size: 10px;
+  color: var(--c-text-muted);
+}
+
+.relationsEmpty {
+  font-size: 11px;
+  color: var(--c-text-muted);
+}
+
+.relationRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  font-size: 11px;
+}
+
+.relationRow .itemAction {
+  width: 18px;
+  height: 18px;
+  font-size: 11px;
+  opacity: 0;
+}
+
+.relationRow:hover .itemAction {
+  opacity: 1;
+}
+
+.relationDir {
+  color: var(--c-accent);
+  flex-shrink: 0;
+}
+
+.relationTag {
+  padding: 0 5px;
+  background: var(--c-card);
+  color: var(--c-text-soft);
+  border-radius: 3px;
+  flex-shrink: 0;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relationTarget {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: #7D5DA9;
+  min-width: 0;
+}
+
+.relationTargetIcon {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+.relationTargetName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* 关联编辑表单（新增/修改共用）：单行 = 方向切换 + 关系名 + 对端 + 保存/取消 */
+.relationEditForm {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 4px 0;
+  padding: 3px 4px;
+  background: var(--c-card);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+}
+
+/* 方向切换按钮：点击在 → / ← 之间切换 */
+.relationDirBtn {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: none;
+  color: var(--c-accent);
+  font-family: var(--font-body);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.relationDirBtn:hover {
+  background: var(--c-accent-wash);
+}
+
+.relationEditInput {
+  flex: 0 1 64px;
+  min-width: 0;
+  padding: 2px 4px;
+  border: 1px solid var(--c-accent);
+  border-radius: 3px;
+  font-family: var(--font-body);
+  font-size: 11px;
+  color: var(--c-text);
+  background: var(--c-card);
+  outline: none;
+}
+
+/* ── 对端选择器（带图标 + 可筛选）── */
+
+.relationPicker {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+}
+
+.relationPickerBtn {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border: 1px solid var(--c-accent);
+  border-radius: 3px;
+  background: var(--c-card);
+  font-family: var(--font-body);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.relationPickerIcon {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+.relationPickerLabel {
+  flex: 1;
+  min-width: 0;
+  color: #7D5DA9;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relationPickerPlaceholder {
+  flex: 1;
+  min-width: 0;
+  color: var(--c-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relationPickerCaret {
+  flex-shrink: 0;
+  color: var(--c-text-muted);
+  font-size: 9px;
+}
+
+/* 下拉菜单走 portal + fixed，避免被信息面板滚动容器裁剪 */
+.relationPickerMenu {
+  position: fixed;
+  z-index: 1000;
+  box-sizing: border-box;
+  padding: 4px;
+  background: var(--c-card);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.16);
+}
+
+.relationPickerSearch {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 4px;
+  padding: 3px 6px;
+  border: 1px solid var(--c-border);
+  border-radius: 3px;
+  font-family: var(--font-body);
+  font-size: 11px;
+  color: var(--c-text);
+  background: var(--c-card);
+  outline: none;
+}
+
+.relationPickerSearch:focus {
+  border-color: var(--c-accent);
+}
+
+.relationPickerList {
+  max-height: 160px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.relationPickerOption {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 5px;
+  border: none;
+  border-radius: 3px;
+  background: none;
+  font-family: var(--font-body);
+  font-size: 11px;
+  color: var(--c-text-soft);
+  text-align: left;
+  cursor: pointer;
+}
+
+.relationPickerOption:hover {
+  background: var(--c-surface);
+}
+
+.relationPickerOptionActive {
+  background: var(--c-accent-wash);
+  color: var(--c-accent);
+}
+
+.relationPickerOptionName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relationPickerOptionType {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--c-text-muted);
+}
+
+.relationPickerEmpty {
+  padding: 4px 6px;
+  font-size: 11px;
+  color: var(--c-text-muted);
+}
+
+/* 表单内按钮压缩，保证编辑控件收在一行 */
+.relationEditForm .editBtn {
+  flex-shrink: 0;
+  padding: 2px 5px;
+}
+
 /* ── Graph mode ── */
+
+/* 图例 + 图操作工具栏（展开/清除/撤销/导出） */
+.graphToolbar {
+  display: flex;
+  gap: 8px;
+  padding: 4px 0;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--c-text-soft);
+  align-items: center;
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+.graphToolSpacer {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.graphToolBtn {
+  padding: 2px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-card);
+  font-size: 11px;
+  color: var(--c-text-soft);
+  cursor: pointer;
+  font-family: var(--font-body);
+  white-space: nowrap;
+  transition: all var(--transition-fast);
+}
+
+.graphToolBtn:hover:not(:disabled) {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+  background: var(--c-accent-wash);
+}
+
+.graphToolBtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ── 图谱右上角文件操作菜单（载入 / 保存 / 截图）── */
+.graphMenuBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-card);
+  color: var(--c-text-soft);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all var(--transition-fast);
+}
+
+.graphMenuBtn:hover {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+  background: var(--c-accent-wash);
+}
+
+.graphMenu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 168px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px;
+  background: var(--c-card);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.16);
+}
+
+.graphMenuItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 3px;
+  background: none;
+  color: var(--c-text-soft);
+  font-family: var(--font-body);
+  font-size: 12px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.graphMenuItem:hover:not(:disabled) {
+  background: var(--c-surface);
+  color: var(--c-text);
+}
+
+.graphMenuItem:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.graphMenuItemIcon {
+  flex-shrink: 0;
+  font-size: 13px;
+}
+
+/* 展开层数与展开按钮融合：左侧 ▲/▼ 上下增减层数，右侧主按钮展开 */
+.expandBtnGroup {
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.expandDepthBtns {
+  display: inline-flex;
+  flex-direction: column;
+}
+
+.expandDepthBtn {
+  flex: 1;
+  padding: 0 5px;
+  border: 1px solid var(--c-border);
+  border-right: none;
+  background: var(--c-card);
+  color: var(--c-text-soft);
+  font-size: 9px;
+  line-height: 1;
+  cursor: pointer;
+  font-family: var(--font-body);
+  transition: all var(--transition-fast);
+}
+
+.expandDepthBtn:first-child {
+  border-top-left-radius: var(--radius-sm);
+  border-bottom: none;
+}
+
+.expandDepthBtn:last-child {
+  border-bottom-left-radius: var(--radius-sm);
+}
+
+.expandDepthBtn:hover:not(:disabled) {
+  background: var(--c-accent-wash);
+  color: var(--c-accent);
+}
+
+.expandDepthBtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.expandBtnMain {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
 
 .graphContainer {
   flex: 1;
@@ -483,8 +1055,25 @@
   color: var(--c-text-muted);
 }
 
+/* 图谱数据刷新中的轻提示：旧图画布保持挂载，不打断缩放/布局 */
+.graphReloading {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  padding: 3px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: 999px;
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  font-size: 11px;
+  pointer-events: none;
+  animation: fadeSlideIn 150ms ease;
+}
+
 @media (max-width: 1100px) {
-  /* 移动模式：实体列表按内容高度展示（页面整体滚动，不内部滚动） */
+  /* 移动模式：实体列表按内容高度展示（页面整体滚动，不内部滚动）
+     保留卡片边框，避免实体列表/图谱区域与页面背景融为一体 */
   .panel {
     width: 100%;
     flex: none;
@@ -493,9 +1082,8 @@
     max-height: none;
     position: static;
     overflow-y: visible;
-    border-radius: 0;
-    border: none;
-    border-top: 1px solid var(--c-border);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--c-border);
   }
 
   /* List mode: body (search + list) takes remaining space and scrolls */
@@ -511,10 +1099,93 @@
     width: 100%;
   }
 
-  .graphContainer {
-    min-height: 250px;
-    flex: 1 1 auto;
+  /* 图谱区域：窄屏下保持足够高度（覆盖更高优先级的 .panelGraph .graphContainer） */
+  .panelGraph .graphContainer {
+    min-height: 340px;
+  }
+
+  /* 移动端图谱分栏改上下堆叠：列表在上（限高），图谱在下；
+     两部分各自用带边框的卡片区分 */
+  .graphSplit {
+    flex-direction: column;
+  }
+
+  .graphSplitList {
+    width: auto;
+    border: 1px solid var(--c-border);
+    border-radius: var(--radius-sm);
+    padding: 10px;
+  }
+
+  .graphSplitList .list {
+    max-height: 260px;
+  }
+
+  .graphSplitGraph {
     min-height: 0;
+    border: 1px solid var(--c-border);
+    border-radius: var(--radius-sm);
+    padding: 10px;
+  }
+
+  /* 图谱标题行：允许换行，避免源实体/文件标签/统计溢出窄屏 */
+  .panelGraph .header {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+
+  .loadedGraphTag {
+    max-width: 60vw;
+    font-size: 12px;
+  }
+
+  .loadedGraphTagClose {
+    width: 18px;
+    height: 18px;
+    font-size: 10px;
+  }
+
+  /* 工具栏：图例与按钮组分行，按钮组允许换行，避免横向溢出 */
+  .graphToolbar {
+    gap: 6px;
+    row-gap: 6px;
+  }
+
+  .graphToolSpacer {
+    margin-left: 0;
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    row-gap: 6px;
+  }
+
+  /* 触屏按钮加大点击区域 */
+  .graphToolBtn {
+    padding: 5px 10px;
+    font-size: 12px;
+  }
+
+  .graphMenuBtn {
+    width: 32px;
+    height: 28px;
+    font-size: 18px;
+  }
+
+  .graphMenuItem {
+    padding: 9px 10px;
+    font-size: 13px;
+  }
+
+  .expandDepthBtn {
+    padding: 2px 6px;
+    font-size: 10px;
+  }
+
+  /* 单独浏览模式的突出边框：全宽窗体下改为描边（避免外圈光晕被屏幕裁切） */
+  .panelGraph.panelIsolated {
+    border: 1px solid var(--c-accent);
+    border-radius: var(--radius-md);
+    box-shadow: none;
   }
 }
 

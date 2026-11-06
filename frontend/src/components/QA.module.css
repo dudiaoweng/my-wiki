@@ -14,6 +14,22 @@
   overflow: hidden;
 }
 
+/* 窗体标题 */
+.pageHeader {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 16px 0;
+}
+
+.pageTitle {
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--c-text);
+}
+
 /* ── 会话下拉框（切换与管理）── */
 
 .sessionBar {
@@ -826,17 +842,17 @@
   display: none;
 }
 
-/* ── Mobile ── */
-@media (max-width: 768px) {
-  /* 移动端：问答面板全宽（按内容高度，页面整体滚动） */
+/* ── Mobile / 窄屏（与问答置底断点一致）── */
+@media (max-width: 1440px) {
+  /* 窄屏：问答面板在文章/图谱之后全宽显示，保留卡片边框 */
   .page {
     width: 100%;
     margin-left: 0;
     height: auto;
     flex: 1;
-    border: none;
-    border-radius: 0;
-    box-shadow: none;
+    border: 1px solid var(--c-border);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-card);
   }
 
   .overlay {
@@ -863,12 +879,19 @@
     box-shadow: var(--shadow-modal);
   }
 
+  /* 窗体恢复边框后，内容左右统一留白，避免贴住边框 */
   .chatArea {
-    padding: 16px 0 16px 16px;
+    padding: 16px;
   }
 
   .chat {
-    padding-right: 16px;
+    padding-right: 4px;
+    /* 堆叠全宽显示时限制对话正文宽度，避免宽屏下行过长 */
+    width: 100%;
+    max-width: 980px;
+    margin: 0 auto;
+    /* 滚动不传导到背后页面 */
+    overscroll-behavior: contain;
   }
 
   .inputArea {

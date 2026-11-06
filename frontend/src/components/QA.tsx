@@ -157,6 +157,11 @@ export function QA() {
 
   return (
     <div className={styles.page}>
+      {/* ── 窗体标题 ── */}
+      <div className={styles.pageHeader}>
+        <h4 className={styles.pageTitle}>智能问答</h4>
+      </div>
+
       {/* ── Chat area ── */}
       <div className={styles.chatArea}>
         {/* 会话下拉框：切换会话 + 新建/删除 */}

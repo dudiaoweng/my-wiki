@@ -48,12 +48,14 @@
 - **智能问答**：基于知识库的 RAG 问答（语义搜索 + LLM 回答），支持上传图片 / 音频 / 视频作为上下文，回答内容经 rehype-sanitize 消毒；来源卡片显示命中分块的实体 chips
 
 ### 🗺️ 知识图谱
-- D3.js 力导向图可视化
-- 文章 / 分类 / 实体三种节点；实体以「名称+类型」为标识，同名不同类型为两个独立节点
-- 实体节点图标按类型区分，标签只显示名称
-- 实体间关系边（LLM 提取的关联，两端携带类型）
-- 缩放 / 拖拽 / 节点点击跳转
-- 选中节点高亮，不重建图谱
+- D3.js 力导向图可视化；文章 / 分类 / 实体三种节点；实体以「名称+类型」为标识，同名不同类型为两个独立节点
+- 实体节点图标按类型区分，标签只显示名称；实体间关系边两端携带类型
+- **实体列表 ⇄ 图谱联动**：实体列表按 20 条/批渐进加载；从列表选中实体，图谱聚焦其一层关系子图；图谱中点击实体节点反向选中列表行并展开信息面板（文章/目录节点仅在图谱内高亮，不联动文章列表）
+- **图谱操作**：展开选中节点 n 层（1–5 层，Neo4j 直查）、从视图移除选中节点、撤销上一步；支持 Ctrl+点击多选、点击空白取消选中
+- **关系编辑**：信息面板按当前文章范围渐进加载关联（每批 10 条）；支持新增/修改/删除关系、方向切换、关系名编辑，对端仅限当前文章实体并带类型图标与筛选；写操作必须提供文章范围，修改只作用于旧关系实际存在的文章
+- **图谱文件**：右上角菜单支持新建 / 打开 / 保存图谱与截图；保存为 JSON（含节点位置与视口，可再次打开还原布局）；保存时可选位置/文件名，打开文件后保存优先原地更新（File System Access API），不支持时下载副本；打开或新建后进入**单独浏览模式**——文件名以可关闭标签显示，实体列表仅与载入图联动，本地编辑只改内存、不写数据库、不做权限校验
+- 缩放 / 拖拽 / 悬停提示；选中节点仅更新高亮，不重建图谱；移动端实体列表与图谱上下堆叠
+- 全屏知识图谱页保留点击节点跳转；实体面板图谱内点击用于选中/联动，不跳转
 
 ### 💬 文章评论
 - 评论创建 / 编辑 / 删除，Markdown 编写
@@ -68,7 +70,7 @@
 ### 🔐 权限控制
 - **文章**：仅创建人可编辑/删除（基于身份证号）
 - **评论**：仅评论人可编辑/删除，文章创建人也可删除
-- **实体/附加信息**：记录创建人，仅创建人或文章创建人可操作
+- **实体/关系/附加信息**：实体以 `(名称, 类型)` 为权限主体，仅创建人或文章创建人可操作；关系写操作还要求 `owner` 是关系端点、提供明确的两端类型与文章范围，且只修改旧关系实际存在的文章
 - **分类**：记录创建人/时间，仅创建人可修改/删除
 - 前端按钮根据权限自动显示/隐藏，后端 403 兜底
 
@@ -90,6 +92,8 @@
 |---|------|
 | **后端框架** | Python 3.11+ / FastAPI |
 | **ORM** | SQLAlchemy 2.0 + SQLite |
+| **图数据库** | Neo4j 5.26 LTS（实体/关系唯一存储） |
+| **向量数据库** | Qdrant（分块 embedding） |
 | **数据校验** | Pydantic v2 |
 | **前端框架** | React 18 + TypeScript |
 | **构建工具** | Vite 5 |
@@ -125,8 +129,8 @@ my-wiki/
 │   │       ├── categories.py      # 分类 CRUD + 权限控制
 │   │       ├── comments.py        # 评论 CRUD + 文件上传 + LLM 增强
 │   │       ├── tags.py            # 标签 CRUD
-│   │       ├── entities.py        # 实体 CRUD + 附加信息 + 权限控制
-│   │       ├── graph.py           # 知识图谱数据
+│   │       ├── entities.py        # 实体/关系 CRUD + 附加信息 + 类型化权限控制
+│   │       ├── graph.py           # 知识图谱数据 + n 层展开
 │   │       ├── stats.py           # 统计信息
 │   │       ├── qa.py              # RAG 问答 (语义搜索 + LLM)
 │   │       └── upload.py          # 文件上传 + 解析 + AI 增强
@@ -265,6 +269,12 @@ EMBEDDING_MODEL=embedding-3
 
 # ─── 问答 ───
 QA_TEMPERATURE=0.2
+
+# ─── 存储服务（本地开发用 localhost；Docker 部署改为服务名地址）───
+# Docker: QDRANT_URL=http://qdrant:6333 / NEO4J_URI=bolt://neo4j:7687
+QDRANT_URL=http://localhost:6333
+NEO4J_URI=bolt://localhost:7687
+NEO4J_PASSWORD=my-wiki-neo4j
 
 # ─── mTLS 白名单（逗号分隔的 subject DN；留空 = 放行信任列表签发的所有证书）───
 # ALLOWED_CERT_SUBJECTS=/C=CN/ST=32/L=00/O=11/OU=00/CN=谢林 320100198001010010
@@ -410,6 +420,19 @@ docker compose up -d --build
 | `UPLOAD_DIR` | 上传文件存储目录 | `data/uploads`（锚定仓库根） |
 | `CORS_ORIGINS` | 跨域白名单（Vite 代理模式下通常不需要） | `https://localhost:5173` |
 
+### 存储服务（Qdrant / Neo4j）
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `QDRANT_URL` | Qdrant 地址（Docker: `http://qdrant:6333`） | `http://localhost:6333` |
+| `QDRANT_API_KEY` | Qdrant API Key（空 = 不启用） | (空) |
+| `QDRANT_COLLECTION` | 向量集合名 | `my_wiki_chunks` |
+| `QDRANT_VECTOR_SIZE` | 向量维度（需与嵌入模型一致） | `1024` |
+| `NEO4J_URI` | Neo4j Bolt 地址（Docker: `bolt://neo4j:7687`） | `bolt://localhost:7687` |
+| `NEO4J_USER` | Neo4j 用户名 | `neo4j` |
+| `NEO4J_PASSWORD` | Neo4j 密码（仅数据卷首次初始化时生效） | `my-wiki-neo4j` |
+| `NEO4J_DATABASE` | Neo4j 数据库名 | `neo4j` |
+
 ### LLM 文本模型（标题生成、实体提取、纯文本问答）
 
 | 变量 | 说明 | 默认值 |
@@ -491,11 +514,15 @@ docker compose up -d --build
 | `PUT` | `/api/tags/rename` | 标签重命名 |
 | `POST` | `/api/tags/remove` | 删除标签 |
 | `GET/POST` | `/api/entities` | 实体列表 / 添加 |
-| `PUT` | `/api/entities/update` | 更新实体 |
-| `DELETE` | `/api/entities/remove` | 删除实体 |
+| `PUT` | `/api/entities/update` | 更新实体（可按 `old_type` 限定同名类型变体） |
+| `PUT` | `/api/entities/rename` | 重命名实体（可按 `old_type` 限定） |
+| `DELETE` | `/api/entities/remove` | 删除实体（可按 `entity_type` 限定） |
+| `POST` | `/api/entities/relations/query` | 查询实体关系（可按文章范围过滤） |
+| `POST/PUT/DELETE` | `/api/entities/relations` | 新增 / 修改 / 删除实体关系（`article_ids` 必填；owner 必须是关系端点；两端类型明确） |
 | `GET/POST` | `/api/entities/{name}/info` | 实体附加信息 |
 | `PUT/DELETE` | `/api/entities/{name}/info/{id}` | 更新 / 删除附加信息 |
-| `GET` | `/api/graph` | 知识图谱数据 |
+| `GET` | `/api/graph` | 知识图谱数据（最多 2000 节点） |
+| `GET` | `/api/graph/expand` | 按节点 id 展开 n 层邻域（1–5 层，Neo4j 直查） |
 | `GET` | `/api/stats` | 统计（公开端点，登录页 Hero 使用） |
 | `POST` | `/api/qa/ask` | RAG 问答 |
 | `POST` | `/api/qa/parse-file` | 为问答解析上传文件 |
@@ -504,6 +531,8 @@ docker compose up -d --build
 | `GET` | `/api/auth/status` | 证书认证状态 + 用户信息 (name/id_number/display_name) |
 | `GET` | `/api/auth/login` | 页面导航登录（生产模式，重定向回前端） |
 | `GET` | `/api/health` | 健康检查 |
+
+> 关系写接口（`POST/PUT/DELETE /api/entities/relations`）采用强校验：必须提供 `article_ids`、`owner`（必须是端点）和两端明确类型；修改只作用于旧关系实际存在的文章。旧脚本调用需同步更新。
 
 ---
 
@@ -533,15 +562,18 @@ attachment_path/name/type, processing
 - 实体以「名称+类型」为标识，同名不同类型是不同实体；关系两端携带类型（`source_type` / `target_type`）
 - 该字段不再存于 SQLite：由 `neo4j_store` 从 Neo4j 批量 Cypher 组装返回，Neo4j 不可用时降级 `null`
 
-### Neo4j 图存储（v2.3，实体/关系唯一存储）
+### Neo4j 图存储（实体/关系唯一存储）
 ```
 (:Article {id})                                    -- 仅作 MENTIONS 边源
 (:Entity {name, type, created_by, created_at})     -- 身份键 (name,type)
 (a)-[:MENTIONS {source: 'body'|'comment:<id>'}]->(e)
-(e1)-[:RELATES {label, article_id, source}]->(e2)
+(e1)-[:RELATES {label, article_id, source, deleted?}]->(e2)
 ```
 - 提取/手动增删/改名改类型全部直接写 Neo4j；文章/评论接口按请求批量组装 `entities` 字段
 - 评论贡献带 `source='comment:<id>'` 出处，删除/重解析时精确删边；孤儿实体节点自动 GC
+- **手工关系**：通过接口新增/修改（改名/换向/换对端）产生的关系标记 `source='manual'`，文章重新识别/重新上传时不会被 `body`/`comment` 的覆盖删除；同名同类型关系已存在时自动升级为 manual
+- **删除墓碑**：删除关系不直接物理删除，而是置 `deleted=true, source='deleted'`；后续重新抽取（含反向）会跳过，避免已删除关系复活；手工重新添加会清除墓碑
+- **写入规则**：关系写接口必须提供 `article_ids`、两端明确类型和 `owner`（当前面板实体）；修改只作用于旧关系实际存在的文章，对端无法共同出现的文章保留原关系
 - 旧 SQLite JSON 数据由启动懒迁移自动导入 Neo4j 后删列（`ALTER TABLE … DROP COLUMN`）
 
 ### Category (分类)
@@ -572,6 +604,7 @@ id, article_id, chunk_index, chunk_text
 id, entity_name, name, content, created_by, created_at, updated_at
 ```
 - 记录创建人，仅创建人可修改/删除
+- 以 `entity_name` 为键：同名不同类型共享附加信息；类型化重命名仅在旧名称已无其他类型变体时级联改名
 
 ---
 
@@ -655,11 +688,12 @@ const DEV_USERS = [
 - Q&A：语义搜索 + LLM 生成回答，GLM-5.2 推理模型有 reasoning_content 回退
 
 ### 知识图谱
-- `/api/graph` 端点聚合所有文章/分类/实体节点 + 边
-- 30 秒 TTL 缓存避免全表扫描
-- 前端 `useD3ForceGraph` 共享钩子供 `EntityPanel` 和 `KnowledgeGraph` 共用
-- 选中节点仅更新视觉高亮，不重建图谱
+- `/api/graph` 聚合文章/分类/实体节点 + 边（文章/分类来自 SQLite，实体/提及/关系来自 Neo4j；最多 2000 节点）
+- `/api/graph/expand` 按选中节点直查 Neo4j 的 n 层邻域（1–5 层），路径级与边级上限防止稠密图爆炸；返回前过滤截断端点与仅经删除墓碑可达的节点
+- 前端 `useD3ForceGraph` 共享钩子供 `EntityPanel` 和 `KnowledgeGraph` 共用；数据增量 join，保留节点位置与缩放，选中节点仅更新视觉高亮、不重建图谱
 - 实体节点使用类型图标区分（人物/组织/地点/事件/产品/其他）；节点以「名称+类型」为标识（id = `entity:{name}::{type}`），标签只显示名称
+- 关系按 `(label, article_id, source)` 存储；图谱/文章接口读取时按两端+关系名去重，手工边与自动抽取边不会重复计数
+- `EntityPanel` 图谱支持关系编辑、展开/移除/撤销、图谱 JSON 打开/保存/截图与单独浏览模式；文件位置与视口随 JSON 保存/还原
 
 ### 向量搜索 (RAG)
 - 文章先上传显示，后台 LLM 增强（标题/内容/标签/实体）完成后才计算嵌入

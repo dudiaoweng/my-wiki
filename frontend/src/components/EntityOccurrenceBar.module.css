@@ -1,22 +1,20 @@
+/* 关键词导航条：随文章详情窗口滚动固定在底部（sticky），
+   宽度受文章详情容器约束；不再 fixed 到整个浏览器视口 */
 .bar {
-  position: fixed;
-  bottom: 16px;
-  z-index: 100;
+  position: sticky;
+  bottom: 0;
+  z-index: 10;
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 10px 16px;
+  margin-top: 24px;
   background: var(--c-card);
   border: 1px solid var(--c-accent);
   border-radius: var(--radius-md);
-  box-shadow: 0 -2px 16px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.06);
   font-size: 13px;
   user-select: none;
-  /* Center within content column */
-  left: 50%;
-  transform: translateX(-50%);
-  max-width: 900px;
-  width: calc(100% - 32px);
 }
 
 /* ── Info ── */
@@ -166,8 +164,6 @@
   .bar {
     gap: 8px;
     padding: 8px 12px;
-    bottom: 10px;
-    width: calc(100% - 20px);
   }
 
   .entityName {
@@ -192,8 +188,7 @@
     flex-wrap: wrap;
     gap: 6px;
     padding: 8px 10px;
-    bottom: 8px;
-    width: calc(100% - 16px);
+    margin-top: 20px;
     border-radius: var(--radius-sm);
   }
 

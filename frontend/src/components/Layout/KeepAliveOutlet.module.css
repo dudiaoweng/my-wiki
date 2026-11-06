@@ -44,12 +44,14 @@
   min-height: 0;
 }
 
-@media (max-width: 768px) {
-  /* 移动端：上下堆叠，按内容高度 */
+/* 窄屏（≤1440）：问答面板排在文章/图谱之后，不与主内容并排。
+   并排时问答固定占 460px，主内容在 1101–1440 区间会被挤压（图谱最小 520px），
+   因此把「问答置底」的断点提高到 1440。 */
+@media (max-width: 1440px) {
   .split {
     flex-direction: column;
     height: auto;
-    gap: 0;
+    gap: 12px;
   }
 
   .splitMain {

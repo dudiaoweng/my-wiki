@@ -422,6 +422,8 @@ export function ArticleList() {
   const [advTotal, setAdvTotal] = useState(0);
   const [advLoading, setAdvLoading] = useState(false);
   const [advError, setAdvError] = useState<string | null>(null);
+  // 点击面包屑最后一级目录时手动触发高级搜索刷新
+  const [advReloadKey, setAdvReloadKey] = useState(0);
   useEffect(() => {
     if (!advMode || !advancedSearch) return;
     let cancelled = false;
@@ -441,7 +443,7 @@ export function ArticleList() {
         if (!cancelled) setAdvLoading(false);
       });
     return () => { cancelled = true; };
-  }, [advMode, advancedSearch, advCategoryId, advConditions, page]);
+  }, [advMode, advancedSearch, advCategoryId, advConditions, page, advReloadKey]);
 
   // 完整结果集（上限 200）：目录分布/结果根目录视图用（与搜索模式同机制）
   const [advFullArticles, setAdvFullArticles] = useState<Article[] | null>(null);
@@ -455,7 +457,7 @@ export function ArticleList() {
       .then((d) => { if (!cancelled) setAdvFullArticles(d.items); })
       .catch(() => { if (!cancelled) setAdvFullArticles([]); });
     return () => { cancelled = true; };
-  }, [advMode, advancedSearch, advCategoryId, advConditions]);
+  }, [advMode, advancedSearch, advCategoryId, advConditions, advReloadKey]);
 
   // 高级搜索结果的目录分布（当前层级：全部 = 顶级；选中目录 = 其子目录）
   const advDirChips = useMemo(
@@ -491,6 +493,13 @@ export function ArticleList() {
   useEffect(() => {
     mainColRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
   }, [page]);
+
+  // 移动端面包屑为单行横向滚动：路径变化时滚到末尾，保证当前目录可见
+  const breadcrumbRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const el = breadcrumbRef.current;
+    if (el) el.scrollLeft = el.scrollWidth;
+  }, [categoryId, search, tags, advMode, advCategoryId]);
 
   // 筛选框：对当前结果的关键词动态筛选（本地过滤，与顶部搜索框解耦、不写 URL）
   const [filterText, setFilterText] = useState('');
@@ -712,7 +721,9 @@ export function ArticleList() {
     setHighlightEntity(selectedEntities.size > 0 ? lastEntityNameRef.current : null);
   }, [selectedEntities]);
 
-  // Handle knowledge graph node click → toggle selection, filter article list locally
+  // Handle knowledge graph node click → toggle selection（目录/文章/实体统一）
+  // 普通点击：切换选中 —— 已选中则仅取消该节点，未选中则清除其余并选中
+  // Ctrl 点击：多选切换（添加/移除该节点），不限制至少一个选中
   const handleGraphNodeClick = useCallback(
     (_nodeId: string, _nodeType: string, _label: string, multi?: boolean) => {
       setSelectedGraphNodeIds((prev) => {
@@ -721,8 +732,11 @@ export function ArticleList() {
           if (next.has(_nodeId)) next.delete(_nodeId);
           else next.add(_nodeId);
         } else {
-          if (next.has(_nodeId) && next.size === 1) next.delete(_nodeId);
-          else { next.clear(); next.add(_nodeId); }
+          if (next.has(_nodeId)) next.delete(_nodeId);
+          else {
+            next.clear();
+            next.add(_nodeId);
+          }
         }
         return next;
       });
@@ -730,28 +744,11 @@ export function ArticleList() {
     [],
   );
 
-  // Combined filter: graph node selection + entity selection (local, no reload)
+  // Combined filter: entity selection + keyword (local, no reload)
+  // 注：图谱节点选中（selectedGraphNodeIds）不再过滤文章列表 —— 仅用于图谱内高亮，
+  // 避免点击图谱节点后文章列表只剩选中文章（不要联动）
   const displayedArticles = useMemo(() => {
     let result = advMode ? advArticles : articles;
-
-    // Filter by selected graph nodes (local, no reload)
-    if (selectedGraphNodeIds.size > 0) {
-      result = result.filter((a) => {
-        for (const nodeId of selectedGraphNodeIds) {
-          if (nodeId === `article:${a.id}`) return true;
-          if (nodeId === `category:${a.category_id}`) return true;
-          // 实体节点 id = entity:{name}::{type}，按「名称+类型」匹配
-          // 旧数据产生的无类型节点（entity:{name}::）按名称匹配
-          if (nodeId?.startsWith('entity:')) {
-            const [ename, etype] = nodeId.slice('entity:'.length).split('::');
-            if (a.entities?.entities?.some(
-              (e) => e.name === ename && (!etype || (e.type ?? '') === etype)
-            )) return true;
-          }
-        }
-        return false;
-      });
-    }
 
     // Additionally filter by selected entities — 按 (name, type) 精确匹配
     if (selectedEntities.size > 0) {
@@ -771,7 +768,7 @@ export function ArticleList() {
     }
 
     return result;
-  }, [advMode, advArticles, articles, selectedGraphNodeIds, selectedEntities, filterText]);
+  }, [advMode, advArticles, articles, selectedEntities, filterText]);
 
   // 文章层级深度（卡片缩进用；父链截断于当前集合内）
   const articleDepthMap = useMemo(() => {
@@ -934,6 +931,43 @@ export function ArticleList() {
     setHighlightEntity(null);
   };
 
+  // 内联详情点击 🏠：当前无目录时目标 URL 不变，显式关闭详情；
+  // 高级搜索模式同时清空结果内目录筛选。
+  const handleDetailRootSelect = () => {
+    if (advMode) setAdvCategoryId(null);
+    handleBack();
+  };
+
+  // 内联详情面包屑点击目录：关闭详情并切换/确认目录。
+  // 普通模式点击当前目录时 URL 不变（Link 不会触发筛选变化），必须显式关闭；
+  // 高级搜索模式目录筛选存于 advCategoryId 上下文，也由这里统一更新。
+  const handleDetailCategorySelect = (targetCategoryId: string) => {
+    if (advMode) {
+      if (advCategoryId !== targetCategoryId) setAdvCategoryId(targetCategoryId);
+      const params = new URLSearchParams(searchParams);
+      params.delete('view');
+      params.delete('category');
+      if (params.toString() !== searchParams.toString()) {
+        setSearchParams(params, { replace: true });
+      }
+      setViewedArticleId(null);
+      setSelectedArticleIds(new Set());
+      setHighlightEntity(null);
+      return;
+    }
+    if (categoryId === targetCategoryId) {
+      handleBack();
+      return;
+    }
+    setViewedArticleId(null);
+    setSelectedArticleIds(new Set());
+    setHighlightEntity(null);
+    const params = new URLSearchParams(searchParams);
+    params.delete('view');
+    params.set('category', targetCategoryId);
+    setSearchParams(params);
+  };
+
   // Memoize to avoid new array reference on every render (triggers D3 restart)
   const selectedArticleIdsArray = useMemo(
     () => (viewedArticleId ? [viewedArticleId] : Array.from(selectedArticleIds)),
@@ -1067,6 +1101,8 @@ export function ArticleList() {
                 selectedEntity={highlightEntity}
                 onEntitySelect={setHighlightEntity}
                 actionsInTopBar
+                onCategorySelect={handleDetailCategorySelect}
+                onRootSelect={handleDetailRootSelect}
               />
             );
           })()
@@ -1075,7 +1111,7 @@ export function ArticleList() {
             {/* Header + search — always visible, never unmounted */}
             <div className={styles.header}>
               {/* 面包屑路径与详情页同模式：全部 / 目录（含上级目录链）/ 标签 / 搜索 */}
-              <nav className={styles.breadcrumb} aria-label="面包屑导航">
+              <nav ref={breadcrumbRef} className={styles.breadcrumb} aria-label="面包屑导航">
                 {advMode ? (
                   <>
                     {/* 高级搜索面包屑：🏠 = 搜索结果根目录；目录链在结果内筛选 */}
@@ -1092,9 +1128,15 @@ export function ArticleList() {
                             {c.name}
                           </Link>
                         ) : (
-                          <span className={styles.breadcrumbCurrent} style={{ color: c.color }}>
+                          <button
+                            type="button"
+                            className={`${styles.breadcrumbCurrent} ${styles.breadcrumbCurrentBtn}`}
+                            style={{ color: c.color }}
+                            onClick={() => setAdvReloadKey((k) => k + 1)}
+                            title={`点击刷新「${c.name}」目录`}
+                          >
                             {c.name}
-                          </span>
+                          </button>
                         )}
                       </Fragment>
                     ))}
@@ -1133,15 +1175,23 @@ export function ArticleList() {
                             {c.name}
                           </Link>
                         ) : (
-                          <span className={styles.breadcrumbCurrent} style={{ color: c.color }}>
+                          <button
+                            type="button"
+                            className={`${styles.breadcrumbCurrent} ${styles.breadcrumbCurrentBtn}`}
+                            style={{ color: c.color }}
+                            onClick={() => { void refetch(); }}
+                            title={`点击刷新「${c.name}」目录`}
+                          >
                             {c.name}
-                          </span>
+                          </button>
                         )}
                       </Fragment>
                     ))}
                   </>
                 )}
               </nav>
+              {/* 右侧工具组：数量 + 排序 + 筛选，统一右对齐 */}
+              <div className={styles.headerTools}>
               <span className={styles.resultCount}>
                 {advMode
                   ? `共 ${advTotal} 篇`
@@ -1249,6 +1299,7 @@ export function ArticleList() {
                     ✕
                   </button>
                 )}
+              </div>
               </div>
             </div>
 
@@ -1374,6 +1425,11 @@ export function ArticleList() {
         mode={entityPanelMode}
         onRefresh={refetch}
         onGraphNodeClick={handleGraphNodeClick}
+        onClearAllSelections={() => {
+          // 点击图谱空白区域：清空图谱节点多选与实体文章筛选
+          setSelectedGraphNodeIds(new Set());
+          setSelectedEntities(new Set());
+        }}
         selectedGraphNodeIds={selectedGraphNodeIds}
         onEntitySelect={handleEntitySelect}
       />
