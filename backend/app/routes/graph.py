@@ -2,6 +2,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
+from app.config import GRAPH_MAX_NODES
 from app.dependencies import get_db
 from app.models import Article, Category
 from app import neo4j_store
@@ -30,16 +31,19 @@ class GraphEdge(BaseModel):
 class GraphResponse(BaseModel):
     nodes: list[GraphNode]
     edges: list[GraphEdge]
+    # 当前图谱节点上限：由前端在按文章/目录过滤后的「当前图谱」上应用；
+    # /expand 等局部图接口不设置（None = 不限制）。
+    max_nodes: int | None = None
 
 
 @router.get("/expand", response_model=GraphResponse)
 def expand_graph(node_id: str, depth: int = 1, db: Session = Depends(get_db)):
-    """展开选中节点的 n 层关系：Neo4j 直查全量数据（n=1..5，默认 1）。
+    """展开选中节点的 n 层关系：Neo4j 直查全量数据（n=1..3，默认 1）。
 
-    /graph 受 2000 节点安全上限截断，此接口按需直查 Neo4j，返回邻域节点与边。
+    /graph 的节点上限由前端按当前图谱应用（GRAPH_MAX_NODES），此接口按需直查 Neo4j，返回邻域节点与边。
     目录节点在 Neo4j 中无数据 → 返回空图（前端提示无法展开）。
     """
-    depth = max(1, min(int(depth), 5))
+    depth = max(1, min(int(depth), 3))
     node_id = node_id.strip()
     start_nid: str | None = None
     if node_id.startswith("article:"):
@@ -142,6 +146,10 @@ def get_graph(db: Session = Depends(get_db)):
 
     v2.3 前这里全表扫描 articles.entities JSON 现搭图（30s TTL 缓存）；
     Neo4j 直查后无需缓存，前端已有 articleVersion → refetchGraph 刷新机制。
+
+    节点上限（GRAPH_MAX_NODES）不在此处截断全局数据，而是随响应下发
+    max_nodes，由前端在按当前选中文章过滤后的图谱上应用——否则全局截断
+    可能先丢掉当前文章关联的实体，导致图谱与实体列表不一致。
     """
     try:
         entity_recs, mention_recs, relate_recs = neo4j_store.graph_data_sync()
@@ -151,8 +159,6 @@ def get_graph(db: Session = Depends(get_db)):
 
     articles = db.query(Article).all()
     categories = db.query(Category).all()
-
-    MAX_NODES = 2000  # Safety limit to prevent unbounded memory use
 
     nodes: list[GraphNode] = []
     edges: list[GraphEdge] = []
@@ -239,10 +245,4 @@ def get_graph(db: Session = Depends(get_db)):
         tgt_id = ensure_entity_node(tgt, rec.get("target_type") or "")
         edges.append(GraphEdge(source=src_id, target=tgt_id, label=rec.get("label") or "关联"))
 
-    # Safety cap: if graph exceeds limit, return truncated data
-    if len(nodes) > MAX_NODES:
-        nodes = nodes[:MAX_NODES]
-        edge_node_ids = {n.id for n in nodes}
-        edges = [e for e in edges if e.source in edge_node_ids and e.target in edge_node_ids]
-
-    return GraphResponse(nodes=nodes, edges=edges)
+    return GraphResponse(nodes=nodes, edges=edges, max_nodes=GRAPH_MAX_NODES)

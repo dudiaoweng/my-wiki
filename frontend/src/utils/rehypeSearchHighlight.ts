@@ -1,16 +1,21 @@
 import type { Plugin } from 'unified';
 
 /**
- * Create a rehype plugin that wraps all occurrences of `searchTerm`
+ * Create a rehype plugin that wraps all occurrences of one or more search terms
  * in <mark class="search-highlight" data-search-occurrence="N"
  * id="search-occurrence-N"> elements within text nodes.
  *
+ * - 支持多个关键词（简单搜索按空白拆分；高级搜索可传多个 keyword 条件）。
  * - Skips <code>, <pre>, <style>, <script>, <svg> subtrees.
  * - Case-insensitive matching.
- * - Returns a no-op plugin when searchTerm is null/empty.
+ * - Returns a no-op plugin when no term is provided.
  */
-export function createSearchHighlightPlugin(searchTerm: string | null): Plugin {
-  if (!searchTerm) {
+export function createSearchHighlightPlugin(searchTerm: string | string[] | null): Plugin {
+  const terms = (Array.isArray(searchTerm) ? searchTerm : searchTerm ? [searchTerm] : [])
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length); // 长词优先，避免短词抢先截断
+  if (terms.length === 0) {
     return function noop() {
       return function transform() {
         /* no-op: no search term */
@@ -18,7 +23,7 @@ export function createSearchHighlightPlugin(searchTerm: string | null): Plugin {
     };
   }
 
-  const escaped = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escaped = terms.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
   const regex = new RegExp(escaped, 'gi');
   const SKIP_TAGS = new Set(['code', 'pre', 'style', 'script', 'svg', 'mark']);
 

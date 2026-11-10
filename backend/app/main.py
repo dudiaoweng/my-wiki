@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import FileResponse, HTMLResponse, RedirectResponse, JSONResponse
 from app.database import init_db, SessionLocal
 from app.models import Category, Article, Comment
-from app.routes import articles, categories, tags, entities, stats, graph, qa, upload, comments
+from app.routes import articles, categories, tags, entities, stats, graph, qa, upload, comments, health
 from app import vector_store
 from app import neo4j_store
 from app.config import UPLOAD_DIR as UPLOAD_DIR_STR
@@ -183,7 +183,10 @@ async def lifespan(app: FastAPI):
     # 启动懒迁移：SQLite 实体 JSON → Neo4j（加载完成后删除 articles/comments.entities 列；
     # start_migration 同样幂等，双 uvicorn 下只跑一次）
     neo4j_store.start_migration()
+    # 后台巡检 Neo4j / Qdrant / 已配置模型；前端只读快照，避免多前端重复探测
+    health.start_monitor()
     yield
+    await health.stop_monitor()
     await vector_store.close()
     await neo4j_store.close()
 
@@ -257,6 +260,7 @@ api_router.include_router(graph.router)
 api_router.include_router(qa.router)
 api_router.include_router(upload.router)
 api_router.include_router(comments.router)
+api_router.include_router(health.router)
 app.include_router(api_router)
 
 # Public routes (no cert required — used by login page on port 8000)

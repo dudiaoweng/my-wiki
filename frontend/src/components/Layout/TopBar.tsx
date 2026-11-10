@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { useApp } from '../../context/AppProvider';
 import { useToast } from '../../hooks/useToast';
+import { useDependencyHealth } from '../../hooks/useDependencyHealth';
 import { api } from '../../api/client';
 import type { AdvancedSearchCondition } from '../../api/client';
 import type { Article } from '../../types/article';
+import type { ModelKind } from '../../types/health';
 import styles from './TopBar.module.css';
 
 const SEARCH_LIMIT = 15;
@@ -47,7 +49,29 @@ const ADV_PLACEHOLDERS: Record<AdvRow['type'], string> = {
   time: '',
 };
 
+/** 依赖状态异常提示中的模型标签（仅已配置且不可用时显示） */
+const MODEL_ALERT_LABELS: Array<[ModelKind, string]> = [
+  ['text', '文本模型'],
+  ['vision', '视觉模型'],
+  ['asr', '语音模型'],
+  ['embedding', '嵌入模型'],
+];
+
 export function TopBar() {
+  // 依赖服务（Neo4j / Qdrant）与已配置模型状态：异常时在工具栏提示
+  const { health: depHealth, checking: depChecking, refresh: refreshDeps } = useDependencyHealth();
+  const depAlertLabels = depHealth
+    ? [
+        ...(depHealth.neo4j === false ? ['Neo4j'] : []),
+        ...(depHealth.qdrant === false ? ['Qdrant'] : []),
+        ...MODEL_ALERT_LABELS
+          .filter(([kind]) => {
+            const m = depHealth.models?.[kind];
+            return !!m?.configured && m.ok === false;
+          })
+          .map(([, label]) => label),
+      ]
+    : [];
   const {
     toggleSidebar, toggleSidebarCollapsed, sidebarCollapsed,
     qaOpen, setQaOpen,
@@ -228,9 +252,23 @@ export function TopBar() {
           <span className={styles.logo}>K</span>
           <span className={styles.brandName}>知识库</span>
         </div>
+        {/* 依赖服务/模型异常提示：靠左展示 */}
+        {depHealth && depAlertLabels.length > 0 && (
+          <button
+            type="button"
+            className={styles.depAlert}
+            onClick={() => { void refreshDeps(); }}
+            title={`异常：${depAlertLabels.join('、')}${depChecking ? '\n正在刷新状态…' : '\n点击刷新状态'}`}
+            aria-label="依赖服务或模型异常，点击刷新状态"
+          >
+            <span className={styles.depAlertDot}>●</span>
+            <span className={styles.depAlertText}>{depAlertLabels.join('、')} 异常</span>
+          </button>
+        )}
       </div>
 
-      {/* ── 数据库即时搜索：靠左排列；Enter 查看全部 ── */}
+      <div className={styles.right}>
+      {/* ── 数据库即时搜索：靠右排列；Enter 查看全部 ── */}
       <div className={styles.searchWrap} ref={wrapRef}>
           <span className={styles.searchIcon}>🔍</span>
           <input
@@ -436,7 +474,6 @@ export function TopBar() {
         </div>
       )}
 
-      <div className={styles.right}>
         {/* 知识图谱按钮：切换实体面板 列表⇄图谱 视图（原实体面板内切换按钮上移至此） */}
         <button
           type="button"

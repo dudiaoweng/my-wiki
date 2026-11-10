@@ -123,6 +123,12 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "my-wiki-neo4j")
 NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
 NEO4J_TIMEOUT = _env_float("NEO4J_TIMEOUT", 10.0)
 
+# ── 知识图谱 ──
+# 当前图谱节点数上限：/api/graph 随响应下发，前端在按选中文章/目录过滤后的
+# 当前图谱上截断节点并同步过滤边（避免全局先截断误删当前文章的实体）。
+# 可按部署规模在 .env 中调整；前端 D3 渲染量随该值增长。
+GRAPH_MAX_NODES = _env_int("GRAPH_MAX_NODES", 500)
+
 # ── TLS / mTLS ──
 # 证书固定放在仓库根目录 certs/ 下；默认值锚定到仓库根目录，与启动时 cwd 无关
 # （本地开发 cwd 在 backend/ 下同样命中）。容器内由 Dockerfile ENV 覆盖为 /certs/*。

@@ -114,49 +114,121 @@
   flex-shrink: 1;
 }
 
-/* 单独浏览模式：载入图谱名称标签（可关闭退出） */
-.loadedGraphTag {
+/* ── 独立模式多图谱标签栏（无边框 / 无滚动条 / 自动换行） ──
+   标签默认安静，活动标签以实色底标示；
+   宽度按内容自适应（最宽 190px），未达上限不拉伸，空间不足时收缩并换行，
+   最多 5 个标签始终全部可见。 */
+.graphTabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 1 1 auto;
+  padding: 0;
+  background: none;
+  border: none;
+  overflow: visible;
+}
+
+.graphTab {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  /* 按内容自适应宽度：不拉伸；超过 max-width 截断；空间不足时收缩 */
+  flex: 0 1 auto;
+  max-width: 190px;
+  min-width: 0;
+  padding: 0 2px;
+  border-radius: 5px;
+  color: var(--c-text-muted);
+  font-family: var(--font-body);
+  font-size: 11px;
+  line-height: 1;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.graphTab:hover {
+  background: var(--c-accent-wash);
+  color: var(--c-accent);
+}
+
+/* 活动标签：实色底（无边框），在浅色标签中一眼可辨 */
+.graphTabActive,
+.graphTabActive:hover {
+  background: var(--c-accent);
+  color: #fff;
+}
+
+.graphTabActive .graphTabClose {
+  color: #fff;
+}
+
+.graphTabActive .graphTabClose:hover {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+
+/* 标签主体（点击切换） */
+.graphTabBtn {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   min-width: 0;
-  max-width: 240px;
-  padding: 1px 3px 1px 8px;
-  background: var(--c-accent-wash);
-  border: 1px solid var(--c-accent);
-  border-radius: 10px;
-  color: var(--c-accent);
-  font-family: var(--font-body);
-  font-size: 11px;
-  flex-shrink: 1;
+  padding: 6px 7px;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
 }
 
-.loadedGraphName {
+.graphTabBtn:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -2px;
+  border-radius: 4px;
+}
+
+.graphTabIcon {
+  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 1;
+  opacity: 0.9;
+}
+
+.graphTabName {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.loadedGraphTagClose {
+/* 关闭按钮：非活动标签悬停时出现，活动标签常显（占位固定，不产生布局跳动） */
+.graphTabClose {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   padding: 0;
   border: none;
   border-radius: 50%;
   background: none;
-  color: var(--c-accent);
+  color: var(--c-text-muted);
   font-size: 9px;
   line-height: 1;
   cursor: pointer;
-  transition: all var(--transition-fast);
+  opacity: 0;
+  transition: opacity var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
 }
 
-.loadedGraphTagClose:hover {
+.graphTab:hover .graphTabClose,
+.graphTabActive .graphTabClose {
+  opacity: 1;
+}
+
+.graphTabClose:hover {
   background: var(--c-danger-wash);
   color: var(--c-danger);
 }
@@ -879,6 +951,36 @@
   row-gap: 4px;
 }
 
+/* 当前图谱超出节点上限时的提示：位于按钮区与图谱之间，紧贴图谱上沿 */
+.graphLimitBanner {
+  flex-shrink: 0;
+  margin: 2px 0 0;
+  padding: 5px 10px;
+  border: 1px solid var(--c-danger);
+  border-radius: var(--radius-sm);
+  background: var(--c-danger-wash);
+  color: var(--c-danger);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  /* 紧贴图谱时避免下边框被画布覆盖 */
+  position: relative;
+  z-index: 1;
+}
+
+.graphLimitHint {
+  color: var(--c-text-muted);
+  font-weight: 400;
+}
+
+/* 图例计数数字 */
+
+.graphLegendNum {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--c-text);
+}
+
 .graphToolSpacer {
   margin-left: auto;
   display: inline-flex;
@@ -1134,15 +1236,22 @@
     row-gap: 4px;
   }
 
-  .loadedGraphTag {
+  /* 窄屏：标签栏独占一行，最大宽度下换行显示 */
+  .graphTabs {
+    flex-basis: 100%;
+  }
+
+  .graphTab {
     max-width: 60vw;
     font-size: 12px;
   }
 
-  .loadedGraphTagClose {
+  .graphTabClose {
     width: 18px;
     height: 18px;
     font-size: 10px;
+    /* 触屏无 hover：关闭按钮常显 */
+    opacity: 1;
   }
 
   /* 工具栏：图例与按钮组分行，按钮组允许换行，避免横向溢出 */

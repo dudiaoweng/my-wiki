@@ -17,6 +17,7 @@ import { useEntityOccurrences } from '../hooks/useEntityOccurrences';
 import { useArticleSearch } from '../hooks/useArticleSearch';
 import { EntityOccurrenceBar } from './EntityOccurrenceBar';
 import { SearchNavBar } from './SearchNavBar';
+import { HighlightText } from './HighlightText';
 import { ChildTree, countDescendants } from './ChildTree';
 import { tagFilterHref } from './ArticleCard';
 import { useCategories } from '../hooks/useCategories';
@@ -72,7 +73,7 @@ export function ArticleDetailView({
   selectedEntity, onEntitySelect, actionsInTopBar, onReturn,
   onCategorySelect, onRootSelect,
 }: ArticleDetailViewProps) {
-  const { openEditor, openUploader, requestConfirm, notifyArticleSaved, articleVersion, userIdNumber } = useApp();
+  const { openEditor, openUploader, requestConfirm, notifyArticleSaved, articleVersion, userIdNumber, advancedSearch } = useApp();
   const { showToast } = useToast();
   const [article, setArticle] = useState<Article | null>(null);
   const [loading, setLoading] = useState(true);
@@ -144,6 +145,26 @@ export function ArticleDetailView({
   const [searchQuery, setSearchQuery] = useState('');
   const deferredSearchQuery = useDeferredValue(searchQuery);
 
+  // 全局搜索 / 高级搜索关键词：只用于文章内醒目标识，不写入顶部文内搜索框
+  const [detailSearchParams] = useSearchParams();
+  const activeSearch = detailSearchParams.get('search') ?? '';
+  // 当前标签筛选（?tag=）：与搜索词一样用于文内/标题醒目标识
+  const tagTerms = useMemo(() => detailSearchParams.getAll('tag'), [detailSearchParams]);
+  const advancedSearchTerms = useMemo(
+    () => (advancedSearch ?? [])
+      .filter((c) => c.type === 'keyword' && !c.negated && c.value)
+      .map((c) => (c.value as string).trim())
+      .filter(Boolean),
+    [advancedSearch],
+  );
+  const externalSearchTerms = useMemo(
+    () => [activeSearch, ...advancedSearchTerms, ...tagTerms]
+      .flatMap((t) => t.split(/\s+/))
+      .map((t) => t.trim())
+      .filter(Boolean),
+    [activeSearch, advancedSearchTerms, tagTerms],
+  );
+
   const highlightPlugin = useMemo(
     () => createEntityHighlightPlugin(highlightTerm, 0, highlightClass),
     [highlightTerm, highlightClass],
@@ -159,10 +180,20 @@ export function ArticleDetailView({
     return count;
   }, [cleanContent, highlightTerm]);
 
+  // 顶部搜索框：仅内存中的文内关键词搜索（与全局/高级搜索解耦）
   const searchTerm = deferredSearchQuery.trim();
-  const searchPlugin = useMemo(
-    () => createSearchHighlightPlugin(searchTerm || null),
+  const searchTerms = useMemo(
+    () => searchTerm.split(/\s+/).filter(Boolean),
     [searchTerm],
+  );
+  // 文内搜索有输入时以它为准；否则仅对全局/高级搜索关键词做视觉标识
+  const effectiveSearchTerms = useMemo(
+    () => (searchTerms.length > 0 ? searchTerms : externalSearchTerms),
+    [searchTerms, externalSearchTerms],
+  );
+  const searchPlugin = useMemo(
+    () => createSearchHighlightPlugin(effectiveSearchTerms),
+    [effectiveSearchTerms],
   );
 
   const rehypePlugins = useMemo(
@@ -183,7 +214,7 @@ export function ArticleDetailView({
     activeIndex: activeSearchIndex,
     occurrences: searchOccurrences,
     scrollToMatch,
-  } = useArticleSearch(searchTerm, contentLength);
+  } = useArticleSearch(searchTerms, contentLength); // 仅跟踪顶部文内搜索
 
   const isSearchActive = searchTerm.length > 0;
   const isSearchPending = searchQuery.trim() && searchQuery.trim() !== searchTerm;
@@ -210,8 +241,8 @@ export function ArticleDetailView({
   const effectiveTab = tabSelection?.articleId === articleId ? tabSelection.tab : 'comments';
 
   // 文章所属目录的祖先链（子目录嵌套场景，含自身，根→叶子）
-  const [detailSearchParams] = useSearchParams();
-  const activeSearch = detailSearchParams.get('search') ?? '';
+  // 标题/子文章树高亮词：仅全局搜索 + 高级搜索关键词（文内搜索框保持独立）
+  const highlightTerms = externalSearchTerms;
   // 面包屑与子文章链接保留当前筛选状态（普通搜索 ?search= / 标签 ?tag= / 高级搜索 ?adv=1），
   // 高级搜索条件存于上下文，URL 仅需保留 adv 标记
   const keepFilter = (path: string) => {
@@ -414,7 +445,7 @@ export function ArticleDetailView({
       </div>
 
       <h1 className={styles.title}>
-        {article.title}
+        <HighlightText text={article.title} terms={highlightTerms} />
         {isProcessing && (
           <span className={styles.processingBadge}>
             ⏳ {procState.startsWith('recognizing') ? '解析中…' : '读取中…'}
@@ -437,13 +468,13 @@ export function ArticleDetailView({
       {article.tags.length > 0 && (
         <div className={styles.tags}>
           {article.tags.map((t) => {
-            const activeTags = detailSearchParams.getAll('tag');
-            const isActive = activeTags.includes(t);
+            const isActive = tagTerms.includes(t);
             return (
               <Link
                 key={t}
-                to={tagFilterHref(activeTags, t)}
-                className={styles.tag}
+                to={tagFilterHref(tagTerms, t)}
+                className={`${styles.tag}${isActive ? ` ${styles.tagActive}` : ''}`}
+                aria-current={isActive ? 'true' : undefined}
                 title={isActive
                   ? `取消标签「${t}」筛选`
                   : `累加筛选标签为「${t}」的文章`}
@@ -555,6 +586,7 @@ export function ArticleDetailView({
           <ChildTree
             nodes={article.children_tree}
             getHref={(id) => keepFilter(`/articles?view=${id}`)}
+            highlightTerms={highlightTerms}
           />
         </div>
       </div>

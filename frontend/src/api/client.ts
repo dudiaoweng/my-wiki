@@ -1,6 +1,7 @@
 import type { Article, ArticleCreate, ArticleUpdate } from '../types/article';
 import type { Category, CategoryCreate } from '../types/category';
 import type { Stats } from '../types/stats';
+import type { DependencyHealth } from '../types/health';
 import type { GraphData } from '../types/graph';
 import type { QARequest, QAResponse, FileParseResult, FileStatusResult } from '../types/qa';
 import type { Comment } from '../types/comment';
@@ -266,6 +267,11 @@ export const api = {
     return request<Stats>('/stats');
   },
 
+  // ── Health ──
+  getDependencyHealth() {
+    return request<DependencyHealth>('/health/deps');
+  },
+
   // ── Tags (mutations) ──
   addTag(tag: string, articleIds: string[]) {
     return request<{ tag: string; count: number }>('/tags', {
@@ -411,7 +417,7 @@ export const api = {
   getGraphData() {
     return request<GraphData>('/graph');
   },
-  // 展开选中节点的 n 层关系（Neo4j 直查全量，n=1..5）
+  // 展开选中节点的 n 层关系（Neo4j 直查全量，n=1..3）
   expandGraph(nodeId: string, depth: number) {
     return request<GraphData>(
       `/graph/expand?node_id=${encodeURIComponent(nodeId)}&depth=${depth}`,

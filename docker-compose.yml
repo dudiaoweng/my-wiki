@@ -49,8 +49,7 @@ services:
       - ./certs:/certs:ro
       # 环境变量文件挂载（已 gitignore；模板见 .env.example）
       # 后端启动时 load_dotenv() 读取 /app/.env —— 修改后 docker compose restart 即生效
-      # 模型参数与 QDRANT_URL 统一在 .env 中配置，此处不做任何覆盖
-      # （Docker 部署 .env 中 QDRANT_URL=http://qdrant:6333，指向上方 qdrant 服务）
+      # 模型参数与 Qdrant/Neo4j 地址统一在 .env 中配置
       - ./.env:/app/.env:ro
       # 提示词目录只读挂载（每个 prompt 一个 .txt，见 prompts/README.md）
       # 修改本机 prompts/*.txt 后 docker compose restart my-wiki 即生效

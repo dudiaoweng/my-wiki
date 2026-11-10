@@ -19,6 +19,9 @@ export interface SimEdge extends d3.SimulationLinkDatum<SimNode> {
   curve?: number;
 }
 
+/** 箭头 marker 实际渲染长度（markerWidth 6 × 线宽 1.5）；用于让连线止于箭头根部，避免叠加 */
+const EDGE_ARROW_LENGTH = 9;
+
 export const NODE_RADIUS: Record<string, number> = {
   article: 22,
   category: 18,
@@ -37,6 +40,37 @@ export function buildTooltipHtml(type: string, label: string, entityType?: strin
   return `<strong>${esc(category)}</strong><br>${esc(label)}`;
 }
 
+/** 取边端点的节点 id（forceLink 绑定前是字符串，绑定后是 SimNode） */
+function edgeEndpointId(end: SimEdge['source'] | SimEdge['target']): string {
+  return typeof end === 'object' && end !== null ? (end as SimNode).id : String(end);
+}
+
+/**
+ * 节点选中后，其关联连线做颜色调整（线宽/透明度不变）：
+ * 线条、箭头与关系标注同步使用选中节点的背景色（--c-accent）；
+ * 取消选中后线条/箭头恢复边框灰，关系标注恢复常规灰。
+ */
+function applyEdgeSelectionStyles(
+  svgEl: SVGSVGElement,
+  selected: Set<string> | null | undefined,
+  showArrows: boolean,
+) {
+  const svg = d3.select(svgEl);
+  const links = svg.selectAll<SVGGElement, SimEdge>('.d3-links > g');
+  if (links.empty()) return;
+  const isHighlighted = (d: SimEdge) =>
+    !!selected && (selected.has(edgeEndpointId(d.source)) || selected.has(edgeEndpointId(d.target)));
+
+  links.select<SVGPathElement>('path')
+    .attr('stroke', (d) => (isHighlighted(d) ? 'var(--c-accent)' : 'var(--c-border)'))
+    .attr('marker-end', (d) =>
+      showArrows ? (isHighlighted(d) ? 'url(#arrow-d3-selected)' : 'url(#arrow-d3)') : null);
+
+  // 关系标注：选中关联边同步使用与连线/箭头相同的强调色
+  links.select<SVGTextElement>('text')
+    .attr('fill', (d) => (isHighlighted(d) ? 'var(--c-accent)' : 'var(--c-text-muted)'));
+}
+
 // ── Options ──
 export interface UseD3ForceGraphOptions {
   /** Graph data { nodes, edges } — null/empty means nothing to render */
@@ -45,6 +79,8 @@ export interface UseD3ForceGraphOptions {
   entityTypeMap?: Map<string, string>;
   /** Called when a node is clicked */
   onNodeClick?: (nodeId: string, nodeType: string, label: string, ctrlKey: boolean, clientX?: number, clientY?: number) => void;
+  /** 文章节点名称作为超链被点击（打开文章详情）；未提供时名称仅作标签 */
+  onArticleLabelClick?: (nodeId: string) => void;
   /** Set of selected node IDs for visual highlighting */
   selectedNodeIds?: Set<string> | null;
   /** Whether to include arrow markers on edges */
@@ -53,9 +89,9 @@ export interface UseD3ForceGraphOptions {
   initialScale?: number;
   /** Map of entity name → additional info entries (for tooltip display) */
   entityInfoMap?: Map<string, { name: string; content: string }[]>;
-  /** 聚焦节点 id：钉在容器中心显示（实体列表选中 ↔ 图谱联动时传入） */
-  focusNodeId?: string | null;
-  /** 新增节点的锚点 id：新进入的节点在其附近生成（展开/聚焦联动用） */
+  /** 一次性居中：值变化时平移视口使该节点居中（不重绘、不钉住、保持缩放） */
+  centerNodeId?: string | null;
+  /** 新增节点的锚点 id：新进入的节点在其附近生成（展开等图操作用） */
   anchorNodeId?: string | null;
   /** 导出用：读取当前节点位置（id → 坐标）的函数引用 */
   getPositionsRef?: React.MutableRefObject<(() => Map<string, { x: number; y: number }>) | null>;
@@ -84,7 +120,6 @@ interface GraphState {
   dragBehavior: d3.DragBehavior<SVGGElement, SimNode, unknown>;
   nodes: SimNode[];
   edges: SimEdge[];
-  pinnedNodeId: string | null;
 }
 
 /**
@@ -106,10 +141,11 @@ export function useD3ForceGraph(
     entityTypeMap = new Map<string, string>(),
     entityInfoMap,
     onNodeClick,
+    onArticleLabelClick,
     selectedNodeIds,
     showArrows = true,
     initialScale = 1.0,
-    focusNodeId = null,
+    centerNodeId = null,
     anchorNodeId = null,
     getPositionsRef,
     getViewportRef,
@@ -128,9 +164,14 @@ export function useD3ForceGraph(
   const onNodeClickRef = useRef(onNodeClick);
   onNodeClickRef.current = onNodeClick;
 
+  const onArticleLabelClickRef = useRef(onArticleLabelClick);
+  onArticleLabelClickRef.current = onArticleLabelClick;
+
   const stateRef = useRef<GraphState | null>(null);
   // 节点位置缓存（id → 坐标）：撤销恢复/重入节点回到原位置
   const posCacheRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  // 居中请求去重：同一节点只在 centerNodeId 变化时居中一次（清空后可再次触发）
+  const lastCenteredRef = useRef<string | null>(null);
 
   // ── 载入文件（一次性消费）：新传入的位置/视口仅在下一次图数据更新时应用，之后清空 ──
   const pendingPositionsRef = useRef<Map<string, { x: number; y: number }> | null>(null);
@@ -214,22 +255,30 @@ export function useD3ForceGraph(
       // 停掉旧模拟（svg 重挂载场景）
       stateRef.current?.simulation.stop();
 
-      // ── Arrow marker ──
+      // ── Arrow marker（普通 / 选中加深，颜色与连线同步）──
       if (showArrows) {
-        svg.append('defs').append('marker')
-          .attr('id', 'arrow-d3')
-          .attr('viewBox', '0 0 10 10')
-          .attr('refX', 10).attr('refY', 5)
-          .attr('markerWidth', 6).attr('markerHeight', 6)
-          .attr('orient', 'auto-start-reverse')
-          .append('path')
-          .attr('d', 'M 0 0 L 10 5 L 0 10 z')
-          .attr('fill', 'var(--c-border)')
-          .attr('opacity', 0.7);
+        const defs = svg.append('defs');
+        const addArrow = (id: string, fill: string) => {
+          defs.append('marker')
+            .attr('id', id)
+            .attr('viewBox', '0 0 10 10')
+            // 箭头根部对齐连线终点（避免箭头与连线重叠导致颜色叠加变深）
+            .attr('refX', 0).attr('refY', 5)
+            // 用户坐标单位：箭头长度固定 9px，与 EDGE_ARROW_LENGTH 对应
+            .attr('markerUnits', 'userSpaceOnUse')
+            .attr('markerWidth', EDGE_ARROW_LENGTH).attr('markerHeight', EDGE_ARROW_LENGTH)
+            .attr('orient', 'auto-start-reverse')
+            .append('path')
+            .attr('d', 'M 0 0 L 10 5 L 0 10 z')
+            .attr('fill', fill)
+            .attr('opacity', 0.7);
+        };
+        addArrow('arrow-d3', 'var(--c-border)');
+        addArrow('arrow-d3-selected', 'var(--c-accent)');
       }
 
       const g = svg.append('g');
-      const linksG = g.append('g');
+      const linksG = g.append('g').attr('class', 'd3-links');
       const nodesG = g.append('g').attr('class', 'd3-nodes');
 
       // ── Simulation ──
@@ -253,7 +302,8 @@ export function useD3ForceGraph(
         const py = ux;
         const off = d.curve ?? 0;
         const sr = (src.r ?? 12) + 4;
-        const tr = (tgt.r ?? 12) + 4;
+        // 有箭头时目标端留出箭头长度，连线止于箭头根部（tip 仍落在原节点间距上）
+        const tr = (tgt.r ?? 12) + 4 + (showArrows ? EDGE_ARROW_LENGTH : 0);
         const sx = src.x! + ux * sr + px * off * 0.5;
         const sy = src.y! + uy * sr + py * off * 0.5;
         const tx = tgt.x! - ux * tr + px * off * 0.5;
@@ -316,13 +366,15 @@ export function useD3ForceGraph(
       stateRef.current = {
         svgEl, container, showArrows, width, height,
         simulation, linksG, nodesG, zoom, dragBehavior,
-        nodes: [], edges: [], pinnedNodeId: null,
+        nodes: [], edges: [],
       };
     }
 
     const st = stateRef.current;
     const { width, height } = st;
     const isSel = (id: string) => selectedRef.current?.has(id) ?? false;
+    // 文章节点名称超链：仅在调用方提供回调时渲染链接样式（否则保持普通标注）
+    const articleLabelIsLink = !!onArticleLabelClickRef.current;
 
     // 导出读取函数：实时快照当前节点位置与视口（供 JSON 导出）
     if (getPositionsRef) {
@@ -351,7 +403,6 @@ export function useD3ForceGraph(
     const anchor = anchorNodeId ? (prevMap.get(anchorNodeId) ?? null) : null;
 
     // 载入文件的新节点：钉在文件记录的位置（一次性消费，还原导出布局）
-    const importedRunIds = new Set<string>();
     const nodes: SimNode[] = graph.nodes.map((n) => {
       const prev = prevMap.get(n.id);
       if (prev) {
@@ -366,7 +417,6 @@ export function useD3ForceGraph(
           prev.y = loaded.y;
           prev.fx = loaded.x;
           prev.fy = loaded.y;
-          importedRunIds.add(n.id);
         }
         return prev;
       }
@@ -384,7 +434,6 @@ export function useD3ForceGraph(
       if (loaded) {
         node.fx = loaded.x;
         node.fy = loaded.y;
-        importedRunIds.add(n.id);
       }
       return node;
     });
@@ -483,8 +532,18 @@ export function useD3ForceGraph(
       .append('text')
       .text((d) => boxLabelOf(d))
       .attr('text-anchor', 'start').attr('x', (d) => -boxWidthOf(d) / 2 + 38).attr('dy', 5)
-      .attr('fill', (d) => isSel(d.id) ? 'white' : '#5B4A8C').attr('font-size', 10)
-      .attr('font-family', 'var(--font-body)');
+      .attr('fill', (d) => isSel(d.id) ? 'white' : (articleLabelIsLink ? 'var(--c-accent)' : '#5B4A8C'))
+      .attr('font-size', 10)
+      .attr('font-family', 'var(--font-body)')
+      // 名称超链：下划线 + 手型指针；点击只打开详情，不触发节点选中
+      .style('text-decoration', articleLabelIsLink ? 'underline' : 'none')
+      .style('text-underline-offset', articleLabelIsLink ? '2px' : 'auto')
+      .style('cursor', articleLabelIsLink ? 'pointer' : 'inherit')
+      .on('click', function (event, d) {
+        if (!onArticleLabelClickRef.current) return; // 未提供回调 → 冒泡给节点点击
+        event.stopPropagation();
+        onArticleLabelClickRef.current(d.id);
+      });
 
     // 目录节点：方框样式与文章节点一致（图标在前、标注在框内，宽度自适应）
     nodeEnter
@@ -583,7 +642,7 @@ export function useD3ForceGraph(
       ts.filter((_, i) => i === 1)
         .text(boxLabelOf(d))
         .attr('x', -boxWidthOf(d) / 2 + 38)
-        .attr('fill', sel ? 'white' : '#5B4A8C');
+        .attr('fill', sel ? 'white' : (articleLabelIsLink ? 'var(--c-accent)' : '#5B4A8C'));
     });
     merged.filter((d) => d.type === 'category').each(function (d) {
       const g = d3.select(this);
@@ -607,45 +666,21 @@ export function useD3ForceGraph(
         .text(d.label.length > 8 ? d.label.slice(0, 7) + '…' : d.label);
     });
 
-    // ── 聚焦节点：钉在容器中心（切换时释放旧钉）──
-    // 位置保持：释放旧钉/重复更新时保持节点当前位置 —— 用户拖动调整过的
-    // 源实体位置不回弹到中心（如选中其他实体后旧源实体不恢复原位置）
-    const newNodeMap = new Map(nodes.map((n) => [n.id, n]));
-    if (st.pinnedNodeId && st.pinnedNodeId !== focusNodeId) {
-      const old = newNodeMap.get(st.pinnedNodeId);
-      if (old) {
-        // 释放旧钉但保持在当前位置（含用户拖动后的位置）
-        old.fx = old.x;
-        old.fy = old.y;
-      }
-    }
-    const pinTargetChanged = st.pinnedNodeId !== focusNodeId;
-    st.pinnedNodeId = focusNodeId;
-    let pinChanged = false;
-    if (focusNodeId && !importedRunIds.has(focusNodeId)) {
-      const focus = newNodeMap.get(focusNodeId);
-      if (focus) {
-        // 新聚焦或节点尚无钉 → 钉到中心；已有钉（用户拖动过/载入文件位置）→ 保持
-        if (pinTargetChanged || focus.fx == null || focus.fy == null) {
-          focus.fx = width / 2;
-          focus.fy = height / 2;
-          pinChanged = true;
-        }
-      }
-    }
-
     // ── 绑定数据到模拟：已有节点对象保留位置，新节点融入 ──
     st.simulation.nodes(nodes);
     (st.simulation.force('link') as d3.ForceLink<SimNode, SimEdge>).links(edges);
     st.nodes = nodes;
     st.edges = edges;
 
-    // 温和重启布局（节点增减、连线增减或聚焦钉变化；单纯选中高亮不触发）。
+    // 数据更新后同步关联边颜色（新进入的关联边也要立即加深）
+    applyEdgeSelectionStyles(svgEl, selectedRef.current, showArrows);
+
+    // 温和重启布局（节点增减或连线增减；单纯选中高亮不触发）。
     // 新增/删除关系时节点不变，但新 path 的 d 属性只在 tick 中写入——
     // 不重启模拟会导致新边不显示、标签停在原点。
     const nodeChanged = !nodeEnter.empty() || !nodeExit.empty();
     const edgeChanged = !linkEnter.empty() || !linkExit.empty();
-    if (nodeChanged || pinChanged) {
+    if (nodeChanged) {
       st.simulation.alpha(0.6).restart();
     } else if (edgeChanged) {
       st.simulation.alpha(0.2).restart();
@@ -680,9 +715,36 @@ export function useD3ForceGraph(
     });
     resizeObserver.observe(container);
     return () => resizeObserver.disconnect();
-  }, [enabled, graph, entityTypeMap, showArrows, initialScale, focusNodeId, anchorNodeId, containerRef, svgRef, tooltipRef, tooltipStyle]);
+  }, [enabled, graph, entityTypeMap, showArrows, initialScale, anchorNodeId, containerRef, svgRef, tooltipRef, tooltipStyle]);
   // NOTE: onNodeClick intentionally omitted — we use onNodeClickRef to avoid recreating the graph on every render
   // initialPositions/initialViewport/getters 同样刻意不在依赖中：经 pending ref 一次性消费，避免重复应用
+
+  // ── 视口居中：centerNodeId 变化时平移到节点（不重绘、不钉住、保持缩放）──
+  useEffect(() => {
+    if (!centerNodeId || !enabled) {
+      // 取消选中/视图隐藏后允许再次选中同一节点时重新居中
+      lastCenteredRef.current = null;
+      return;
+    }
+    if (centerNodeId === lastCenteredRef.current) return;
+    const st = stateRef.current;
+    if (!st || st.svgEl !== svgRef.current) return;
+    const target = st.nodes.find((n) => n.id === centerNodeId);
+    if (!target || target.x == null || target.y == null) return;
+    lastCenteredRef.current = centerNodeId;
+    const w = st.container.clientWidth || st.width;
+    const h = st.container.clientHeight || st.height;
+    const k = d3.zoomTransform(st.svgEl).k;
+    d3.select(st.svgEl)
+      .transition()
+      .duration(400)
+      .call(
+        st.zoom.transform,
+        d3.zoomIdentity
+          .translate(w / 2 - target.x * k, h / 2 - target.y * k)
+          .scale(k),
+      );
+  }, [centerNodeId, enabled, svgRef]);
 
   // 视图隐藏时停止力模拟（切到列表/关闭图谱窗口），避免后台定时器继续跑
   useEffect(() => {
@@ -694,9 +756,11 @@ export function useD3ForceGraph(
     stateRef.current?.simulation.stop();
   }, []);
 
-  // ── Update node selection visuals WITHOUT recreating the graph ──
+  // ── Update node & edge selection visuals WITHOUT recreating the graph ──
   useEffect(() => {
     if (!svgRef.current) return;
+    // 选中节点的关联连线颜色加深 / 取消后恢复
+    applyEdgeSelectionStyles(svgRef.current, selectedNodeIds, showArrows);
     const svg = d3.select(svgRef.current);
     const nodeGroups = svg.selectAll<SVGGElement, SimNode>('.d3-nodes > g');
 
@@ -717,7 +781,9 @@ export function useD3ForceGraph(
       .each(function (d) {
         d3.select(this).selectAll('text')
           .filter((_, i) => i === 1)
-          .attr('fill', isSel(d.id) ? 'white' : '#5B4A8C');
+          .attr('fill', isSel(d.id)
+            ? 'white'
+            : (d.type === 'article' && onArticleLabelClickRef.current ? 'var(--c-accent)' : '#5B4A8C'));
       });
-  }, [selectedNodeIds, svgRef]);
+  }, [selectedNodeIds, svgRef, showArrows]);
 }

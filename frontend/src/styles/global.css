@@ -85,6 +85,17 @@ body {
   outline-offset: 1px;
 }
 
+/* ─── Search keyword highlighting（侧边栏 / 文章列表标题、摘要） ─── */
+.search-term-highlight {
+  background: rgba(255, 193, 7, 0.55);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+  font-weight: 600;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
 /* ─── Search result highlighting ─── */
 .search-highlight {
   background: rgba(255, 200, 50, 0.4);

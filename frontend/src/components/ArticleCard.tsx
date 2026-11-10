@@ -1,6 +1,7 @@
 import type { Article } from '../types/article';
 import { Link, useSearchParams } from 'react-router-dom';
 import { ChildTree } from './ChildTree';
+import { HighlightText } from './HighlightText';
 import styles from './ArticleCard.module.css';
 
 /** 标签累加筛选链接：已激活则移除（toggle），否则追加；全部移除后回根目录 */
@@ -20,9 +21,13 @@ interface Props {
   onOpen: (id: string) => void;
   /** 层级深度（0 = 顶级文章），用于树状缩进 */
   depth?: number;
+  /** 禁用（实体筛选下无关联文章）：降低视觉权重并阻断全部交互 */
+  disabled?: boolean;
   /** 拖拽（列表 ⇄ 侧边栏相互移动） */
   draggable?: boolean;
   dropHighlight?: 'drop' | 'invalid' | null;
+  /** 搜索关键词：标题/摘要/子文章标题中醒目标识 */
+  highlightTerms?: string[];
   onDragStart?: (e: React.DragEvent<HTMLElement>) => void;
   onDragOver?: (e: React.DragEvent<HTMLElement>) => void;
   onDragLeave?: () => void;
@@ -70,13 +75,19 @@ function formatUser(cn: string | null): string {
 }
 
 export function ArticleCard({
-  article, selected, onSelect, onOpen, depth = 0,
-  draggable = false, dropHighlight = null,
+  article, selected, onSelect, onOpen, depth = 0, disabled = false,
+  draggable = false, dropHighlight = null, highlightTerms,
   onDragStart, onDragOver, onDragLeave, onDrop,
 }: Props) {
   // 当前激活的标签集合（累加筛选；URL ?tag=A&tag=B）
   const [searchParams] = useSearchParams();
   const tags = searchParams.getAll('tag');
+  // 卡片最多展示 3 个标签；筛选时把生效标签排到前面，保证高亮可见
+  const visibleTags = tags.length
+    ? [...article.tags]
+        .sort((a, b) => Number(tags.includes(b)) - Number(tags.includes(a)))
+        .slice(0, 3)
+    : article.tags.slice(0, 3);
   const catColor = article.category?.color ?? 'var(--c-border)';
   const catName = article.category?.name ?? '未归类';
   const stripped = stripMarkdown(article.content);
@@ -86,41 +97,50 @@ export function ArticleCard({
 
   return (
     <div
-      className={`${styles.card} ${selected ? styles.cardSelected : ''} ${depth > 0 ? styles.cardNested : ''}${dropHighlight === 'drop' ? ` ${styles.dropTarget}` : ''}${dropHighlight === 'invalid' ? ` ${styles.dropTargetInvalid}` : ''}`}
+      className={`${styles.card} ${selected ? styles.cardSelected : ''} ${depth > 0 ? styles.cardNested : ''}${disabled ? ` ${styles.cardDisabled}` : ''}${dropHighlight === 'drop' ? ` ${styles.dropTarget}` : ''}${dropHighlight === 'invalid' ? ` ${styles.dropTargetInvalid}` : ''}`}
       style={{ '--tree-indent': `${indent}px`, '--card-accent': catColor } as React.CSSProperties}
       role="button"
-      tabIndex={0}
-      aria-label={`${article.title}${selected ? '（已选中）' : ''}`}
-      draggable={draggable}
+      tabIndex={disabled ? -1 : 0}
+      aria-disabled={disabled || undefined}
+      aria-label={`${article.title}${selected ? '（已选中）' : ''}${disabled ? '（与选中实体无关联，已禁用）' : ''}`}
+      draggable={draggable && !disabled}
       onDragStart={onDragStart}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
       onClick={(e) => {
+        if (disabled) return;
         const target = e.target as HTMLElement;
         if (target.closest('button')) return;
         onSelect(article.id, e.ctrlKey || e.metaKey);
       }}
       onKeyDown={(e) => {
+        if (disabled) return;
         if (e.key === 'Enter') { e.preventDefault(); onOpen(article.id); }
         if (e.key === ' ') { e.preventDefault(); onSelect(article.id, e.ctrlKey || e.metaKey); }
       }}
     >
       <div className={styles.body}>
         <div className={styles.titleRow}>
-          <span className={styles.title}>{depth > 0 ? '↳ ' : ''}{article.title}</span>
+          <span className={styles.title}>
+            {depth > 0 ? '↳ ' : ''}
+            <HighlightText text={article.title} terms={highlightTerms} />
+          </span>
           <button
             className={styles.openBtn}
+            disabled={disabled}
             onClick={(e) => {
               e.stopPropagation();
               onOpen(article.id);
             }}
-            title="打开文章"
+            title={disabled ? '与选中实体无关联' : '打开文章'}
           >
             ↗
           </button>
         </div>
-        <div className={styles.excerpt}>{excerpt}</div>
+        <div className={styles.excerpt}>
+          <HighlightText text={excerpt} terms={highlightTerms} />
+        </div>
         <div className={styles.meta}>
           <span
             className={styles.categoryBadge}
@@ -141,17 +161,23 @@ export function ArticleCard({
           {article.attachment_name && (
             <span style={{ fontSize: 11, color: 'var(--c-text-muted)' }}>📎</span>
           )}
-          {article.tags.slice(0, 3).map((t) => {
+          {visibleTags.map((t) => {
             const isActive = tags.includes(t);
             return (
               <Link
                 key={t}
                 to={tagFilterHref(tags, t)}
-                className={styles.tag}
+                className={`${styles.tag}${isActive ? ` ${styles.tagActive}` : ''}`}
+                tabIndex={disabled ? -1 : undefined}
+                aria-disabled={disabled || undefined}
+                aria-current={isActive ? 'true' : undefined}
                 title={isActive
                   ? `取消标签「${t}」筛选`
                   : `累加筛选标签为「${t}」的文章`}
-                onClick={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (disabled) e.preventDefault();
+                }}
               >
                 {t}
               </Link>
@@ -175,7 +201,7 @@ export function ArticleCard({
         )}
         {article.children_tree.length > 0 && (
           <div className={styles.childTreeWrap}>
-            <ChildTree nodes={article.children_tree} onOpen={onOpen} />
+            <ChildTree nodes={article.children_tree} onOpen={onOpen} highlightTerms={highlightTerms} />
           </div>
         )}
       </div>

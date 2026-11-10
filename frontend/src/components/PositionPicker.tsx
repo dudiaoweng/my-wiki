@@ -478,31 +478,42 @@ export function PositionField({
   }, [open]);
 
   const text = buildPositionText(value, categories, articles);
+  // 选中父文章时明确提示：新建/上传后将成为其子文章
+  const parentArticle = value.parentId
+    ? articles.find((a) => a.id === value.parentId) ?? null
+    : null;
 
   // 点击/键盘切换下拉（整个字段区域即触发器，不设专门「选择」按钮）
   const toggleDropdown = () => (open ? setOpen(false) : openDropdown());
 
   return (
     <>
-      <div
-        className={`${styles.positionRow}${open ? ` ${styles.positionRowOpen}` : ''}`}
-        ref={rowRef}
-        role="button"
-        tabIndex={0}
-        aria-expanded={open}
-        onClick={toggleDropdown}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            toggleDropdown();
-          }
-        }}
-        title="点击选择文章位置"
-      >
-        <span className={styles.positionValue} title={text || undefined}>
-          {text || <span className={styles.positionPlaceholder}>请选择文章所属的目录或父文章</span>}
-        </span>
-        <span className={styles.positionArrow}>{open ? '▴' : '▾'}</span>
+      <div className={styles.positionField}>
+        <div
+          className={`${styles.positionRow}${open ? ` ${styles.positionRowOpen}` : ''}`}
+          ref={rowRef}
+          role="button"
+          tabIndex={0}
+          aria-expanded={open}
+          onClick={toggleDropdown}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              toggleDropdown();
+            }
+          }}
+          title="点击选择文章位置"
+        >
+          <span className={styles.positionValue} title={text || undefined}>
+            {text || <span className={styles.positionPlaceholder}>请选择文章所属的目录或父文章</span>}
+          </span>
+          <span className={styles.positionArrow}>{open ? '▴' : '▾'}</span>
+        </div>
+        {parentArticle && (
+          <div className={styles.positionHint} role="status">
+            ℹ️ 父文章：<strong>{parentArticle.title}</strong>，将作为其子文章
+          </div>
+        )}
       </div>
 
       {open && dropdownStyle && createPortal(

@@ -17,6 +17,8 @@ interface ConfirmState {
   message: string;
   onConfirm: () => void | Promise<void>;
   confirmLabel?: string;
+  /** false = 普通操作确认（主题色按钮）；默认 true = 危险操作（红色按钮） */
+  danger?: boolean;
 }
 
 interface AppContextValue {
@@ -33,7 +35,7 @@ interface AppContextValue {
   closeEditor: () => void;
 
   confirmState: ConfirmState | null;
-  requestConfirm: (title: string, message: string, onConfirm: () => void | Promise<void>, confirmLabel?: string) => void;
+  requestConfirm: (title: string, message: string, onConfirm: () => void | Promise<void>, confirmLabel?: string, danger?: boolean) => void;
   closeConfirm: () => void;
   executeConfirm: () => void;
 
@@ -128,8 +130,8 @@ export function AppProvider({ children, userName = '', userIdNumber = '' }: AppP
   }, []);
   const closeUploader = useCallback(() => setUploaderOpen(false), []);
 
-  const requestConfirm = useCallback((title: string, message: string, onConfirm: () => void | Promise<void>, confirmLabel?: string) => {
-    setConfirmState({ title, message, onConfirm, confirmLabel });
+  const requestConfirm = useCallback((title: string, message: string, onConfirm: () => void | Promise<void>, confirmLabel?: string, danger?: boolean) => {
+    setConfirmState({ title, message, onConfirm, confirmLabel, danger });
   }, []);
   const closeConfirm = useCallback(() => setConfirmState(null), []);
   const confirmRef = useRef<ConfirmState | null>(null);

@@ -258,6 +258,14 @@
   filter: brightness(0.95);
 }
 
+/* 当前生效的标签筛选：醒目标识 */
+.tagActive {
+  background: var(--c-accent);
+  color: #fff;
+  font-weight: 600;
+  box-shadow: 0 0 0 2px var(--c-accent-wash);
+}
+
 /* ── Tabs (子文章 / 评论) ── */
 
 .tabsBar {

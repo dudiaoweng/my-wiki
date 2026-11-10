@@ -41,7 +41,10 @@ export function ConfirmDialog() {
           <button className={styles.btn} onClick={closeConfirm} ref={cancelRef}>
             取消
           </button>
-          <button className={`${styles.btn} ${styles.btnDanger}`} onClick={executeConfirm}>
+          <button
+            className={`${styles.btn} ${confirmState.danger === false ? styles.btnPrimary : styles.btnDanger}`}
+            onClick={executeConfirm}
+          >
             {confirmState.confirmLabel ?? '删除'}
           </button>
         </div>

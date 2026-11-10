@@ -72,3 +72,15 @@
 .btnDanger:hover {
   filter: brightness(1.1);
 }
+
+/* 普通操作确认（非删除）：主题色按钮 */
+.btnPrimary {
+  background: var(--c-accent);
+  color: white;
+  border-color: var(--c-accent);
+}
+
+.btnPrimary:hover {
+  background: var(--c-accent-hover);
+  filter: brightness(1.05);
+}

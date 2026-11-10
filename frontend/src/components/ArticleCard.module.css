@@ -156,6 +156,14 @@
   filter: brightness(0.9);
 }
 
+/* 当前生效的标签筛选：醒目标识 */
+.tagActive {
+  background: var(--c-accent);
+  color: #fff;
+  font-weight: 600;
+  box-shadow: 0 0 0 2px var(--c-accent-wash);
+}
+
 .commentSummary {
   margin-top: 8px;
   padding-top: 8px;
@@ -260,4 +268,27 @@
     gap: 8px;
     margin-top: 8px;
   }
+}
+
+/* ── 实体列表选中实体：无关联文章禁用（保留占位，取消选中即恢复） ── */
+.cardDisabled {
+  opacity: 0.45;
+  filter: grayscale(0.45);
+  cursor: not-allowed;
+  user-select: none;
+}
+
+/* 卡片本身保留命中以显示禁用光标；内部控件（打开按钮/标签/子文章链接）不可交互 */
+.cardDisabled > * {
+  pointer-events: none;
+}
+
+.cardDisabled::before {
+  opacity: 0.5;
+}
+
+.cardDisabled:hover {
+  box-shadow: none;
+  transform: none;
+  border-color: var(--c-border);
 }

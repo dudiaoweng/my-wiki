@@ -200,6 +200,26 @@
   box-shadow: 0 0 0 3px var(--c-accent-wash);
 }
 
+/* 位置字段：选择框 + 父文章提示（提示放在字段下方，不参与上传弹窗的横向 label 布局） */
+.positionField {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.positionHint {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--c-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.positionHint strong {
+  color: var(--c-accent);
+  font-weight: 600;
+}
+
 .positionValue {
   flex: 1;
   min-width: 0;

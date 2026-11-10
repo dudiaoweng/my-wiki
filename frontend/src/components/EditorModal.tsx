@@ -26,7 +26,7 @@ function getFileIcon(filename: string): string {
 }
 
 export function EditorModal() {
-  const { editorState, closeEditor, notifyArticleSaved } = useApp();
+  const { editorState, closeEditor, notifyArticleSaved, requestConfirm } = useApp();
   const { categories } = useCategories();
   const { articles: allArticles, refetch: refetchArticles } = useArticles();
   const { showToast } = useToast();
@@ -212,14 +212,7 @@ export function EditorModal() {
 
   if (!editorState) return null;
 
-  const handleSave = async () => {
-    // 文章加载完成前 title/content 仍是空串，此时保存会覆盖原文
-    if (saving || loadingArticle) return;
-    // 文章必须选择位置（目录）
-    if (!position.categoryId) {
-      showToast('请选择位置（目录）', 'error');
-      return;
-    }
+  const performSave = async () => {
     setSaving(true);
 
     try {
@@ -247,7 +240,7 @@ export function EditorModal() {
           parent_id: position.parentId || null,
           tags,
         }, attachments.length > 0 ? attachments : undefined);
-        showToast('文章已创建', 'success');
+        showToast(position.parentId ? '子文章已创建' : '文章已创建', 'success');
         // Same behavior as file upload: show inline detail with EntityPanel
         closeEditor();
         notifyArticleSaved();
@@ -264,6 +257,29 @@ export function EditorModal() {
     }
   };
 
+  const handleSave = async () => {
+    // 文章加载完成前 title/content 仍是空串，此时保存会覆盖原文
+    if (saving || loadingArticle) return;
+    // 文章必须选择位置（目录）
+    if (!position.categoryId) {
+      showToast('请选择位置（目录）', 'error');
+      return;
+    }
+    // 新建子文章：确认后才继续，避免误挂载到当前文章下
+    if (!isEdit && position.parentId) {
+      const parentTitle = allArticles.find((a) => a.id === position.parentId)?.title;
+      requestConfirm(
+        '创建子文章',
+        `新文章将作为「${parentTitle ?? '所选文章'}」的子文章创建，是否继续？`,
+        performSave,
+        '继续创建',
+        false,
+      );
+      return;
+    }
+    await performSave();
+  };
+
   const handleOverlayClick = (e: React.MouseEvent) => {
     if (e.target === e.currentTarget) closeEditor();
   };
@@ -272,7 +288,7 @@ export function EditorModal() {
     <div className={`${styles.overlay} ${editorState ? styles.open : ''}`} onClick={handleOverlayClick}>
       <div className={styles.modal}>
         <div className={styles.header}>
-          <h3>{isEdit ? '编辑文章' : '新建文章'}</h3>
+          <h3>{isEdit ? '编辑文章' : position.parentId ? '新建子文章' : '新建文章'}</h3>
           <button className={styles.closeBtn} onClick={closeEditor}>✕</button>
         </div>
 

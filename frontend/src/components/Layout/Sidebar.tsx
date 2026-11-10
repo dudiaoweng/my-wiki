@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, DragEvent } from 'react';
 import { NavLink, useLocation, useSearchParams } from 'react-router-dom';
 import { useApp } from '../../context/AppProvider';
+import { HighlightText } from '../HighlightText';
 import { useCategories } from '../../hooks/useCategories';
 import { useArticles } from '../../hooks/useArticles';
 import { useToast } from '../../hooks/useToast';
@@ -214,9 +215,22 @@ export function Sidebar() {
 
   // 全局搜索状态（由顶部搜索 Enter / 列表页搜索写入 URL ?search= 驱动）
   const listSearch = searchParams.get('search') ?? '';
+  // 高级搜索关键词条件（排除“非”条件）：侧边栏结果树同样醒目标识
+  const advHighlightTerms = useMemo(
+    () => (advancedSearch ?? [])
+      .filter((c) => c.type === 'keyword' && !c.negated && c.value)
+      .map((c) => (c.value as string).trim())
+      .filter(Boolean),
+    [advancedSearch],
+  );
   // 标签筛选状态（点击文章标签写入 URL ?tag= 驱动）
   // 标签累加筛选：URL 可携带多个 ?tag=A&tag=B（AND 叠加）
   const listTags = useMemo(() => searchParams.getAll('tag'), [searchParams]);
+  // 侧边栏醒目标识：顶部全局搜索词 + 标签筛选 + 高级搜索关键词 + 侧边栏筛选词
+  const highlightTerms = useMemo(
+    () => Array.from(new Set([listSearch, ...listTags, catQuery, ...advHighlightTerms].map((t) => t.trim()).filter(Boolean))),
+    [listSearch, listTags, catQuery, advHighlightTerms],
+  );
   const tagMode = listTags.length > 0;
   const tagQs = useMemo(
     () => listTags.map((t) => `tag=${encodeURIComponent(t)}`).join('&'),
@@ -343,7 +357,7 @@ export function Sidebar() {
                 onClick={() => handleTreeCatClick(cat.id)}
                 title={`筛选到目录「${cat.name}」`}
               >
-                <span className={styles.catName}>{cat.name}</span>
+                <span className={styles.catName}><HighlightText text={cat.name} terms={highlightTerms} /></span>
                 <span className={styles.count}>{arts.length}</span>
               </NavLink>
             </div>
@@ -363,7 +377,7 @@ export function Sidebar() {
                     title={a.title}
                   >
                     <span className={styles.articleIcon}>📄</span>
-                    <span className={styles.articleTitle}>{a.title}</span>
+                    <span className={styles.articleTitle}><HighlightText text={a.title} terms={highlightTerms} /></span>
                   </NavLink>
                 ))}
               </div>
@@ -483,7 +497,7 @@ export function Sidebar() {
                 onClick={closeSidebar}
                 title={a.title}
               >
-                <span className={styles.articleTitle}>{a.title}</span>
+                <span className={styles.articleTitle}><HighlightText text={a.title} terms={highlightTerms} /></span>
               </NavLink>
             </div>
             {isExpanded && kids.length > 0 && renderArticleNodes(kids)}
@@ -635,7 +649,7 @@ export function Sidebar() {
                 }}
                 title={`查看「${cat.name}」目录（点击切换展开）`}
               >
-                <span className={styles.catName}>{cat.name}</span>
+                <span className={styles.catName}><HighlightText text={cat.name} terms={highlightTerms} /></span>
                 {cat.created_by && (
                   <span
                     className={styles.catCreator}
@@ -981,7 +995,7 @@ export function Sidebar() {
                   title={a.title}
                 >
                   <span className={styles.articleIcon}>📄</span>
-                  <span className={styles.articleTitle}>{a.title}</span>
+                  <span className={styles.articleTitle}><HighlightText text={a.title} terms={highlightTerms} /></span>
                   {a.category && (
                     <span className={styles.searchCatTag} style={{ color: a.category.color }}>
                       {a.category.name}

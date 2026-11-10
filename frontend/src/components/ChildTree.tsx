@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom';
 import type { ArticleChildNode } from '../types/article';
+import { HighlightText } from './HighlightText';
 import styles from './ChildTree.module.css';
 
 export function countDescendants(nodes: ArticleChildNode[]): number {
@@ -24,13 +25,15 @@ interface ChildTreeProps {
   onOpen?: (id: string) => void;
   /** 自定义链接生成（如带实体列表的内联视图）；不传时默认跳转文章详情页 */
   getHref?: (id: string) => string;
+  /** 搜索关键词：子文章标题中醒目标识 */
+  highlightTerms?: string[];
 }
 
 /**
  * 子文章标题树（文章详情页与文章卡片共用）：
  * 嵌套缩进 + 左侧连接线。
  */
-export function ChildTree({ nodes, onOpen, getHref }: ChildTreeProps) {
+export function ChildTree({ nodes, onOpen, getHref, highlightTerms }: ChildTreeProps) {
   if (nodes.length === 0) return null;
   return (
     <ul className={styles.childTree}>
@@ -45,7 +48,7 @@ export function ChildTree({ nodes, onOpen, getHref }: ChildTreeProps) {
                 onClick={() => onOpen(n.id)}
                 title={`打开「${n.title}」`}
               >
-                {n.title}
+                <HighlightText text={n.title} terms={highlightTerms} />
               </button>
             ) : (
               <Link
@@ -53,7 +56,7 @@ export function ChildTree({ nodes, onOpen, getHref }: ChildTreeProps) {
                 className={styles.treeLink}
                 title={n.title}
               >
-                {n.title}
+                <HighlightText text={n.title} terms={highlightTerms} />
               </Link>
             )}
             {(n.created_by || n.updated_at) && (
@@ -64,7 +67,7 @@ export function ChildTree({ nodes, onOpen, getHref }: ChildTreeProps) {
               </span>
             )}
           </div>
-          <ChildTree nodes={n.children} onOpen={onOpen} getHref={getHref} />
+          <ChildTree nodes={n.children} onOpen={onOpen} getHref={getHref} highlightTerms={highlightTerms} />
         </li>
       ))}
     </ul>

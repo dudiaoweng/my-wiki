@@ -19,7 +19,7 @@ function formatFileSize(bytes: number): string {
 }
 
 export function UploadModal() {
-  const { uploaderOpen, uploaderPreset, closeUploader, notifyArticleSaved } = useApp();
+  const { uploaderOpen, uploaderPreset, closeUploader, notifyArticleSaved, requestConfirm } = useApp();
   const { categories } = useCategories();
   const { articles: allArticles, refetch: refetchArticles } = useArticles();
   const { showToast } = useToast();
@@ -62,7 +62,35 @@ export function UploadModal() {
     if (f) setFile(f);
   };
 
-  const handleUpload = async () => {
+  const performUpload = async () => {
+    setError(null);
+    setStep('uploading');
+
+    try {
+      setStep('uploading');
+      const article = await api.uploadFile(file!, position.categoryId, position.parentId || undefined);
+
+      setStep('done');
+      showToast(
+        position.parentId ? '文件上传成功，已创建为子文章' : '文件上传成功，文章已创建',
+        'success',
+      );
+      closeUploader();
+
+      // Notify article list and sidebar to refresh
+      notifyArticleSaved();
+
+      // Navigate to the article list with inline detail view (shows EntityPanel on right)
+      navigate(`/articles?view=${article.id}`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : '上传失败';
+      setError(msg);
+      setStep('idle');
+      showToast(msg, 'error');
+    }
+  };
+
+  const handleUpload = () => {
     if (!file) return;
     // 上传文件也必须选择位置（目录）
     if (!position.categoryId) {
@@ -79,28 +107,20 @@ export function UploadModal() {
       return;
     }
 
-    setError(null);
-    setStep('uploading');
-
-    try {
-      setStep('uploading');
-      const article = await api.uploadFile(file, position.categoryId, position.parentId || undefined);
-
-      setStep('done');
-      showToast('文件上传成功，文章已创建', 'success');
-      closeUploader();
-
-      // Notify article list and sidebar to refresh
-      notifyArticleSaved();
-
-      // Navigate to the article list with inline detail view (shows EntityPanel on right)
-      navigate(`/articles?view=${article.id}`);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : '上传失败';
-      setError(msg);
-      setStep('idle');
-      showToast(msg, 'error');
+    // 上传为子文章：确认后才继续，避免误挂载到当前文章下
+    if (position.parentId) {
+      const parentTitle = allArticles.find((a) => a.id === position.parentId)?.title;
+      requestConfirm(
+        '上传为子文章',
+        `文件将作为「${parentTitle ?? '所选文章'}」的子文章上传，是否继续？`,
+        performUpload,
+        '继续上传',
+        false,
+      );
+      return;
     }
+
+    void performUpload();
   };
 
   if (!uploaderOpen) return null;
@@ -115,7 +135,7 @@ export function UploadModal() {
     <div className={`${styles.overlay} ${styles.open}`} onClick={(e) => { if (e.target === e.currentTarget) closeUploader(); }}>
       <div className={styles.modal}>
         <div className={styles.header}>
-          <h3>上传文件</h3>
+          <h3>{position.parentId ? '上传文件（作为子文章）' : '上传文件'}</h3>
           <button className={styles.closeBtn} onClick={closeUploader} disabled={step !== 'idle' && step !== 'done'}>✕</button>
         </div>
 

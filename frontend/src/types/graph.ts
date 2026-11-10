@@ -16,4 +16,6 @@ export interface GraphEdge {
 export interface GraphData {
   nodes: GraphNode[];
   edges: GraphEdge[];
+  /** 当前图谱节点上限（后端 GRAPH_MAX_NODES）；未设置 = 不限制 */
+  max_nodes?: number | null;
 }

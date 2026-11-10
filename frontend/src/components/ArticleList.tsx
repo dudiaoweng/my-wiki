@@ -12,6 +12,7 @@ import { ArticleDetailInline } from './ArticleDetail';
 import type { Article } from '../types/article';
 import type { Category } from '../types/category';
 import { EntityPanel } from './EntityPanel';
+import { HighlightText } from './HighlightText';
 import type { OrderedArticle } from '../utils/hierarchy';
 import styles from './ArticleList.module.css';
 
@@ -122,7 +123,7 @@ function makeComparator<T>(keyOf: (item: T, f: SortField) => string, criteria: S
 
 /** 目录卡片（根目录视图 / 文章列表目录入口统一样式）：含创建人、创建时间、修改/删除 */
 function DirCard({
-  d, count, to, onClick, title,
+  d, count, to, onClick, title, highlightTerms,
   canModify, editing, editName, editColor,
   onEditNameChange, onEditColorChange, onStartEdit, onSaveEdit, onCancelEdit, onDelete,
   draggable = false, dropHighlight = null,
@@ -133,6 +134,8 @@ function DirCard({
   to: string;
   onClick?: () => void;
   title: string;
+  /** 搜索关键词：目录名中醒目标识 */
+  highlightTerms?: string[];
   canModify: boolean;
   editing: boolean;
   editName: string;
@@ -216,7 +219,7 @@ function DirCard({
       onDrop={onDrop}
     >
       <span className={styles.rootDirIcon}>📁</span>
-      <span className={styles.rootDirName}>{d.name}</span>
+      <span className={styles.rootDirName}><HighlightText text={d.name} terms={highlightTerms} /></span>
       {/* 创建人/创建时间靠右 */}
       {meta && <span className={styles.rootDirMeta}>{meta}</span>}
       {/* 修改/删除：权限控制同侧边栏 */}
@@ -370,6 +373,7 @@ export function ArticleList() {
       to={dirLink(d).to}
       onClick={dirLink(d).onClick}
       title={dirLink(d).title}
+      highlightTerms={highlightTerms}
       canModify={canModifyCategory(d, userIdNumber)}
       editing={editingCatId === d.id}
       editName={editCatName}
@@ -504,6 +508,19 @@ export function ArticleList() {
   // 筛选框：对当前结果的关键词动态筛选（本地过滤，与顶部搜索框解耦、不写 URL）
   const [filterText, setFilterText] = useState('');
 
+  // 列表卡片醒目标识的搜索词：顶部全局搜索 + 标签筛选 + 列表筛选框 + 高级搜索关键词（排除“非”条件）
+  const highlightTerms = useMemo(() => {
+    const terms = [
+      search ?? '',
+      ...tags,
+      filterText,
+      ...(advancedSearch ?? [])
+        .filter((c) => c.type === 'keyword' && !c.negated && c.value)
+        .map((c) => c.value as string),
+    ];
+    return Array.from(new Set(terms.map((t) => t.trim()).filter(Boolean)));
+  }, [search, tags, filterText, advancedSearch]);
+
   // ── 排序：组合条件（时间 / 标题·目录名 / 创建人），各条件可倒序/正序 ──
   const [sortCriteria, setSortCriteria] = useState<SortCriterion[]>([
     { id: 0, field: 'time', order: 'desc' },
@@ -573,6 +590,21 @@ export function ArticleList() {
   const [viewedArticleId, setViewedArticleId] = useState<string | null>(null);
   // 被浏览文章不在当前列表中时（如从侧边栏打开目录树深层文章），单独拉取供实体面板使用
   const [viewedArticleDetail, setViewedArticleDetail] = useState<Article | null>(null);
+
+  // 图谱文章节点名称超链 → 弹出的文章详情窗口（不改变列表/图谱状态）
+  const [popupArticleId, setPopupArticleId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!popupArticleId) return;
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      // 输入框内 Esc 交给输入框（如详情内搜索框清空），不关闭弹窗
+      if (e.key === 'Escape' && t?.tagName !== 'INPUT' && t?.tagName !== 'TEXTAREA') {
+        setPopupArticleId(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [popupArticleId]);
 
   // Entity highlight (for article content highlighting via rehype plugin)
   const [highlightEntity, setHighlightEntity] = useState<string | null>(null);
@@ -700,33 +732,55 @@ export function ArticleList() {
   }, []);
 
   // Handle entity selection — 实体以「名称+类型」为标识，筛选集按 name::type 键存
+  // selected 由实体列表行状态决定：true=点击选中，false=再次点击取消（非按集合成员判断，
+  // 避免图谱选中已加入筛选时，列表普通点击因「已在集合中」被误判为取消）
   const lastEntityNameRef = useRef<string | null>(null);
-  const handleEntitySelect = useCallback((entity: string, entityType: string, ctrl: boolean) => {
-    const key = `${entity}::${entityType}`;
-    lastEntityNameRef.current = entity;
-    setSelectedEntities((prev) => {
-      const next = new Set(prev);
-      if (ctrl) {
-        if (next.has(key)) next.delete(key); else next.add(key);
-      } else {
-        if (next.has(key)) next.delete(key);
-        else { next.clear(); next.add(key); }
-      }
-      return next;
-    });
-  }, []);
+  const handleEntitySelect = useCallback(
+    (entity: string, entityType: string, ctrl: boolean, selected: boolean) => {
+      const key = `${entity}::${entityType}`;
+      lastEntityNameRef.current = entity;
+      setSelectedEntities((prev) => {
+        if (ctrl) {
+          const next = new Set(prev);
+          if (selected) next.add(key); else next.delete(key);
+          return next;
+        }
+        if (selected) return new Set([key]); // 普通点击 = 单选该实体
+        if (!prev.has(key)) return prev;
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    },
+    [],
+  );
 
-  // 正文高亮按名称（文本无法区目录型）：选中任一类型行即高亮该名称，集合清空才熄灭
+  // 正文高亮按名称（文本无法区目录型）：优先最后操作的实体；已不在选中集时退回任一选中项
   useEffect(() => {
-    setHighlightEntity(selectedEntities.size > 0 ? lastEntityNameRef.current : null);
+    if (selectedEntities.size === 0) {
+      setHighlightEntity(null);
+      return;
+    }
+    const names = new Set(Array.from(selectedEntities, (key) => key.split('::')[0]));
+    const last = lastEntityNameRef.current;
+    setHighlightEntity(last && names.has(last) ? last : (names.values().next().value ?? null));
   }, [selectedEntities]);
 
   // Handle knowledge graph node click → toggle selection（目录/文章/实体统一）
   // 普通点击：切换选中 —— 已选中则仅取消该节点，未选中则清除其余并选中
   // Ctrl 点击：多选切换（添加/移除该节点），不限制至少一个选中
+  // forceSelect：实体列表选中时强制加入/单选（不做 toggle，避免节点已选中导致反选）
   const handleGraphNodeClick = useCallback(
-    (_nodeId: string, _nodeType: string, _label: string, multi?: boolean) => {
+    (_nodeId: string, _nodeType: string, _label: string, multi?: boolean, forceSelect?: boolean) => {
       setSelectedGraphNodeIds((prev) => {
+        if (forceSelect) {
+          if (multi) {
+            const next = new Set(prev);
+            next.add(_nodeId);
+            return next;
+          }
+          return new Set([_nodeId]);
+        }
         const next = new Set(prev);
         if (multi) {
           if (next.has(_nodeId)) next.delete(_nodeId);
@@ -744,20 +798,43 @@ export function ArticleList() {
     [],
   );
 
-  // Combined filter: entity selection + keyword (local, no reload)
+  // 图谱实体节点选中/取消 → 显式加入/移除实体筛选（非 toggle，
+  // 避免与实体列表已有选中态互相冲突；用于文章列表禁用无关联文章）。
+  // exclusive=true 表示图谱单选的替换语义：只保留当前实体，清掉其他筛选。
+  const handleEntityFilterChange = useCallback(
+    (entityName: string, entityType: string, selected: boolean, exclusive = false) => {
+      const key = `${entityName}::${entityType}`;
+      if (selected) lastEntityNameRef.current = entityName;
+      setSelectedEntities((prev) => {
+        if (exclusive && selected) return new Set([key]);
+        const next = new Set(prev);
+        if (selected) next.add(key);
+        else next.delete(key);
+        return next;
+      });
+    },
+    [],
+  );
+
+  // 实体列表选中实体 → 无关联文章禁用（不隐藏；取消选中后自动恢复）
+  // 多选实体时按「包含任一选中实体」判定关联，与实体列表筛选语义一致
+  const disabledArticleIds = useMemo(() => {
+    if (selectedEntities.size === 0) return null;
+    const base = advMode ? advArticles : articles;
+    return new Set(
+      base
+        .filter((a) => !(a.entities?.entities?.some((e) =>
+          selectedEntities.has(`${e.name}::${e.type ?? '其他'}`)
+        )))
+        .map((a) => a.id),
+    );
+  }, [advMode, advArticles, articles, selectedEntities]);
+
+  // Combined filter: keyword only (local, no reload)
   // 注：图谱节点选中（selectedGraphNodeIds）不再过滤文章列表 —— 仅用于图谱内高亮，
   // 避免点击图谱节点后文章列表只剩选中文章（不要联动）
   const displayedArticles = useMemo(() => {
     let result = advMode ? advArticles : articles;
-
-    // Additionally filter by selected entities — 按 (name, type) 精确匹配
-    if (selectedEntities.size > 0) {
-      result = result.filter((a) =>
-        a.entities?.entities?.some((e) =>
-          selectedEntities.has(`${e.name}::${e.type ?? '其他'}`)
-        )
-      );
-    }
 
     // 筛选框：关键词动态筛选当前结果（标题 + 正文，大小写不敏感）
     const kw = filterText.trim().toLowerCase();
@@ -768,7 +845,7 @@ export function ArticleList() {
     }
 
     return result;
-  }, [advMode, advArticles, articles, selectedEntities, filterText]);
+  }, [advMode, advArticles, articles, filterText]);
 
   // 文章层级深度（卡片缩进用；父链截断于当前集合内）
   const articleDepthMap = useMemo(() => {
@@ -984,35 +1061,41 @@ export function ArticleList() {
         </div>
       )}
       <div className={styles.list}>
-        {orderedArticles.map(({ article: a, depth }) => (
-          <ArticleCard
-            key={a.id}
-            article={a}
-            depth={depth}
-            selected={selectedArticleIds.has(a.id)}
-            onSelect={handleArticleSelect}
-            onOpen={handleArticleOpen}
-            draggable={canMoveArticle(a)}
-            dropHighlight={dropTarget === a.id ? 'drop' : dropTarget === `invalid:${a.id}` ? 'invalid' : null}
-            onDragStart={(e) => startDrag(e, 'article', a.id, canMoveArticle(a))}
-            onDragOver={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              if (dragRef.current?.type === 'cat') {
-                // 目录不能挂到文章下：不可用状态
-                e.dataTransfer.dropEffect = 'none';
-                if (dropTarget !== `invalid:${a.id}`) setDropTarget(`invalid:${a.id}`);
-              } else {
-                dragOverTarget(e, a.id);
-              }
-            }}
-            onDragLeave={() => {
-              clearDropTarget(a.id);
-              clearDropTarget(`invalid:${a.id}`);
-            }}
-            onDrop={(e) => handleDropOnListArticle(e, a.id)}
-          />
-        ))}
+        {orderedArticles.map(({ article: a, depth }) => {
+          const disabled = disabledArticleIds?.has(a.id) ?? false;
+          return (
+            <ArticleCard
+              key={a.id}
+              article={a}
+              depth={depth}
+              selected={selectedArticleIds.has(a.id)}
+              disabled={disabled}
+              highlightTerms={highlightTerms}
+              onSelect={handleArticleSelect}
+              onOpen={handleArticleOpen}
+              draggable={!disabled && canMoveArticle(a)}
+              dropHighlight={dropTarget === a.id ? 'drop' : dropTarget === `invalid:${a.id}` ? 'invalid' : null}
+              onDragStart={(e) => { if (!disabled) startDrag(e, 'article', a.id, canMoveArticle(a)); }}
+              onDragOver={(e) => {
+                if (disabled) return; // 禁用卡片不作为拖放目标
+                e.preventDefault();
+                e.stopPropagation();
+                if (dragRef.current?.type === 'cat') {
+                  // 目录不能挂到文章下：不可用状态
+                  e.dataTransfer.dropEffect = 'none';
+                  if (dropTarget !== `invalid:${a.id}`) setDropTarget(`invalid:${a.id}`);
+                } else {
+                  dragOverTarget(e, a.id);
+                }
+              }}
+              onDragLeave={() => {
+                clearDropTarget(a.id);
+                clearDropTarget(`invalid:${a.id}`);
+              }}
+              onDrop={(e) => { if (!disabled) handleDropOnListArticle(e, a.id); }}
+            />
+          );
+        })}
       </div>
       {totalPages > 1 && (
         <div className={styles.pager}>
@@ -1425,6 +1508,8 @@ export function ArticleList() {
         mode={entityPanelMode}
         onRefresh={refetch}
         onGraphNodeClick={handleGraphNodeClick}
+        onArticleOpen={setPopupArticleId}
+        onEntityFilterChange={handleEntityFilterChange}
         onClearAllSelections={() => {
           // 点击图谱空白区域：清空图谱节点多选与实体文章筛选
           setSelectedGraphNodeIds(new Set());
@@ -1433,6 +1518,45 @@ export function ArticleList() {
         selectedGraphNodeIds={selectedGraphNodeIds}
         onEntitySelect={handleEntitySelect}
       />
+
+      {/* 图谱文章节点名称超链 → 文章详情弹窗（overlay 点击空白/Esc/✕ 关闭） */}
+      {popupArticleId && createPortal(
+        <div
+          className={styles.popupOverlay}
+          onClick={(e) => { if (e.target === e.currentTarget) setPopupArticleId(null); }}
+        >
+          <div className={styles.popupWindow} role="dialog" aria-modal="true" aria-label="文章详情">
+            <div className={styles.popupHeader}>
+              <span className={styles.popupTitle}>文章详情</span>
+              <button
+                type="button"
+                className={styles.popupClose}
+                onClick={() => setPopupArticleId(null)}
+                title="关闭"
+              >
+                ✕
+              </button>
+            </div>
+            <div
+              className={styles.popupBody}
+              onClick={(e) => {
+                // 弹窗内点击链接（面包屑/子文章/标签）：关闭弹窗，由路由跳转接管
+                if ((e.target as HTMLElement).closest('a')) setPopupArticleId(null);
+              }}
+            >
+              <ArticleDetailInline
+                key={popupArticleId}
+                articleId={popupArticleId}
+                onBack={() => setPopupArticleId(null)}
+                onNavigate={(id) => setPopupArticleId(id)}
+                selectedEntity={highlightEntity}
+                onEntitySelect={setHighlightEntity}
+              />
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
     </div>
   );
 }

@@ -1166,14 +1166,14 @@ def graph_data_sync() -> tuple[list[dict], list[dict], list[dict]]:
 
 
 def expand_graph_sync(node_match: str, params: dict, depth: int) -> tuple[list, list]:
-    """n 层邻域展开：Neo4j 直查全量（不受 /graph 2000 节点截断影响）。
+    """n 层邻域展开：Neo4j 直查全量（不受 /graph 的 GRAPH_MAX_NODES 上限影响）。
 
     node_match 形如 "MATCH (n0:Article {id: $start_id})" 或
     "MATCH (n0:Entity {name: $name, type: $etype})"；
     返回 (节点记录, 关系记录) 原始 neo4j 对象列表，由调用方映射为图谱 DTO。
     """
-    depth = max(1, min(int(depth), 5))
-    # 上限护栏：防止枢纽节点 n=5 时变量长路径爆炸（前端 D3 也扛不住全量渲染）。
+    depth = max(1, min(int(depth), 3))
+    # 上限护栏：防止枢纽节点 n=3 时变量长路径爆炸（前端 D3 也扛不住全量渲染）。
     # LIMIT 必须放在 collect 之前：先流式截断路径行，避免 collect 先把全部路径
     # 聚合成内存列表再截断（枢纽节点上会先materialize海量行）。
     nodes = _run_sync(

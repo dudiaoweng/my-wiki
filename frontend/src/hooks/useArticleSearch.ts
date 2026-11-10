@@ -10,7 +10,7 @@ export interface SearchOccurrence {
  * After the rehype plugin renders <mark data-search-occurrence> elements,
  * this hook collects them from the DOM and manages active-index tracking.
  */
-export function useArticleSearch(searchTerm: string, _contentLength: number) {
+export function useArticleSearch(searchTerms: string[], _contentLength: number) {
   const [activeIndex, setActiveIndex] = useState(0);
   const observerRef = useRef<IntersectionObserver | null>(null);
   // Prevent IntersectionObserver from overriding manual navigation during scroll animation
@@ -20,7 +20,9 @@ export function useArticleSearch(searchTerm: string, _contentLength: number) {
   // ── Compute occurrence list from DOM ──
   const [occurrences, setOccurrences] = useState<SearchOccurrence[]>([]);
 
-  const hasTerm = searchTerm.trim().length > 0;
+  const hasTerm = searchTerms.some((t) => t.trim().length > 0);
+  // 稳定依赖键：多个关键词内容不变时不重复扫描 DOM
+  const termKey = searchTerms.map((t) => t.trim()).filter(Boolean).join('\u0000');
 
   useEffect(() => {
     if (!hasTerm) {
@@ -65,7 +67,7 @@ export function useArticleSearch(searchTerm: string, _contentLength: number) {
     }, 80);
 
     return () => clearTimeout(timer);
-  }, [searchTerm, hasTerm]);
+  }, [termKey, hasTerm]);
 
   const count = occurrences.length;
 
@@ -77,7 +79,7 @@ export function useArticleSearch(searchTerm: string, _contentLength: number) {
         observerRef.current = null;
       }
     };
-  }, [searchTerm]);
+  }, [termKey]);
 
   // ── IntersectionObserver: track which occurrence is nearest top ──
   useEffect(() => {
@@ -145,7 +147,7 @@ export function useArticleSearch(searchTerm: string, _contentLength: number) {
         observerRef.current = null;
       }
     };
-  }, [searchTerm, count, hasTerm]);
+  }, [termKey, count, hasTerm]);
 
   // ── Toggle .search-highlight-active class ──
   useEffect(() => {
@@ -159,7 +161,7 @@ export function useArticleSearch(searchTerm: string, _contentLength: number) {
         activeEl.classList.add('search-highlight-active');
       }
     }
-  }, [searchTerm, count, activeIndex, hasTerm]);
+  }, [termKey, count, activeIndex, hasTerm]);
 
   // ── Scroll to a specific occurrence ──
   const scrollToMatch = useCallback(
@@ -193,7 +195,7 @@ export function useArticleSearch(searchTerm: string, _contentLength: number) {
     }, 150);
 
     return () => clearTimeout(timer);
-  }, [searchTerm]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [termKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return { count, activeIndex, occurrences, scrollToMatch };
 }

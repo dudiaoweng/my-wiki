@@ -28,14 +28,15 @@
 **my-wiki** 是一个个人知识库管理系统，支持以下核心功能：
 
 - 📄 **文章管理** — 创建、编辑、删除 Markdown 文章，支持目录和标签；仅创建人可编辑/删除
-- 🗂️ **目录层级** — 目录可嵌套子目录；文章可挂载在目录下，也可挂载在其他文章下（同目录嵌套）；面包屑路径 全部/目录链/文章/子文章
+- 🗂️ **目录层级** — 目录可嵌套子目录；文章可挂载在目录下，也可挂载在其他文章下（同目录嵌套）；面包屑路径 全部/目录链/文章/子文章；新建/上传为子文章前弹框确认
 - 💬 **文章评论** — 评论 CRUD，支持多附件、内容纳入智能问答；仅评论人可编辑/删除
 - 🔐 **权限控制** — 基于身份证号的创建人验证，文章/评论/实体/目录均受保护
 - 📤 **文件上传解析** — 支持 .txt / .md / .docx / .xlsx / .pptx / .pdf / 图片 / 音视频；文档文本异步提取（读取中→解析中两阶段），自动通过 LLM 提取标题、实体和关系（分段提取、逐段落库）
-- 🔍 **搜索体系** — 顶部关键词即时搜索（数据库匹配）、侧边栏搜索结果树、高级搜索（时间范围/人员/关键词 × 与或非组合）；搜索结果作为文章列表展示的基础（目录分布、目录内筛选）
+- 🔍 **搜索体系** — 顶部关键词即时搜索（数据库匹配）、侧边栏搜索结果树、高级搜索（时间范围/人员/关键词 × 与或非组合）；搜索结果作为文章列表展示的基础（目录分布、目录内筛选）；搜索词/标签在侧边栏、文章列表、文章详情统一醒目标识（详情顶部为独立文内搜索）
 - 🗂️ **文章列表** — 分页（每页 10 篇）、组合排序（时间/标题·目录名/创建人 × 倒序/正序，目录与文章分别排序）、目录卡片（创建人/创建时间、修改/删除、拖拽移动）
 - 🤖 **智能问答 (RAG)** — 最右侧面板与文章/实体窗口并排（窗口切换保活、数据不清理），多会话下拉框管理，多行输入框
-- 🕸️ **知识图谱** — D3.js 力导向图，展示文章-目录-实体关系网络；实体列表⇄图谱联动、n 层展开/移除/撤销、关系增删改、图谱 JSON 打开/保存/截图与单独浏览模式
+- 🕸️ **知识图谱** — D3.js 力导向图，展示文章-目录-实体关系网络；实体列表⇄图谱联动（选中居中、文章列表禁用无关联文章）、n 层展开（1–3 层）/收缩/移除/撤销（仅独立模式）、关系增删改、图谱多标签单独浏览（最多 5 个）/快照、JSON 打开/保存/截图；当前图谱默认节点上限 500（`GRAPH_MAX_NODES` 可调，超限截断并提示）
+- 🩺 **依赖与模型状态** — 后端每 30 秒巡检 Neo4j / Qdrant 与已配置的文本/视觉/语音/嵌入模型；前端只读快照，多前端轮询不触发重复探测；异常时顶栏左侧红色提示
 - 🏷️ **实体管理** — LLM 自动提取实体+关系（实体以「名称+类型」为标识，同名不同类型独立），实体列表动态加载（每批 20 条）；关联渐进加载（每批 10 条），支持方向切换与类型化对端选择
 - 🧩 **Prompt 可配置** — 所有提示词以 txt 文件存于 `prompts/` 目录，可独立编辑，重启生效（Docker 挂载）
 - 📱 **响应式设计** — 桌面端多栏布局，移动端按内容高度自适应
@@ -73,6 +74,7 @@ my-wiki/
 │           ├── tags.py          # 标签管理 (添加/重命名/删除)
 │           ├── entities.py      # 实体管理 + 附加信息 CRUD + 嵌入重算
 │           ├── graph.py         # 知识图谱数据构建
+│           ├── health.py        # 依赖服务/模型后台巡检 + 只读快照接口
 │           ├── qa.py            # RAG 问答管道
 │           ├── stats.py         # 仪表盘统计
 │           └── upload.py        # 文件上传 + LLM 实体提取
@@ -94,6 +96,7 @@ my-wiki/
 │       │   ├── article.ts       # Article, ArticleCreate, ArticleUpdate
 │       │   ├── category.ts      # Category
 │       │   ├── graph.ts         # GraphNode, GraphEdge, GraphData
+│       │   ├── health.ts        # DependencyHealth, ModelHealth
 │       │   ├── qa.ts            # QAMessage, QASource, QAResponse
 │       │   └── stats.ts         # Stats
 │       ├── hooks/               # 自定义 Hooks
@@ -106,6 +109,7 @@ my-wiki/
 │       │   ├── useTags.ts       # 标签获取
 │       │   ├── useToast.tsx     # Toast 通知系统
 │       │   ├── useKeyboardShortcuts.ts  # 键盘快捷键
+│       │   ├── useDependencyHealth.ts   # 依赖/模型状态读取（只读快照）
 │       │   └── useReadingProgress.ts    # 阅读进度
 │       ├── utils/               # 工具函数
 │       │   └── entityIcons.ts   # 实体类型图标映射 (共享)
@@ -114,10 +118,10 @@ my-wiki/
 │       │   ├── Hero.tsx         # 首页
 │       │   ├── ArticleList.tsx  # 文章列表 + 实体面板
 │       │   ├── ArticleCard.tsx  # 文章卡片
-│       │   ├── ArticleDetail.tsx        # 文章详情页 (独立路由)
-│       │   ├── ArticleDetailInline.tsx  # 文章内联详情
+│       │   ├── ArticleDetail.tsx        # 文章详情视图 + 内联详情（共用）
+│       │   ├── ArticleDetailPage.tsx    # 独立详情路由包装（懒加载）
 │       │   ├── EntityPanel.tsx  # 实体面板 (实体/关系编辑列表 + 知识图谱双模式)
-│       │   ├── KnowledgeGraph.tsx       # 全屏知识图谱页
+│       │   ├── KnowledgeGraph.tsx       # 旧版全屏图谱组件（当前未挂载）
 │       │   ├── QA.tsx           # 智能问答页
 │       │   ├── CommentSection.tsx       # 评论组件 (共用)
 │       │   ├── AttachmentGallery.tsx    # 附件画廊
@@ -126,6 +130,7 @@ my-wiki/
 │       │   ├── LoginPage.tsx    # 开发模式用户选择页 / 生产模式登录页
 │       │   ├── CertErrorPage.tsx # mTLS 证书错误页
 │       │   ├── ConfirmDialog.tsx # 确认对话框
+│       │   ├── HighlightText.tsx # 搜索关键词高亮
 │       │   ├── Toast.tsx        # Toast 容器
 │       │   └── ReadingProgress.tsx # 阅读进度条
 │       └── styles/              # 全局样式
@@ -500,13 +505,14 @@ my-wiki/
 | | | `/{name}/info/{id}` | PUT | 更新实体附加信息 |
 | | | `/{name}/info/{id}` | DELETE | 删除实体附加信息 |
 | `/api/graph` | `routes/graph.py` | `/` | GET | 知识图谱数据 |
-| | | `/expand` | GET | 按节点 id 展开 n 层邻域（1–5 层） |
+| | | `/expand` | GET | 按节点 id 展开 n 层邻域（1–3 层） |
 | `/api/qa` | `routes/qa.py` | `/ask` | POST | 问答 (RAG) |
 | | | `/parse-file` | POST | 解析上传文件为问答上下文 |
 | `/api/stats` | `routes/stats.py` | `/` | GET | 统计数据 |
 | `/api/upload` | `routes/upload.py` | `/` | POST | 文件上传 |
 | `/api` | `main.py` | `/media/{filename}` | GET | 媒体文件直链 |
 | `/api` | `main.py` | `/health` | GET | 健康检查 |
+| | `routes/health.py` | `/health/deps` | GET | Neo4j / Qdrant / 已配置模型状态（后台巡检快照，只读） |
 | `/api/auth` | `main.py` | `/status` | GET | 证书认证状态 + 用户信息 (name/id_number/display_name) |
 | `/api/auth` | `main.py` | `/login` | GET | 登录跳转 (生产模式，重定向回前端) |
 
@@ -694,16 +700,16 @@ my-wiki/
 | `"提及"` | article → entity | 文章提及实体 |
 | `(自定义)` | entity → entity | 实体间关系 (LLM 提取 + 手工编辑；读取端按两端+关系名去重) |
 
-**安全限制:** 最多 2000 个节点，防止图谱过于庞大；超出时同步过滤端点被截断的边。
+**安全限制:** 当前（按选中文章/目录过滤后的）图谱默认最多 500 个节点（`.env` 的 `GRAPH_MAX_NODES` 可调）；`/api/graph` 返回完整数据并携带 `max_nodes`，由前端在当前图谱上截断节点并同步过滤端点被截断的边——避免全局先截断导致当前文章的实体被误删。触发截断时在按钮区与图谱之间（紧贴图谱上沿）显示“⚠ 已达节点上限，已截断（上限 N 个节点）”。
 
 #### GET /api/graph/expand — n 层邻域展开
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
 | `node_id` | string | `article:{id}` 或 `entity:{name}::{type}`；目录节点返回空图 |
-| `depth` | int | 1–5，默认 1 |
+| `depth` | int | 1–3，默认 1 |
 
-- Neo4j 直查，不受 `/api/graph` 2000 节点上限影响
+- Neo4j 直查，不受 `/api/graph` 的 `GRAPH_MAX_NODES` 节点上限影响
 - 节点查询 `WITH n0, x LIMIT 1200`、关系查询 `WITH r LIMIT 5000`（路径级限流，再 UNWIND/DISTINCT），防止稠密图指数级路径枚举
 - 返回前过滤 `deleted=true` 的关系、端点缺失的边，以及只能经墓碑边到达的孤立节点；起点节点始终保留
 - 文章节点标题仍从 SQLite 组装
@@ -930,7 +936,7 @@ ArticleList
   ├── 读取 URL params: category, search, tag, view, adv
   ├── 目录卡片 (DirCard)：创建人/创建时间 + 修改/删除 + 拖拽（权限同侧边栏）
   ├── 传递给 EntityPanel: entities (LLM实体), selectedArticleIds, articles
-  └── 接收 EntityPanel 回调: onGraphNodeClick（图谱多选 id 集合）、onEntitySelect（实体→文章筛选）、onClearAllSelections
+  └── 接收 EntityPanel 回调: onGraphNodeClick（图谱多选 id 集合）、onEntitySelect / onEntityFilterChange（实体→文章禁用）、onArticleOpen（文章详情弹窗）、onClearAllSelections
 
 Sidebar（与文章列表共享拖拽状态）
   ├── 浏览模式目录树（分批加载、手风琴展开、目录/文章拖拽）
@@ -940,8 +946,8 @@ Sidebar（与文章列表共享拖拽状态）
 EntityPanel
   ├── 双模式: list (LLM实体列表+附加信息，动态加载每批 20 条) / graph (实体列表 + D3 知识图谱分栏)
   ├── 从 ArticleList 接收选中的文章 ID（关联查询/写入的文章范围）
-  ├── 图谱节点点击：实体节点联动实体列表行 + 信息面板；文章/目录节点仅图谱内高亮（不筛选文章列表）
-  ├── 图操作：展开 n 层 / 移除 / 撤销；图谱文件新建/打开/保存/截图；打开/新建进入单独浏览模式
+  ├── 图谱节点点击：实体节点联动实体列表行 + 信息面板 + 文章列表禁用；文章节点名称超链打开详情弹窗；文章/目录节点仅图谱内高亮
+  ├── 图操作（仅独立模式）：展开 n 层 / 收缩叶子节点 / 移除 / 撤销；顶部菜单新建/打开/保存/截图；打开/新建/快照新增独立标签（最多 5 个）
   └── 实体点击 → 附加信息 + 关联信息面板（关联渐进加载 10/批，可增删改）
 
 QA
@@ -1044,7 +1050,7 @@ const notifyArticleSaved = useCallback(() => {
   → 成功后重新查询关联 + refetchGraph（画布增量更新，不重排版）
 ```
 
-单独浏览模式下不调用 API：上述增删改直接作用于 `workingGraph.edges`，并写入撤销历史；不做权限校验。
+单独浏览模式下不调用 API：上述增删改直接作用于活动标签的图（`activeTab.graph`，组件内经 `workingGraph` 派生）并写入该标签的撤销历史；不做权限校验。
 
 ---
 
@@ -1185,7 +1191,7 @@ def _collect_entity_info(question, top_chunks, db) -> str:
 
 使用 D3.js v7 力导向图，通过共享 Hook (`useD3ForceGraph`) 实现代码复用：
 
-**数据来源（v2.3）**：`GET /api/graph` 混合组装——文章/分类节点来自 SQLite（标题/颜色），实体节点 + 提及边 + 关系边由 `neo4j_store.graph_data_sync()` 三条 Cypher 直查 Neo4j。v2.2 前的 30 秒 TTL 缓存（避免全表 JSON 扫描）已移除，`invalidate_graph_cache` 全部调用点随之删除；Neo4j 不可用时返回 503「知识图谱服务（Neo4j）不可用」。前端节点/边 id 约定保持不变；`EntityPanel` 在此基础上增加了实体列表联动、n 层展开/移除/撤销、关系编辑与图谱文件（打开/保存/新建/截图、单独浏览）功能。
+**数据来源（v2.3）**：`GET /api/graph` 混合组装——文章/分类节点来自 SQLite（标题/颜色），实体节点 + 提及边 + 关系边由 `neo4j_store.graph_data_sync()` 三条 Cypher 直查 Neo4j。v2.2 前的 30 秒 TTL 缓存（避免全表 JSON 扫描）已移除，`invalidate_graph_cache` 全部调用点随之删除；Neo4j 不可用时返回 503「知识图谱服务（Neo4j）不可用」。前端节点/边 id 约定保持不变；`EntityPanel` 在此基础上增加了实体列表联动（选中居中 + 文章列表禁用）、n 层展开/收缩/移除/撤销（仅独立模式）、关系编辑、多标签单独浏览（最多 5 个）/快照与图谱文件（打开/保存/新建/截图）功能。
 
 **节点视觉设计:**
 - `category` — 方框样式与文章一致，图标 📁 + 目录名（宽度同样自适应）
@@ -1196,19 +1202,24 @@ def _collect_entity_info(question, top_chunks, db) -> str:
 
 **交互功能:**
 - 缩放/平移 (d3.zoom)、节点拖拽 (d3.drag)、悬停工具提示 (title + 类型 + 实体附加信息)
-- **节点点击**：`EntityPanel` 内切换节点选中/高亮——实体节点联动实体列表（选中行 + 信息面板），文章/目录节点仅在图谱内高亮、不筛选文章列表；全屏 `KnowledgeGraph` 页仍按节点 `url` 跳转
-- Ctrl+点击多选；点击空白取消全部选中；选中仅更新视觉高亮，不重建图谱
-- **图操作工具栏**（`EntityPanel`）：展开选中节点 n 层（1–5 层，Neo4j 直查）、从视图移除选中节点、撤销上一步；无节点选中/无历史时按钮灰显
+- **图例计数**：工具栏图例显示当前视图的文章 / 目录 / 实体 / 关系数量
+- **节点上限**：当前视图（按选中文章过滤后）默认最多 500 个节点（`.env` 的 `GRAPH_MAX_NODES` 可调）；由前端在过滤后的当前图谱上截断并同步过滤边，超限时在按钮区与图谱之间显示“已达节点上限，已截断”
+- **节点点击**：切换选中/高亮——实体节点联动实体列表（选中行 + 信息面板），并同步文章列表（不含该实体的文章卡片禁用变淡，取消选中恢复）；文章节点名称超链弹出文章详情窗口；文章/目录节点仅在图谱内高亮
+- **实体列表选中**：不重载图谱，仅在当前图中选中并居中对应节点；图谱内点击实体节点反向选中列表行
+- Ctrl+点击多选；点击空白取消全部选中；选中仅更新节点高亮与关联连线/箭头/标注颜色，不重建图谱
+- **图操作工具栏**（`EntityPanel`，仅独立模式下可用）：展开选中节点 n 层（1–3 层，Neo4j 直查）、收缩叶子节点（移除仅与选中节点相连且无其他关联的邻居）、从视图移除选中节点、撤销上一步；非独立模式、无节点选中或无历史时按钮灰显
 - **关系编辑**（`EntityPanel` 实体信息面板）：关联按当前文章范围渐进加载（每批 10 条）；支持新增/修改/删除、方向切换、对端类型图标与筛选；写操作要求文章范围，修改只作用于旧边存在的文章
-- **图谱文件**（`EntityPanel` 右上角菜单）：新建 / 打开 / 保存 / 截图；JSON 保存节点位置与视口，可再次打开还原布局。打开或新建后进入**单独浏览模式**：文件名标签可关闭，实体列表仅与载入图联动，本地实体/关系编辑只改内存、不写数据库、不做权限校验
+- **图谱文件**（`EntityPanel` 右上角菜单）：新建 / 打开 / 保存 / 截图；JSON 保存节点位置与视口，可再次打开还原布局
 - **增量更新**：数据 join 保留已有节点对象、位置与缩放；节点/边增删才重启力模拟（边-only 变化也会重启以写入新 path），避免每次刷新重排版
 
-**单独浏览模式（载入图谱）:**
-- 打开或新建图谱后 `loadedGraphName` 非空、`workingGraph` 持有载入图；图谱模式下实体列表/关联/图谱全部从载入图派生，不查询数据库
-- 本地实体/关系编辑只修改 `workingGraph` 并写入撤销历史，不写 SQLite/Neo4j、不做权限校验；撤销不会退出该模式
-- 顶部文件名标签的 ✕ 是唯一退出入口；切换列表模式/窗口、在列表模式选择实体都不会清空载入图（保护条件基于 `loadedGraphName` 而非当前 `mode`）
-- 保存使用 File System Access API（打开文件时记住可写句柄），JSON 含 `version/exportedAt/viewport/nodes(x,y)/edges`；浏览器不支持或写入失败时回退下载副本；保存对话框可修改位置/文件名，文件名变更同步到顶部标签
-- 新建图谱名称按 `知识图谱_YYYY-MM-DD` 追加 `_2`/`_3` 序号；单独模式不显示源实体、不加载数据库附加信息、不查询关联；展开仍可用（按当前标签/类型解析节点 id 后查 Neo4j）
+**单独浏览模式（多标签）:**
+- 打开 / 新建 / 快照均新增一个独立标签（最多同时 5 个）；标签栏可切换，关闭最后一个标签退出该模式
+- 每个标签独立保存图数据、撤销历史、节点位置与视口（切走时抓取、切回时还原）；实体列表与图谱均从活动标签派生，不查询数据库
+- 模式内实体/关系编辑及展开/收缩/移除/撤销只改内存图并写入该标签的撤销历史，不写 SQLite/Neo4j、不做权限校验
+- **快照**：深拷贝当前图谱（含展开/移除后的工作图状态）与布局，立即进入独立模式；编辑只影响快照
+- 顶部标签栏无边框、无滚动条，宽度按内容自适应（最宽 190px），空间不足自动换行
+- 单独模式不显示源实体、不加载数据库附加信息、不查询关联；展开/收缩等操作可用
+- 保存按当前活动标签导出：File System Access API 弹出保存对话框，JSON 含 `version/exportedAt/viewport/nodes(x,y)/edges`；浏览器不支持或写入失败时回退下载副本；文件名变更同步到当前标签
 
 ```json
 {
@@ -1422,6 +1433,8 @@ LLM 提取实体/关系 ──► Neo4j（实体节点/提及边/关系边）
 
 **文章列表目录卡片（DirCard）**：各视图（根目录/浏览/搜索/高级搜索）统一卡片样式——📁 + 名称 + 创建人/创建时间（靠右）+ 递归文章数 + 箭头；✎ 修改（内联表单：名称 + 8 色圆点）/ ✕ 删除（删除保护：有子目录或文章时前端拦截提示、后端 409 兜底），权限控制与侧边栏一致（创建人证件号比对）。
 
+**子文章创建确认**：`PositionField` 选中父文章时在位置字段下方显示“父文章：X，将作为其子文章”行内提示；`EditorModal` / `UploadModal` 在新建且 `parentId` 非空时，提交前调用 `requestConfirm`（普通确认样式，按钮“继续创建/继续上传”）二次确认，取消则留在弹窗内可修改位置；顶级文章不弹框。
+
 ### 9.13 文章列表分页与排序
 
 **分页**：每页 10 篇（`PAGE_SIZE`，与侧边栏/位置选择器分批一致），`/api/articles/count` 提供总数；切换目录/搜索/标签/高级搜索回到第 1 页，总页数减少时自动修正；翻页后平滑回列表顶部；页码窗口前后各 2 个。
@@ -1439,7 +1452,29 @@ LLM 提取实体/关系 ──► Neo4j（实体节点/提及边/关系边）
 
 实体面板列表模式每批展示 **20 条**（`ENTITY_BATCH`），底部「加载更多（已显示 N / 总数 条）」按钮逐批追加；实体数据或筛选词变化时回到第一批。编辑中或已选中的实体若位于第一批之外，会保留其可见批次并滚动到该行，避免清除筛选/数据刷新后编辑表单与信息面板消失。
 
-关联信息同样渐进加载：每次 **10 条**（`RELATION_BATCH`），点击「加载更多」追加；切换选中实体时回到第一批。关联按当前文章范围从 Neo4j 查询（`POST /api/entities/relations/query`），单独浏览模式下改为从载入图的 `workingGraph.edges` 即时派生，不查数据库。
+关联信息同样渐进加载：每次 **10 条**（`RELATION_BATCH`），点击「加载更多」追加；切换选中实体时回到第一批。关联按当前文章范围从 Neo4j 查询（`POST /api/entities/relations/query`），单独浏览模式下改为从活动标签图的 `edges` 即时派生，不查数据库。
+
+### 9.16 搜索关键词高亮
+
+顶部全局搜索（URL `?search=`）、高级搜索关键词、标签筛选（`?tag=`）、侧边栏筛选词与文章列表本地筛选词统一醒目标识：
+
+- `components/HighlightText.tsx`：按空白拆分为多个关键词、大小写不敏感匹配，命中词包裹为 `<mark class="search-term-highlight">`（`global.css`：黄色底 + 加粗）
+- **侧边栏**：搜索树/浏览树的目录名与文章标题、筛选结果的标题（全局搜索词 + 标签筛选 + 高级搜索关键词 + 侧边栏筛选词）
+- **文章列表**：`ArticleCard` 标题/摘要/子文章树、`DirCard` 目录名；关键词来源为 URL `?search=`、标签筛选、列表筛选框、高级搜索关键词（排除“非”条件）
+- **标签 chip**：当前生效的 `?tag=` 标签在顶栏 chip、文章卡片、文章详情标签列表中用主题色高亮（`tagActive`）
+- **文章详情**：顶部搜索框是**独立的内存文内搜索**，不写入/不关联全局、高级与标签词。无文内输入时，搜索词/标签/高级关键词仅对正文做视觉标识（`rehypeSearchHighlight`），标题、子文章树用 `HighlightText`；一旦输入文内搜索词，则以它为唯一高亮与上下条导航词（多词空格分隔），外部关键词标识让位。`useArticleSearch` 只接收文内搜索词数组，避免外部高亮触发自动滚动/导航
+
+### 9.17 依赖服务与模型状态提示
+
+- **后端后台巡检**：`lifespan` 启动 `health.start_monitor()`（幂等，双 uvicorn 共用 app 只启动一次），每 30 秒并行探测 Neo4j（`ping_async`）与 Qdrant（`ping`，含集合存在性），单项 3 秒超时；结果写入模块级内存快照，进程退出时取消任务
+- `GET /api/health/deps`（受 mTLS 保护）**只读快照，不触发任何探测**；首次巡检完成前返回 `{neo4j: null, qdrant: null, models: {}}`，前端不提示。多个前端轮询只读取内存，不会重复调用依赖或模型接口
+- **模型状态** `models.text/vision/asr/embedding = {configured, ok}`：
+  - 仅当 API Key、API Base、Model 均非空（`configured=true`）时探测；未配置返回 `ok=null`，前端不提示
+  - 文本/视觉：`POST /chat/completions`（`max_tokens=1`）；嵌入：`POST /embeddings`（input=`ping`）；语音：`POST /audio/transcriptions`（内存生成 0.2s 静音 WAV）
+  - 2xx 视为健康；语音探测中 401/403/404/5xx/网络错误为异常，其他 4xx（如静音不被接受）视为服务可达
+  - 模型探测结果缓存：健康 5 分钟、异常 1 分钟，后台巡检按 TTL 复用
+- 前端 `useDependencyHealth`：挂载时读取快照，之后每 30 秒轮询（只读），窗口重新聚焦时立即读取；读取失败保留上次结果（从未成功则按异常处理）
+- `TopBar` 左侧品牌区仅在任一依赖/已配置模型异常时显示红色提示（如 `Neo4j、文本模型 异常`），点击立即读取最新快照；正常时不占位。搜索框与知识图谱/智能问答/用户信息统一靠右排列
 
 ---
 
@@ -1602,7 +1637,7 @@ interface AppContextValue {
 | **CORS** | 可配置的允许来源列表 | `main.py` |
 | **外键** | `PRAGMA foreign_keys = ON` | `database.py` |
 | **请求体限制** | QA 历史最多 20 条/50 条消息，文章分页最多 200，文件上下文最多 5 个 | `qa.py`, `articles.py` |
-| **图谱节点限制** | `/api/graph` MAX_NODES = 2000；`/api/graph/expand` 路径级 LIMIT 1200/5000 + 端点/墓碑过滤 | `graph.py`, `neo4j_store.py` |
+| **图谱节点限制** | `/api/graph` 返回 `max_nodes`（`GRAPH_MAX_NODES`，默认 500，`.env` 可配），前端按过滤后的当前图谱应用；`/api/graph/expand` 路径级 LIMIT 1200/5000 + 端点/墓碑过滤 | `graph.py`, `neo4j_store.py`, `EntityPanel.tsx` |
 | **关系写校验** | `article_ids` 必填；owner 必须是端点；两端类型明确；修改范围限定旧边实际存在的文章 | `entities.py`, `neo4j_store.py` |
 | **竞态保护** | `ensure_embeddings` 使用 `asyncio.Lock` 防止并发重复计算 | `qa.py` |
 | **闭包内存** | 后台任务不捕获 `content_bytes`，改为从磁盘重新读取 | `upload.py` |

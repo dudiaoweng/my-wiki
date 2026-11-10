@@ -128,10 +128,12 @@
   flex-shrink: 0;
   max-width: 260px;
   padding: 6px 6px 6px 10px;
-  background: var(--c-tag-bg);
-  color: var(--c-tag-text);
+  background: var(--c-accent-wash);
+  color: var(--c-accent);
+  border: 1px solid var(--c-accent);
   border-radius: var(--radius-sm);
   font-size: 13px;
+  font-weight: 600;
   overflow: hidden;
 }
 
@@ -169,7 +171,46 @@
   align-items: center;
   gap: 10px;
   flex-shrink: 0;
+  min-width: 0;
   margin-left: auto;
+}
+
+/* 依赖服务异常提示（Neo4j / Qdrant） */
+.depAlert {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 420px;
+  padding: 6px 10px;
+  border: 1px solid var(--c-danger);
+  border-radius: var(--radius-sm);
+  background: var(--c-danger-wash);
+  color: var(--c-danger);
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: filter var(--transition-fast);
+}
+
+.depAlertText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.depAlert:hover {
+  filter: brightness(0.97);
+}
+
+.depAlertDot {
+  font-size: 9px;
+  animation: depPulse 1.6s ease-in-out infinite;
+}
+
+@keyframes depPulse {
+  50% { opacity: 0.35; }
 }
 
 .toolBtn {
@@ -250,12 +291,20 @@
 
   .right {
     gap: 6px;
+    flex: 1;
+    min-width: 0;
   }
 
   .searchWrap {
     width: auto;
     flex: 1;
     min-width: 0;
+  }
+
+  .depAlert {
+    max-width: 200px;
+    padding: 4px 6px;
+    font-size: 11px;
   }
 
   .toolLabel {

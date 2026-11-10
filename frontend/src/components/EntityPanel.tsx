@@ -34,7 +34,7 @@ interface RelationTargetOption {
 }
 
 // ── File System Access API（TS lib.dom 未内置 showOpenFilePicker）──
-// 用于「载入图谱」时获取可写文件句柄，保存时原地覆盖载入的文件。
+// 用于打开/保存图谱文件的选择器与读写。
 interface GraphWritableStream {
   write: (data: string | Blob) => Promise<void>;
   close: () => Promise<void>;
@@ -52,6 +52,30 @@ type ShowSaveFilePicker = (options?: {
   suggestedName?: string;
   types?: { description?: string; accept: Record<string, string[]> }[];
 }) => Promise<GraphFileHandle>;
+
+/** 撤销历史条目：操作前的图快照（含当时图谱名称） */
+interface GraphHistoryEntry {
+  graph: GraphData;
+  graphName: string | null;
+}
+
+/** 独立模式标签页：每个标签维护自己的图、撤销历史与布局 */
+interface GraphTab {
+  id: string;
+  name: string;
+  graph: GraphData;
+  history: GraphHistoryEntry[];
+  /** 切回该标签时恢复的节点位置（切走时抓取当前布局） */
+  positions: Map<string, { x: number; y: number }> | null;
+  /** 切回该标签时恢复的视口 */
+  viewport: { x: number; y: number; k: number } | null;
+}
+
+/** 独立模式同时打开的图谱标签上限 */
+const MAX_GRAPH_TABS = 5;
+
+/** 图谱展开层数上限（与后端 /graph/expand 的截断一致） */
+const MAX_EXPAND_DEPTH = 3;
 
 /**
  * 关联对端选择器：带图标 + 可输入筛选的下拉。
@@ -213,11 +237,16 @@ interface Props {
   articles?: Article[];
   mode: ViewMode;
   onRefresh?: () => void;
-  onGraphNodeClick?: (nodeId: string, nodeType: string, label: string, multi?: boolean) => void;
+  onGraphNodeClick?: (nodeId: string, nodeType: string, label: string, multi?: boolean, forceSelect?: boolean) => void;
+  /** 点击图谱中文章节点名称（超链）→ 打开文章详情 */
+  onArticleOpen?: (articleId: string) => void;
+  /** 图谱实体节点选中/取消 → 同步文章列表实体筛选（true=加入，false=移除；
+   *  exclusive=true 表示单选替换：只保留当前实体） */
+  onEntityFilterChange?: (entityName: string, entityType: string, selected: boolean, exclusive?: boolean) => void;
   /** 点击图谱空白区域 → 取消全部选中（父级清空多选集；源实体保留） */
   onClearAllSelections?: () => void;
   selectedGraphNodeIds?: Set<string>;
-  onEntitySelect?: (entityName: string, entityType: string, ctrl: boolean) => void;
+  onEntitySelect?: (entityName: string, entityType: string, ctrl: boolean, selected: boolean) => void;
 }
 
 export function EntityPanel({
@@ -227,6 +256,8 @@ export function EntityPanel({
   mode,
   onRefresh,
   onGraphNodeClick,
+  onArticleOpen,
+  onEntityFilterChange,
   onClearAllSelections,
   selectedGraphNodeIds,
   onEntitySelect,
@@ -426,8 +457,8 @@ export function EntityPanel({
           setSelectedGraphNodeId((curId) => (curId && goneIds.includes(curId) ? null : curId));
         }
       } else {
-        // 仅改类型：选中态/聚焦态的 (name, type) 同步到新类型，
-        // 否则 selectedEntity 解析不到（同名旧类型行消失）且聚焦子图找不到节点
+        // 仅改类型：选中态/源实体的 (name, type) 同步到新类型，
+        // 否则 selectedEntity 解析不到（同名旧类型行消失）且图谱节点匹配不到
         const oldType = editingEntityType ?? '';
         if (selectedEntityName === editingEntityName
           && (selectedEntityType ?? '') === oldType) {
@@ -512,38 +543,78 @@ export function EntityPanel({
   const [selectedEntityName, setSelectedEntityName] = useState<string | null>(null);
   // 同名不同类型视为不同实体，选中状态按 (name, type) 区分
   const [selectedEntityType, setSelectedEntityType] = useState<string | null>(null);
-  // 图谱聚焦实体：仅由实体列表点击驱动；图谱内点击节点不改变聚焦（不重绘图谱）
+  // 源实体（实体列表点击选中）：仅作标记与改名同步，不再驱动图谱重载
   const [focusEntity, setFocusEntity] = useState<{ name: string; type: string | null } | null>(null);
+  // 图谱居中请求：实体列表选中实体时，把对应节点平移到图谱视口中心
+  const [centerNodeId, setCenterNodeId] = useState<string | null>(null);
 
-  // ── 图操作（展开/清除/撤销）──
-  // 工作图：在基准图（聚焦子图/按文章过滤）之上叠加展开/清除结果；历史栈供撤销
-  const [workingGraph, setWorkingGraph] = useState<GraphData | null>(null);
-  // 历史栈：每步记录操作前的图与载入图谱名称（撤销时一并还原）
-  const [graphHistory, setGraphHistory] = useState<{ graph: GraphData; graphName: string | null }[]>([]);
-  // 载入图谱文件名称（标签形式显示在「知识图谱」标题右侧）
-  const [loadedGraphName, setLoadedGraphName] = useState<string | null>(null);
-  // 单独浏览模式：图谱视图下载入文件后，实体列表与图谱组成独立窗格，仅相互联动。
-  // 该模式下的实体/关联编辑只改内存中的载入图，不写数据库、不做权限校验。
-  const isolatedMode = mode === 'graph' && loadedGraphName !== null;
+  // ── 图操作（展开/收缩/移除/撤销）──
+  // 这些操作仅在独立模式标签内可用；工作图与撤销历史属于各标签自身。
+  // 独立模式标签页：每个标签拥有独立的图、撤销历史与布局；
+  // 可同时打开多个图谱，通过标题栏标签切换。
+  const [graphTabs, setGraphTabs] = useState<GraphTab[]>([]);
+  const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  // 活动标签 id / 标签列表的 ref 镜像：异步回调经 ref 读取最新值
+  const activeTabIdRef = useRef<string | null>(null);
+  activeTabIdRef.current = activeTabId;
+  const graphTabsRef = useRef<GraphTab[]>([]);
+  graphTabsRef.current = graphTabs;
+  const activeTab = useMemo(
+    () => graphTabs.find((t) => t.id === activeTabId) ?? null,
+    [graphTabs, activeTabId],
+  );
+  // 标签数量达到上限时禁止继续打开（打开/新建/快照共用）
+  const graphTabsFull = graphTabs.length >= MAX_GRAPH_TABS;
+  // 单独浏览模式：图谱视图下存在打开的图谱标签后，实体列表与图谱组成独立窗格，
+  // 仅相互联动；该模式下的实体/关联编辑只改内存图，不写数据库、不做权限校验。
+  const isolatedMode = mode === 'graph' && activeTab !== null;
+
+  // 兼容既有读取点：工作图/历史/布局均取自活动标签（普通模式无图操作）
+  const workingGraph = isolatedMode ? (activeTab?.graph ?? null) : null;
+  const graphHistory = isolatedMode ? (activeTab?.history ?? []) : [];
+  const loadedGraphName = isolatedMode ? (activeTab?.name ?? null) : null;
+  // 载入/切回标签时的一次性节点位置与视口（传给 D3 hook 还原布局）
+  const loadedPositions = isolatedMode ? (activeTab?.positions ?? null) : null;
+  const loadedViewport = isolatedMode ? (activeTab?.viewport ?? null) : null;
+
+  // 写入活动标签（调用方均已确认处于独立模式）
+  const setWorkingGraph = useCallback(
+    (value: GraphData | null | ((prev: GraphData | null) => GraphData | null)) => {
+      const tabId = activeTabIdRef.current;
+      if (!tabId) return;
+      setGraphTabs((prev) => prev.map((t) => {
+        if (t.id !== tabId) return t;
+        const next = typeof value === 'function' ? value(t.graph) : value;
+        return { ...t, graph: next ?? t.graph };
+      }));
+    },
+    [],
+  );
+  const setGraphHistory = useCallback(
+    (value: GraphHistoryEntry[] | ((prev: GraphHistoryEntry[]) => GraphHistoryEntry[])) => {
+      const tabId = activeTabIdRef.current;
+      if (!tabId) return;
+      setGraphTabs((prev) => prev.map((t) => {
+        if (t.id !== tabId) return t;
+        return {
+          ...t,
+          history: typeof value === 'function' ? value(t.history) : value,
+        };
+      }));
+    },
+    [],
+  );
+  // 图谱名称重命名（撤销还原）——仅作用于活动标签
+  const setLoadedGraphName = useCallback((value: string | null) => {
+    const tabId = activeTabIdRef.current;
+    if (!tabId || !value) return;
+    setGraphTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, name: value } : t)));
+  }, []);
+
   const [expandDepth, setExpandDepth] = useState(1);
   const [expanding, setExpanding] = useState(false);
   // 图谱内最后点击的节点（展开/清除的操作对象）
   const [selectedGraphNodeId, setSelectedGraphNodeId] = useState<string | null>(null);
-  // 载入图谱文件：一次性节点位置/视口（传给 D3 hook 消费，还原导出布局）
-  const [loadedPositions, setLoadedPositions] = useState<Map<string, { x: number; y: number }> | null>(null);
-  const [loadedViewport, setLoadedViewport] = useState<{ x: number; y: number; k: number } | null>(null);
-
-  // 聚焦实体变化（列表点击）→ 重置工作图、历史、载入图谱名称与选中节点。
-  // 已载入图谱时必须由关闭标签显式退出：切换窗口/在列表模式选中实体不能
-  // 清空载入图，否则回到图谱模式会显示数据库图却仍标着载入文件名。
-  useEffect(() => {
-    if (loadedGraphName !== null) return;
-    setWorkingGraph(null);
-    setGraphHistory([]);
-    setLoadedGraphName(null);
-    graphFileHandleRef.current = null;
-    setSelectedGraphNodeId(null);
-  }, [focusEntity]); // loadedGraphName 刻意不入依赖：载入/关闭由各自 handler 处理
 
   // 当前选中实体（展开信息面板的实体）—— 顶部「修改/删除」按钮的操作对象
   // 单独浏览模式下实体来自载入图谱（可能不在文章实体列表中），按选中名称/类型兜底
@@ -558,11 +629,12 @@ export function EntityPanel({
     return null;
   }, [entities, selectedEntityName, selectedEntityType, isolatedMode]);
 
-  // 清除实体选中（信息面板收起；图谱聚焦/源实体同时退出）
+  // 清除实体选中（信息面板收起；源实体标记/居中请求同时退出）
   const clearEntitySelection = useCallback(() => {
     setSelectedEntityName(null);
     setSelectedEntityType(null);
     setFocusEntity(null);
+    setCenterNodeId(null);
     setEntityInfos([]);
     setAddingInfo(false);
     setEditingInfoId(null);
@@ -570,9 +642,10 @@ export function EntityPanel({
 
   // 点击图谱空白区域 → 取消全部选中：
   // 图谱节点选中（当前节点 + 父级多选集）+ 实体列表行选中/信息面板；
-  // 源实体（focusEntity/聚焦）保留 —— 存在源实体时不重载全部实体
+  // 源实体标记（focusEntity）保留 —— 由再次点击列表行或切换文章范围清理
   const handleGraphBackgroundClick = () => {
     setSelectedGraphNodeId(null);
+    setCenterNodeId(null);
     setSelectedEntityName(null);
     setSelectedEntityType(null);
     setEntityInfos([]);
@@ -1137,8 +1210,9 @@ export function EntityPanel({
   const getGraphPositionsRef = useRef<(() => Map<string, { x: number; y: number }>) | null>(null);
   const getGraphViewportRef = useRef<(() => { x: number; y: number; k: number }) | null>(null);
   const graphFileInputRef = useRef<HTMLInputElement>(null);
-  // 载入文件的句柄（仅通过 showOpenFilePicker 载入时可写）：保存时原地更新该文件
-  const graphFileHandleRef = useRef<GraphFileHandle | null>(null);
+  // 标签页 id 序号
+  const graphTabSeqRef = useRef(0);
+  const newGraphTabId = () => `gtab_${++graphTabSeqRef.current}`;
 
   // 图谱右上角文件菜单（载入 / 保存 / 截图）
   const [graphMenuOpen, setGraphMenuOpen] = useState(false);
@@ -1148,6 +1222,78 @@ export function EntityPanel({
   // 本次会话使用过的图谱名称（新建时避免重名，按导出命名追加序号）
   const graphNamesRef = useRef<Set<string>>(new Set());
   const closeGraphMenu = () => setGraphMenuOpen(false);
+
+  // ── 独立模式标签页操作 ──
+  // 清除与具体图无关的交互状态（节点选中/居中/实体信息面板/父级筛选）
+  const clearGraphInteractionState = () => {
+    setSelectedGraphNodeId(null);
+    setCenterNodeId(null);
+    setSelectedEntityName(null);
+    setSelectedEntityType(null);
+    setEntityInfos([]);
+    setAddingInfo(false);
+    setEditingInfoId(null);
+    onClearAllSelections?.();
+  };
+
+  // 抓取当前图谱的实时布局（切换/新增标签前保存到旧标签）
+  const captureGraphLayout = () => ({
+    positions: getGraphPositionsRef.current?.() ?? null,
+    viewport: getGraphViewportRef.current?.() ?? null,
+  });
+
+  // 标签数量上限校验：防止超过 MAX_GRAPH_TABS 个图谱
+  const ensureCanOpenGraphTab = () => {
+    if (graphTabsRef.current.length < MAX_GRAPH_TABS) return true;
+    showToast(`最多同时打开 ${MAX_GRAPH_TABS} 个图谱，请先关闭一个标签`, 'error');
+    return false;
+  };
+
+  // 打开新标签并激活（打开文件 / 新建 / 快照共用）：先把旧标签的实时布局存回去
+  const openGraphTab = (tab: GraphTab) => {
+    if (!ensureCanOpenGraphTab()) return;
+    const fromId = activeTabIdRef.current;
+    const layout = captureGraphLayout();
+    setGraphTabs((prev) => {
+      const next = fromId
+        ? prev.map((t) => (t.id === fromId ? { ...t, ...layout } : t))
+        : prev;
+      return [...next, tab];
+    });
+    setActiveTabId(tab.id);
+    clearGraphInteractionState();
+  };
+
+  // 切换标签：保存当前标签布局，目标标签经 loadedPositions/Viewport 还原布局
+  const switchGraphTab = (tabId: string) => {
+    const fromId = activeTabIdRef.current;
+    if (tabId === fromId) return;
+    const layout = captureGraphLayout();
+    setGraphTabs((prev) => prev.map((t) => (t.id === fromId ? { ...t, ...layout } : t)));
+    setActiveTabId(tabId);
+    clearGraphInteractionState();
+  };
+
+  // 关闭标签：关闭最后一个时退出独立模式、回到数据库图谱
+  const closeGraphTab = (tabId: string) => {
+    const idx = graphTabs.findIndex((t) => t.id === tabId);
+    if (idx < 0) return;
+    const remaining = graphTabs.filter((t) => t.id !== tabId);
+    if (remaining.length === 0) {
+      setGraphTabs([]);
+      setActiveTabId(null);
+      clearGraphInteractionState();
+      showToast('已退出单独浏览模式', 'info');
+      return;
+    }
+    setGraphTabs(remaining);
+    if (tabId === activeTabIdRef.current) {
+      // 关闭活动标签 → 激活相邻标签
+      const nextActive = remaining[Math.min(idx, remaining.length - 1)];
+      setActiveTabId(nextActive.id);
+      clearGraphInteractionState();
+    }
+  };
 
   const toggleGraphMenu = () => {
     if (graphMenuOpen) {
@@ -1201,7 +1347,7 @@ export function EntityPanel({
       selectedArticleIds.length > 0
         ? new Set(selectedArticleIds)
         : new Set(articles.map((a) => a.id));
-    if (activeArticleIds.size === 0) return { nodes: [], edges: [] };
+    if (activeArticleIds.size === 0) return { nodes: [], edges: [], truncated: false };
 
     const prefixedIds = new Set(
       Array.from(activeArticleIds).map((id) => `article:${id}`)
@@ -1221,86 +1367,40 @@ export function EntityPanel({
         if (st === 'article') visibleNodeIds.add(edge.source);
       }
     }
-    return {
-      nodes: graphData.nodes.filter((n) => visibleNodeIds.has(n.id)),
-      edges: graphData.edges.filter(
-        (e) => visibleNodeIds.has(e.source) && visibleNodeIds.has(e.target)
-      ),
-    };
+    let nodes = graphData.nodes.filter((n) => visibleNodeIds.has(n.id));
+    let edges = graphData.edges.filter(
+      (e) => visibleNodeIds.has(e.source) && visibleNodeIds.has(e.target)
+    );
+    // 节点上限按「当前图谱」（过滤后的节点集）应用：全局先截断会丢掉
+    // 当前文章关联的实体，导致图谱与实体列表不一致。
+    const maxNodes = graphData.max_nodes ?? 0;
+    const truncated = maxNodes > 0 && nodes.length > maxNodes;
+    if (truncated) {
+      nodes = nodes.slice(0, maxNodes);
+      const keptIds = new Set(nodes.map((n) => n.id));
+      edges = edges.filter((e) => keptIds.has(e.source) && keptIds.has(e.target));
+    }
+    return { nodes, edges, truncated };
   }, [graphData, selectedArticleIds, articles]);
 
-  // ── 列表⇄图谱联动 ──
-  // 聚焦实体 = 图谱聚焦中心：以其为中心的一层关系子图（BFS 深度 1，力导向居中显示）
-  const focusSubgraph = useMemo(() => {
-    if (!focusEntity || !graphData) return null;
-    const { name, type } = focusEntity;
-    const nodeMap = new Map(graphData.nodes.map((n) => [n.id, n]));
-    // 起始节点匹配：精确 id 优先，兼容旧数据（entity:{name}:: / entity:{name}）
-    let startId: string | null = null;
-    for (const id of [`entity:${name}::${type ?? ''}`, `entity:${name}::`, `entity:${name}`]) {
-      if (nodeMap.has(id)) { startId = id; break; }
-    }
-    if (!startId) return null;
-    const adj = new Map<string, string[]>();
-    const addAdj = (a: string, b: string) => {
-      if (!adj.has(a)) adj.set(a, []);
-      adj.get(a)!.push(b);
-    };
-    for (const e of graphData.edges) {
-      addAdj(e.source, e.target);
-      addAdj(e.target, e.source);
-    }
-    // BFS 一层关系
-    const visible = new Set<string>([startId]);
-    let frontier = [startId];
-    for (let depth = 0; depth < 1 && frontier.length > 0; depth++) {
-      const next: string[] = [];
-      for (const id of frontier) {
-        for (const nb of adj.get(id) ?? []) {
-          if (!visible.has(nb)) { visible.add(nb); next.push(nb); }
-        }
-      }
-      frontier = next;
-    }
-    return {
-      focusNodeId: startId,
-      nodes: graphData.nodes.filter((n) => visible.has(n.id)),
-      edges: graphData.edges.filter((e) => visible.has(e.source) && visible.has(e.target)),
-    };
-  }, [graphData, focusEntity]);
-
-  // 图谱显示数据：工作图（展开/清除/撤销结果）优先，否则聚焦子图 / 按选中文章过滤
-  const baseGraph = focusEntity ? focusSubgraph : filteredGraph;
+  // 图谱显示数据：工作图（展开/清除/撤销结果）优先，否则按选中文章过滤
+  // 实体列表选中不替换图谱，只在当前图上选中并居中对应节点
+  const baseGraph = filteredGraph;
   const displayGraph = workingGraph ?? baseGraph;
   // 异步操作（展开）恢复时用于判断视图是否已被切换/载入/撤销，避免用旧图覆盖新状态
   const displayGraphRef = useRef(displayGraph);
   displayGraphRef.current = displayGraph;
 
-  // 基准图签名（与顺序无关）：切换文章范围/实体聚焦、或图谱数据刷新后，
-  // 丢弃旧的工作图快照与历史，避免展开后的 workingGraph 长期遮蔽新的基准数据
-  // （例如删除关联后画布仍显示旧边、切换文章后仍显示上一篇文章的图）。
-  // 单独浏览模式的 workingGraph 是载入文件本身，不能因文章/图谱数据变化被清掉。
-  const baseGraphKey = useMemo(() => {
-    if (!baseGraph) return '';
-    const nodePart = baseGraph.nodes
-      .map((n) => `${n.id}\u0001${n.label}\u0001${n.entity_type ?? ''}`)
-      .sort()
-      .join('\u0002');
-    const edgePart = baseGraph.edges
-      .map((e) => `${e.source}\u0001${e.target}\u0001${e.label}`)
-      .sort()
-      .join('\u0002');
-    return `${nodePart}\u0003${edgePart}`;
-  }, [baseGraph]);
-  const baseGraphKeyRef = useRef(baseGraphKey);
-  useEffect(() => {
-    // 以 loadedGraphName（而非仅当前视图模式）为准：切到列表模式时载入图仍应保留
-    if (loadedGraphName !== null) return;
-    if (baseGraphKeyRef.current === baseGraphKey) return;
-    baseGraphKeyRef.current = baseGraphKey;
-    setWorkingGraph(null);
-    setGraphHistory([]);
-  }, [baseGraphKey, loadedGraphName]);
+  // 图谱图例计数（顶部不再单独展示「文 · 实体 · 关系」统计）
+  const graphCounts = useMemo(() => {
+    const nodes = displayGraph?.nodes ?? [];
+    return {
+      articles: nodes.filter((n) => n.type === 'article').length,
+      categories: nodes.filter((n) => n.type === 'category').length,
+      entities: nodes.filter((n) => n.type === 'entity').length,
+      relations: displayGraph?.edges.length ?? 0,
+    };
+  }, [displayGraph]);
 
   // ── 单独浏览模式的实体列表：直接取自载入的图谱（不依赖当前文章）──
   const isolatedEntities = useMemo<EntityInfo[]>(() => {
@@ -1354,7 +1454,7 @@ export function EntityPanel({
   const handleEntitySelect = useCallback(async (ent: EntityInfo, ctrl = false) => {
     const isSelected = selectedEntityName === ent.name && selectedEntityType === (ent.type ?? null);
 
-    // 单独浏览模式：实体列表仅与图谱联动 —— 不通知父级筛选文章、不改变源实体/聚焦
+    // 单独浏览模式：实体列表仅与图谱联动 —— 不通知父级筛选文章、不改变源实体
     if (isolatedMode) {
       const nodeId = displayGraph?.nodes.find(
         (n) => n.type === 'entity' && n.label === ent.name && (n.entity_type ?? '') === (ent.type ?? ''),
@@ -1382,7 +1482,13 @@ export function EntityPanel({
     }
 
     // Notify parent (ArticleList) for article filtering — 传递 (name, type)
-    onEntitySelect?.(ent.name, ent.type ?? '其他', ctrl);
+    // selected 取自行选中状态（非集合成员）：true=选中，false=再次点击取消
+    onEntitySelect?.(ent.name, ent.type ?? '其他', ctrl, !isSelected);
+
+    // 列表中该实体对应的图谱节点（按标签+类型匹配，兼容旧 id 格式）
+    const entityNodeId = displayGraph?.nodes.find(
+      (n) => n.type === 'entity' && n.label === ent.name && (n.entity_type ?? '') === (ent.type ?? ''),
+    )?.id;
 
     if (isSelected) {
       // 取消选中：若图谱当前节点正是该实体节点，一并清除其高亮
@@ -1392,12 +1498,27 @@ export function EntityPanel({
         `entity:${ent.name}`,
       ];
       setSelectedGraphNodeId((curId) => (curId && entNodeIds.includes(curId) ? null : curId));
+      // 同步父级图谱多选集：仅在确实包含该节点时移除，避免误清其他选中节点
+      if (entityNodeId && selectedGraphNodeIds?.has(entityNodeId)) {
+        onGraphNodeClick?.(entityNodeId, 'entity', ent.name, true);
+      }
+      setCenterNodeId(null);
       clearEntitySelection();
     } else {
       setSelectedEntityName(ent.name);
       setSelectedEntityType(ent.type ?? null);
-      // 列表点击选中 → 图谱聚焦该实体（图谱内点击不改变聚焦）
+      // 保留源实体标记（改名时跟随；不再驱动图谱重载）
       setFocusEntity({ name: ent.name, type: ent.type ?? null });
+      // 图谱联动：在当前图谱中选中对应实体节点并居中（不重载/不替换图谱）
+      if (entityNodeId) {
+        // forceSelect：实体行点击是「选中」语义，不做 toggle（节点可能已因图谱多选处于选中态）
+        // Ctrl 多选：加入但不清理其他；普通点击：单选替换
+        onGraphNodeClick?.(entityNodeId, 'entity', ent.name, ctrl, true);
+        setSelectedGraphNodeId(entityNodeId);
+        setCenterNodeId(entityNodeId);
+      } else {
+        setCenterNodeId(null);
+      }
       setAddingInfo(false);
       setEditingInfoId(null);
       await loadEntityInfos(ent.name);
@@ -1407,6 +1528,7 @@ export function EntityPanel({
     displayGraph,
     selectedEntityName,
     selectedEntityType,
+    selectedGraphNodeIds,
     onGraphNodeClick,
     loadEntityInfos,
     onEntitySelect,
@@ -1414,12 +1536,52 @@ export function EntityPanel({
   ]);
 
   // 图操作的目标：图谱内选中的节点集（普通点击单选、Ctrl+点击多选）
-  // 无节点选中时展开/移除灰显
+  // 无节点选中时展开/收缩/移除灰显
   const selectedNodeIds = selectedGraphNodeIds ?? new Set<string>();
   const hasNodeSelection = selectedNodeIds.size > 0;
 
+  // ── 收缩：选中节点的叶子邻居（仅与该节点相连、无其他关联）──
+  // 以「不同邻居数 = 1」判定叶子（同一对节点间多条关系仍视为一个关联）。
+  const collapsibleLeafIds = useMemo(() => {
+    if (!displayGraph || selectedNodeIds.size === 0) return [] as string[];
+    const neighbors = new Map<string, Set<string>>();
+    const addNeighbor = (a: string, b: string) => {
+      const set = neighbors.get(a);
+      if (set) set.add(b); else neighbors.set(a, new Set([b]));
+    };
+    for (const e of displayGraph.edges) {
+      addNeighbor(e.source, e.target);
+      addNeighbor(e.target, e.source);
+    }
+    const leaves = new Set<string>();
+    for (const id of selectedNodeIds) {
+      for (const nb of neighbors.get(id) ?? []) {
+        if (selectedNodeIds.has(nb)) continue; // 选中节点本身不收缩
+        if ((neighbors.get(nb)?.size ?? 0) === 1) leaves.add(nb);
+      }
+    }
+    return Array.from(leaves);
+  }, [displayGraph, selectedNodeIds]);
+
+  const handleCollapseLeaves = () => {
+    // 展开 / 收缩 / 移除 / 撤销仅独立模式可用（不修改数据库图）
+    if (!isolatedMode) return;
+    if (!displayGraph || collapsibleLeafIds.length === 0) return;
+    const leaves = new Set(collapsibleLeafIds);
+    setGraphHistory((h) => [...h, { graph: displayGraph, graphName: loadedGraphName }]);
+    setWorkingGraph({
+      nodes: displayGraph.nodes.filter((n) => !leaves.has(n.id)),
+      edges: displayGraph.edges.filter((e) => !leaves.has(e.source) && !leaves.has(e.target)),
+    });
+    // 内部锚点若恰好是被移除的叶子，一并清除
+    setSelectedGraphNodeId((cur) => (cur && leaves.has(cur) ? null : cur));
+    showToast(`已收缩 ${leaves.size} 个叶子节点`, 'success');
+  };
+
   // ── 展开：选中节点集 n 层关系（Neo4j 直查全量），并入当前视图 ──
   const handleExpand = async () => {
+    // 展开 / 收缩 / 移除 / 撤销仅独立模式可用（不修改数据库图）
+    if (!isolatedMode) return;
     const targets = Array.from(selectedNodeIds);
     if (targets.length === 0) return;
     // 实体节点按当前标签/类型解析 id：单独浏览模式下实体可改名/改类型，节点 id 可能仍是旧值
@@ -1430,7 +1592,7 @@ export function EntityPanel({
       resolved.add(n && n.type === 'entity' ? `entity:${n.label}::${n.entity_type ?? ''}` : id);
     }
     setExpanding(true);
-    // 请求期间用户可能切换聚焦实体/载入文件/撤销：以发起时的图为基准并在
+    // 请求期间用户可能切换标签/载入文件/撤销：以发起时的图为基准并在
     // 恢复时校验视图身份，避免旧结果覆盖新视图和写入过期历史快照。
     const requestBase = displayGraph;
     try {
@@ -1483,6 +1645,8 @@ export function EntityPanel({
 
   // ── 移除：从图中移除选中的多个节点及其关系（仅视图操作，不动数据库）──
   const handleRemoveNodes = () => {
+    // 展开 / 收缩 / 移除 / 撤销仅独立模式可用（不修改数据库图）
+    if (!isolatedMode) return;
     const targets = new Set(selectedNodeIds);
     if (targets.size === 0) return;
     const base = displayGraph;
@@ -1500,6 +1664,8 @@ export function EntityPanel({
 
   // ── 撤销：恢复上一步图状态（历史清空后回到基准图）──
   const handleUndo = () => {
+    // 展开 / 收缩 / 移除 / 撤销仅独立模式可用（不修改数据库图）
+    if (!isolatedMode) return;
     if (graphHistory.length === 0) return;
     const prev = graphHistory[graphHistory.length - 1];
     setGraphHistory((h) => h.slice(0, -1));
@@ -1556,7 +1722,8 @@ export function EntityPanel({
     graph: displayGraph,
     entityTypeMap,
     entityInfoMap: entityInfoMapRef.current,
-    focusNodeId: focusSubgraph?.focusNodeId,
+    // 实体列表选中实体 → 当前图谱中选中并居中对应节点（不重载）
+    centerNodeId,
     // 新节点在最后点击的节点附近进入，而非全部从中心冒出
     anchorNodeId: selectedGraphNodeId,
     // 导出/载入：位置/视口读取与一次性恢复
@@ -1566,44 +1733,58 @@ export function EntityPanel({
     initialViewport: loadedViewport,
     onNodeClick: (id, type, label, ctrl) => {
       // 目录/文章/实体节点统一处理：点击切换选中状态，Ctrl+点击多选
-      // 源实体（实体列表选中实体）只由列表点击驱动，图谱点击不改变源实体/聚焦
+      // 源实体（focusEntity）只由列表点击驱动；图谱点击只同步实体选中与文章筛选
       const cur = selectedGraphNodeIds ?? new Set<string>();
       const staysSelected = !cur.has(id);
       setSelectedGraphNodeId(staysSelected ? id : null);
       onGraphNodeClick?.(id, type, label, ctrl);
 
-      // 实体节点普通点击 → 联动实体列表（行选中 + 信息面板；不改变源实体，图谱不重载）
-      if (type === 'entity' && !ctrl) {
-        // 类型优先取节点数据：单独浏览模式改名/改类型后节点 id 仍是旧值，
-        // 从 id 解析会得到旧类型，导致列表行/信息面板匹配不上。
-        const node = displayGraph?.nodes.find((n) => n.id === id);
-        const etype = node?.type === 'entity'
-          ? (node.entity_type ?? '')
-          : (id.startsWith('entity:') ? id.slice('entity:'.length).split('::')[1] || '' : '');
-        if (staysSelected) {
-          if (selectedEntityName === label && (selectedEntityType ?? '') === etype) return;
-          selectFromGraphRef.current = true;
-          setEntitySearch('');   // 清除筛选，保证选中行可见
-          setAddingInfo(false);
-          setEditingInfoId(null);
-          setSelectedEntityName(label);
-          setSelectedEntityType(etype);
-          if (!isolatedMode) loadEntityInfos(label);
-          // 展开分批到该实体所在位置（跳过分批重置见 visibleCount effect）；
-          // 同名不同类型是不同实体，必须同时比较类型
-          const idx = listEntities.findIndex(
-            (e) => e.name === label && (e.type ?? '') === etype,
-          );
-          if (idx >= 0) setVisibleCount((c) => Math.max(c, idx + 1));
-        } else if (selectedEntityName === label && (selectedEntityType ?? '') === etype) {
-          // 取消选中：仅清除列表选中（源实体/聚焦保留，图谱不重载）
-          setSelectedEntityName(null);
-          setSelectedEntityType(null);
-          setEntityInfos([]);
-          setAddingInfo(false);
-          setEditingInfoId(null);
-        }
+      if (type !== 'entity') return;
+
+      // 类型优先取节点数据：单独浏览模式改名/改类型后节点 id 仍是旧值，
+      // 从 id 解析会得到旧类型，导致列表行/信息面板匹配不上。
+      const node = displayGraph?.nodes.find((n) => n.id === id);
+      const etype = node?.type === 'entity'
+        ? (node.entity_type ?? '')
+        : (id.startsWith('entity:') ? id.slice('entity:'.length).split('::')[1] || '' : '');
+
+      // 图谱实体节点选中/取消 → 文章列表关联响应：禁用/恢复无关联文章。
+      // 普通点击为单选语义（替换其他实体筛选）；Ctrl 多选为增删。
+      // 单独浏览模式的实体来自载入文件，不参与文章筛选。
+      if (!isolatedMode) {
+        onEntityFilterChange?.(label, etype, staysSelected, !ctrl && staysSelected);
       }
+
+      // 图谱选中实体节点 → 实体列表行/信息面板同步（Ctrl 多选时跟随最后操作的实体）
+      if (staysSelected) {
+        if (selectedEntityName === label && (selectedEntityType ?? '') === etype) return;
+        selectFromGraphRef.current = true;
+        setEntitySearch('');   // 清除筛选，保证选中行可见
+        setAddingInfo(false);
+        setEditingInfoId(null);
+        setSelectedEntityName(label);
+        setSelectedEntityType(etype);
+        if (!isolatedMode) loadEntityInfos(label);
+        // 展开分批到该实体所在位置（跳过分批重置见 visibleCount effect）；
+        // 同名不同类型是不同实体，必须同时比较类型
+        const idx = listEntities.findIndex(
+          (e) => e.name === label && (e.type ?? '') === etype,
+        );
+        if (idx >= 0) setVisibleCount((c) => Math.max(c, idx + 1));
+      } else if (selectedEntityName === label && (selectedEntityType ?? '') === etype) {
+        // 取消选中：仅清除列表选中（源实体标记保留，图谱不重载）
+        setSelectedEntityName(null);
+        setSelectedEntityType(null);
+        setEntityInfos([]);
+        setAddingInfo(false);
+        setEditingInfoId(null);
+      }
+    },
+    // 文章节点名称超链 → 打开文章详情（复用列表页内联详情窗口）
+    onArticleLabelClick: (nodeId) => {
+      if (!nodeId.startsWith('article:')) return;
+      const articleId = nodeId.slice('article:'.length);
+      if (articleId) onArticleOpen?.(articleId);
     },
     selectedNodeIds: mergedSelectedNodeIds,
     showArrows: true,
@@ -1710,6 +1891,8 @@ export function EntityPanel({
   const handleSaveGraphData = useCallback(async () => {
     const payload = buildGraphDataPayload();
     if (!payload) return;
+    // 保存过程中可能切换标签：固定到发起保存时的标签
+    const saveTabId = activeTabIdRef.current;
 
     let handle: GraphFileHandle | null = null;
     const savePicker = (window as unknown as { showSaveFilePicker?: ShowSaveFilePicker }).showSaveFilePicker;
@@ -1720,7 +1903,6 @@ export function EntityPanel({
           suggestedName: `${baseName}.json`,
           types: [{ description: '知识图谱 JSON', accept: { 'application/json': ['.json'] } }],
         });
-        graphFileHandleRef.current = handle;
       } catch (err) {
         // 用户取消保存 → 不动作；其他错误回退为下载
         if ((err as DOMException)?.name === 'AbortError') return;
@@ -1737,7 +1919,9 @@ export function EntityPanel({
         const savedName = handle.name.replace(/\.json$/i, '');
         if (isolatedMode && savedName && savedName !== loadedGraphName) {
           graphNamesRef.current.add(savedName);
-          setLoadedGraphName(savedName);
+          if (saveTabId) {
+            setGraphTabs((prev) => prev.map((t) => (t.id === saveTabId ? { ...t, name: savedName } : t)));
+          }
         }
         showToast(`已保存文件「${handle.name}」`, 'success');
         return;
@@ -1762,10 +1946,46 @@ export function EntityPanel({
     }
   }, [buildGraphDataPayload, isolatedMode, loadedGraphName, showToast]);
 
+  // ── 快照：把当前图谱与实体列表原样转入单独浏览模式 ──
+  // 深拷贝当前图（含展开/移除后的工作图）并保留节点位置/视口；
+  // 之后独立模式内的编辑只改内存快照，不写数据库。
+  const handleSnapshotGraph = () => {
+    if (!displayGraph || displayGraph.nodes.length === 0) return;
+    if (!ensureCanOpenGraphTab()) return;
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
+    const base = `快照_${stamp}`;
+    let name = base;
+    let seq = 2;
+    while (graphNamesRef.current.has(name)) name = `${base}_${seq++}`;
+    graphNamesRef.current.add(name);
+
+    // 捕获当前布局：快照还原为同一视图
+    const positions = getGraphPositionsRef.current?.() ?? new Map<string, { x: number; y: number }>();
+    const viewport = getGraphViewportRef.current?.() ?? null;
+
+    // 深拷贝图数据，隔离后续编辑（不影响数据库图/工作图）
+    const nodes = displayGraph.nodes.map((n) => ({ ...n }));
+    const edges = displayGraph.edges.map((e) => ({ ...e }));
+
+    entityInfoMapRef.current.clear();  // 单独浏览模式不展示数据库实体附加信息
+    openGraphTab({
+      id: newGraphTabId(),
+      name,
+      graph: { nodes, edges },
+      history: [],
+      positions: positions.size > 0 ? positions : null,
+      viewport,
+    });
+    showToast(`已创建快照「${name}」（${nodes.length} 节点 / ${edges.length} 边）`, 'success');
+  };
+
   // 新建空白图谱：名称沿用导出命名（知识图谱_日期），重名追加序号；
   // 创建后进入单独浏览模式，可自由添加实体与关联。
   const handleCreateNewGraph = () => {
     closeGraphMenu();
+    if (!ensureCanOpenGraphTab()) return;
     const base = `知识图谱_${new Date().toISOString().slice(0, 10)}`;
     let name = base;
     let seq = 2;
@@ -1773,28 +1993,22 @@ export function EntityPanel({
       name = `${base}_${seq++}`;
     }
     graphNamesRef.current.add(name);
-    // 新图谱尚未保存为文件：清空可写句柄与撤销历史
-    graphFileHandleRef.current = null;
     // 单独浏览模式不展示数据库中的实体附加信息，清空工具提示缓存
     entityInfoMapRef.current.clear();
-    setGraphHistory([]);
-    setWorkingGraph({ nodes: [], edges: [] });
-    setLoadedGraphName(name);
-    setLoadedPositions(null);
-    setLoadedViewport(null);
-    setSelectedGraphNodeId(null);
-    setSelectedEntityName(null);
-    setSelectedEntityType(null);
-    setEntityInfos([]);
-    setAddingInfo(false);
-    setEditingInfoId(null);
-    onClearAllSelections?.();
+    openGraphTab({
+      id: newGraphTabId(),
+      name,
+      graph: { nodes: [], edges: [] },
+      history: [],
+      positions: null,
+      viewport: null,
+    });
     showToast(`已新建图谱「${name}」`, 'success');
   };
 
-  // 载入：优先用文件选择器获取可写句柄（Chrome/Edge），使「保存」能原地更新文件；
-  // 不支持时回退到普通 file input（保存只能下载副本）
+  // 载入：优先使用文件选择器（Chrome/Edge），不支持时回退到普通 file input
   const handleLoadGraphClick = async () => {
+    if (!ensureCanOpenGraphTab()) return;
     const picker = (window as unknown as { showOpenFilePicker?: ShowOpenFilePicker }).showOpenFilePicker;
     if (typeof picker === 'function') {
       try {
@@ -1805,7 +2019,7 @@ export function EntityPanel({
         const handle = handles[0];
         if (handle) {
           const file = await handle.getFile();
-          await applyGraphFile(file, handle);
+          await applyGraphFile(file);
         }
         return;
       } catch (err) {
@@ -1820,10 +2034,11 @@ export function EntityPanel({
     const file = e.target.files?.[0];
     e.target.value = ''; // 允许再次选择同一文件
     if (!file) return;
-    await applyGraphFile(file, null);
+    await applyGraphFile(file);
   };
 
-  const applyGraphFile = async (file: File, handle: GraphFileHandle | null) => {
+  const applyGraphFile = async (file: File) => {
+    if (!ensureCanOpenGraphTab()) return;
     try {
       const data = JSON.parse(await file.text()) as {
         version?: unknown;
@@ -1883,49 +2098,24 @@ export function EntityPanel({
         viewport = { x: v.x, y: v.y, k: v.k };
       }
 
-      // 单独浏览模式：进入时重置撤销历史——撤销只回退载入图内的编辑，不会退回载入前的图
-      setGraphHistory([]);
-      // 记录可写文件句柄（文件选择器载入时）：保存按钮原地更新该文件
-      graphFileHandleRef.current = handle;
       // 单独浏览模式不展示数据库中的实体附加信息，清空工具提示缓存
       entityInfoMapRef.current.clear();
-      setWorkingGraph({ nodes, edges });
       const loadedName = file.name.replace(/\.json$/i, '');
       graphNamesRef.current.add(loadedName);
-      setLoadedGraphName(loadedName);
-      setLoadedPositions(posMap.size > 0 ? posMap : null);
-      setLoadedViewport(viewport);
-      // 清除旧选中（图谱节点/实体列表选中/信息面板）；源实体（focusEntity）保留
-      setSelectedGraphNodeId(null);
-      setSelectedEntityName(null);
-      setSelectedEntityType(null);
-      setEntityInfos([]);
-      setAddingInfo(false);
-      setEditingInfoId(null);
-      onClearAllSelections?.();
-      showToast(`已打开图谱（${nodes.length} 节点 / ${edges.length} 边）`, 'success');
+      openGraphTab({
+        id: newGraphTabId(),
+        name: loadedName,
+        graph: { nodes, edges },
+        history: [],
+        positions: posMap.size > 0 ? posMap : null,
+        viewport,
+      });
+      showToast(`已打开图谱「${loadedName}」（${nodes.length} 节点 / ${edges.length} 边）`, 'success');
     } catch (err) {
       showToast(err instanceof Error ? `打开失败：${err.message}` : '打开失败', 'error');
     }
   };
 
-  // 关闭载入图谱标签 → 退出单独浏览模式，回到当前文章的图谱
-  const handleExitIsolatedMode = () => {
-    setWorkingGraph(null);
-    setLoadedGraphName(null);
-    setGraphHistory([]);
-    graphFileHandleRef.current = null;
-    setLoadedPositions(null);
-    setLoadedViewport(null);
-    setSelectedGraphNodeId(null);
-    setSelectedEntityName(null);
-    setSelectedEntityType(null);
-    setEntityInfos([]);
-    setAddingInfo(false);
-    setEditingInfoId(null);
-    onClearAllSelections?.();
-    showToast('已退出单独浏览模式', 'info');
-  };
 
 
   // ── Render ──
@@ -1984,7 +2174,7 @@ export function EntityPanel({
     </div>
   );
 
-  // 知识图谱标题行：源实体文本 + 载入图谱标签（可关闭）+ 统计右上角
+  // 知识图谱标题行：源实体文本 + 独立模式多图谱标签（可切换/关闭）+ 统计右上角
   const renderGraphHeader = () => (
     <div className={styles.header}>
       <h4>知识图谱</h4>
@@ -1994,24 +2184,35 @@ export function EntityPanel({
           🎯 {focusEntity.name}
         </span>
       )}
-      {loadedGraphName && (
-        <span className={styles.loadedGraphTag} title={`单独浏览：${loadedGraphName}`}>
-          <span className={styles.loadedGraphName}>🗺️ {loadedGraphName}</span>
-          <button
-            type="button"
-            className={styles.loadedGraphTagClose}
-            onClick={handleExitIsolatedMode}
-            title="关闭标签并退出单独浏览模式"
-            aria-label="退出单独浏览模式"
-          >✕</button>
-        </span>
+      {graphTabs.length > 0 && (
+        <div className={styles.graphTabs} title={`已打开 ${graphTabs.length}/${MAX_GRAPH_TABS} 个图谱`}>
+          {graphTabs.map((tab) => (
+            <span
+              key={tab.id}
+              className={`${styles.graphTab} ${tab.id === activeTabId ? styles.graphTabActive : ''}`}
+              title={`单独浏览：${tab.name}`}
+            >
+              <button
+                type="button"
+                className={styles.graphTabBtn}
+                onClick={() => switchGraphTab(tab.id)}
+                title={`切换到「${tab.name}」`}
+              >
+                <span className={styles.graphTabIcon} aria-hidden="true">🗺️</span>
+                <span className={styles.graphTabName}>{tab.name}</span>
+              </button>
+              <button
+                type="button"
+                className={styles.graphTabClose}
+                onClick={() => closeGraphTab(tab.id)}
+                title="关闭该图谱标签"
+                aria-label={`关闭图谱「${tab.name}」`}
+              >✕</button>
+            </span>
+          ))}
+        </div>
       )}
       <div className={styles.headerRight}>
-        {displayGraph && (
-          <span className={styles.count}>
-            {displayGraph.nodes.filter(n => n.type === 'article').length}文 · {displayGraph.nodes.filter(n => n.type === 'entity').length}实体 · {displayGraph.edges.length}关系
-          </span>
-        )}
         {/* 右上角文件操作菜单：载入 / 保存 / 截图 */}
         <button
           ref={graphMenuBtnRef}
@@ -2034,18 +2235,24 @@ export function EntityPanel({
           <button
             type="button"
             className={styles.graphMenuItem}
-            title="新建空白图谱（名称按导出命名追加序号），并进入单独浏览模式"
+            disabled={graphTabsFull}
+            title={graphTabsFull
+              ? `最多同时打开 ${MAX_GRAPH_TABS} 个图谱，请先关闭一个标签`
+              : '新建空白图谱：新增一个独立标签（名称按导出命名追加序号）'}
             onClick={handleCreateNewGraph}
           >
-            <span className={styles.graphMenuItemIcon}>🆕</span> 新建图谱
+            <span className={styles.graphMenuItemIcon}>🆕</span> 新建
           </button>
           <button
             type="button"
             className={styles.graphMenuItem}
-            title="从 JSON 文件打开图谱（恢复节点与布局位置）"
+            disabled={graphTabsFull}
+            title={graphTabsFull
+              ? `最多同时打开 ${MAX_GRAPH_TABS} 个图谱，请先关闭一个标签`
+              : '从 JSON 文件打开图谱：新增一个独立标签并恢复节点与布局位置'}
             onClick={() => { closeGraphMenu(); void handleLoadGraphClick(); }}
           >
-            <span className={styles.graphMenuItemIcon}>📂</span> 打开图谱
+            <span className={styles.graphMenuItemIcon}>📂</span> 打开
           </button>
           <button
             type="button"
@@ -2054,7 +2261,7 @@ export function EntityPanel({
             title="保存图谱：选择保存位置和文件名（含节点位置与视口，可再次打开）"
             onClick={() => { closeGraphMenu(); void handleSaveGraphData(); }}
           >
-            <span className={styles.graphMenuItemIcon}>💾</span> 保存图谱
+            <span className={styles.graphMenuItemIcon}>💾</span> 保存
           </button>
           <button
             type="button"
@@ -2495,21 +2702,22 @@ export function EntityPanel({
           </div>
           <div className={styles.graphSplitGraph}>
             {renderGraphHeader()}
-          {/* 图例 + 图操作工具栏（展开/清除/撤销/导出） */}
+          {/* 图例（含计数）+ 图操作工具栏（展开/收缩/移除/撤销/快照） */}
           <div className={styles.graphToolbar}>
-            <span>◫ 文章</span>
-            <span>● 目录</span>
-            <span>◆ 实体</span>
+            <span>◫ 文章 <span className={styles.graphLegendNum}>{graphCounts.articles}</span></span>
+            <span>● 目录 <span className={styles.graphLegendNum}>{graphCounts.categories}</span></span>
+            <span>◆ 实体 <span className={styles.graphLegendNum}>{graphCounts.entities}</span></span>
+            <span>→ 关系 <span className={styles.graphLegendNum}>{graphCounts.relations}</span></span>
             <span className={styles.graphToolSpacer}>
-              {/* 展开层数与展开按钮融合：左侧 ▲/▼ 上下两个按钮增减层数（1-5），主按钮直接展开 */}
+              {/* 展开层数与展开按钮融合：左侧 ▲/▼ 上下两个按钮增减层数（1-3），主按钮直接展开 */}
               <span className={styles.expandBtnGroup}>
                 <span className={styles.expandDepthBtns}>
                   <button
                     type="button"
                     className={styles.expandDepthBtn}
-                    onClick={() => setExpandDepth((d) => Math.min(5, d + 1))}
-                    disabled={expandDepth >= 5}
-                    title={`增加展开层数（当前 ${expandDepth} 层，最多 5 层）`}
+                    onClick={() => setExpandDepth((d) => Math.min(MAX_EXPAND_DEPTH, d + 1))}
+                    disabled={!isolatedMode || expandDepth >= MAX_EXPAND_DEPTH}
+                    title={`增加展开层数（当前 ${expandDepth} 层，最多 ${MAX_EXPAND_DEPTH} 层）`}
                     aria-label="增加展开层数"
                   >
                     ▲
@@ -2518,7 +2726,7 @@ export function EntityPanel({
                     type="button"
                     className={styles.expandDepthBtn}
                     onClick={() => setExpandDepth((d) => Math.max(1, d - 1))}
-                    disabled={expandDepth <= 1}
+                    disabled={!isolatedMode || expandDepth <= 1}
                     title={`减小展开层数（当前 ${expandDepth} 层，最少 1 层）`}
                     aria-label="减小展开层数"
                   >
@@ -2528,11 +2736,13 @@ export function EntityPanel({
                 <button
                   type="button"
                   className={`${styles.graphToolBtn} ${styles.expandBtnMain}`}
-                  disabled={!hasNodeSelection || expanding}
+                  disabled={!isolatedMode || !hasNodeSelection || expanding}
                   onClick={handleExpand}
-                  title={hasNodeSelection
-                    ? `展开选中节点（${selectedNodeIds.size} 个）的 n 层关系（Neo4j 全量查询）`
-                    : '请先在图谱中选中节点（Ctrl+点击多选）'}
+                  title={!isolatedMode
+                    ? '仅独立模式下可用：先创建快照或打开图谱'
+                    : hasNodeSelection
+                      ? `展开选中节点（${selectedNodeIds.size} 个）的 n 层关系（Neo4j 全量查询）`
+                      : '请先在图谱中选中节点（Ctrl+点击多选）'}
                 >
                   {expanding ? '⤢ 展开中…' : `⤢ 展开 ${expandDepth} 层`}
                 </button>
@@ -2540,25 +2750,62 @@ export function EntityPanel({
               <button
                 type="button"
                 className={styles.graphToolBtn}
-                disabled={!hasNodeSelection}
+                disabled={!isolatedMode || !hasNodeSelection || collapsibleLeafIds.length === 0}
+                onClick={handleCollapseLeaves}
+                title={!isolatedMode
+                  ? '仅独立模式下可用：先创建快照或打开图谱'
+                  : !hasNodeSelection
+                    ? '请先在图谱中选中节点（Ctrl+点击多选）'
+                    : collapsibleLeafIds.length === 0
+                      ? '选中节点没有可收缩的叶子节点'
+                      : `收缩选中节点的 ${collapsibleLeafIds.length} 个叶子节点（仅与选中节点相连、无其他关联）`}
+              >
+                ⤡ 收缩
+              </button>
+              <button
+                type="button"
+                className={styles.graphToolBtn}
+                disabled={!isolatedMode || !hasNodeSelection}
                 onClick={handleRemoveNodes}
-                title={hasNodeSelection
-                  ? `从图中移除选中的 ${selectedNodeIds.size} 个节点及其关系（仅视图，不动数据）`
-                  : '请先在图谱中选中节点（Ctrl+点击多选）'}
+                title={!isolatedMode
+                  ? '仅独立模式下可用：先创建快照或打开图谱'
+                  : hasNodeSelection
+                    ? `从图中移除选中的 ${selectedNodeIds.size} 个节点及其关系（仅视图，不动数据）`
+                    : '请先在图谱中选中节点（Ctrl+点击多选）'}
               >
                 ✕ 移除
               </button>
               <button
                 type="button"
                 className={styles.graphToolBtn}
-                disabled={graphHistory.length === 0}
+                disabled={!isolatedMode || graphHistory.length === 0}
                 onClick={handleUndo}
-                title="撤销上一步图操作"
+                title={!isolatedMode
+                  ? '仅独立模式下可用：先创建快照或打开图谱'
+                  : '撤销上一步图操作'}
               >
                 ↺ 撤销
               </button>
+              <button
+                type="button"
+                className={styles.graphToolBtn}
+                disabled={!displayGraph || displayGraph.nodes.length === 0 || graphTabsFull}
+                onClick={handleSnapshotGraph}
+                title={graphTabsFull
+                  ? `最多同时打开 ${MAX_GRAPH_TABS} 个图谱，请先关闭一个标签`
+                  : '快照：将当前图谱与实体列表转入独立模式（编辑只改快照，不写数据库）'}
+              >
+                📸 快照
+              </button>
             </span>
           </div>
+          {/* 截断提示：位于按钮区与图谱之间，紧贴图谱上沿 */}
+          {baseGraph?.truncated && !workingGraph && (
+            <div className={styles.graphLimitBanner} role="status">
+              ⚠ 已达节点上限，已截断
+              <span className={styles.graphLimitHint}>（上限 {graphData?.max_nodes ?? 0} 个节点）</span>
+            </div>
+          )}
           {/* 载入图谱文件（隐藏的 JSON 文件选择器） */}
           <input
             ref={graphFileInputRef}
