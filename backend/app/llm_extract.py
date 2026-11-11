@@ -8,8 +8,9 @@ import json
 import logging
 import re
 
-from app.config import LLM_API_KEY, LLM_API_BASE, LLM_MODEL, LLM_TIMEOUT
+from app.config import LLM_READY, LLM_API_KEY, LLM_API_BASE, LLM_MODEL, LLM_TIMEOUT
 from app.prompts import EXTRACT_TAGS_ENTITIES
+from app.utils import auth_headers
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +22,8 @@ def extract_tags_and_entities(text: str, max_chars: int = 2000) -> tuple[list[st
     Uses synchronous httpx with LLM_TIMEOUT timeout, 2 retries, and JSON fallback parsing.
     Returns empty results on any failure (best-effort).
     """
-    if not LLM_API_KEY:
-        logger.info("LLM extraction skipped: no LLM_API_KEY configured")
+    if not LLM_READY:
+        logger.info("LLM extraction skipped: text model not configured")
         return [], None
 
     import httpx
@@ -36,10 +37,7 @@ def extract_tags_and_entities(text: str, max_chars: int = 2000) -> tuple[list[st
             with httpx.Client(timeout=LLM_TIMEOUT) as client:
                 resp = client.post(
                     f"{LLM_API_BASE.rstrip('/')}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {LLM_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
+                    headers=auth_headers(LLM_API_KEY, json_body=True),
                     json={
                         "model": LLM_MODEL,
                         "messages": [{"role": "user", "content": prompt}],
@@ -122,11 +120,11 @@ async def extract_chunks_iter(segments: list[str], max_chars: int = 2000, max_se
 
     分段列表由调用方提供（向量分块 ArticleChunk），提取与 Q&A 检索共用同一
     套切分。调用方可在每段 yield 后立即落库（逐段落库）——后续段失败时已
-    保存的结果不受影响。未配置 API key 或无分段时不产出任何结果。
+    保存的结果不受影响。文本模型未配置（Base/Model）或无分段时不产出任何结果。
     max_segments 为 None 时不设段数上限（全部分段处理）。
     """
-    if not LLM_API_KEY:
-        logger.info("LLM extraction skipped: no LLM_API_KEY configured")
+    if not LLM_READY:
+        logger.info("LLM extraction skipped: text model not configured")
         return
     if not segments:
         return

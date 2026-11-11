@@ -1,4 +1,6 @@
-import type { Article, ArticleCreate, ArticleUpdate } from '../types/article';
+import type {
+  Article, ArticleCreate, ArticleUpdate, ArticleChunksResponse,
+} from '../types/article';
 import type { Category, CategoryCreate } from '../types/category';
 import type { Stats } from '../types/stats';
 import type { DependencyHealth } from '../types/health';
@@ -144,6 +146,14 @@ export const api = {
   getArticle(id: string) {
     return request<Article>(`/articles/${id}`);
   },
+  /** 文章向量化分段情况（SQLite 分块 + Qdrant 向量状态）；summary=1 仅取统计 */
+  getArticleChunks(id: string, summary = false) {
+    return request<ArticleChunksResponse>(`/articles/${id}/chunks${summary ? '?summary=1' : ''}`);
+  },
+  /** 异步重新计算文章分块向量（返回 processing=reembedding 的文章，后台执行） */
+  reembedArticle(id: string) {
+    return request<Article>(`/articles/${id}/reembed`, { method: 'POST' });
+  },
   getSearchFacets(search: string, categoryId?: string) {
     const usp = new URLSearchParams();
     if (search) usp.set('search', search);
@@ -270,6 +280,10 @@ export const api = {
   // ── Health ──
   getDependencyHealth() {
     return request<DependencyHealth>('/health/deps');
+  },
+  /** 手动触发一次依赖/模型状态检测（后端立即探测并返回最新快照） */
+  checkDependencyHealth() {
+    return request<DependencyHealth>('/health/deps/check', { method: 'POST' });
   },
 
   // ── Tags (mutations) ──

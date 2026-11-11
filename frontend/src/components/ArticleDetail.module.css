@@ -6,22 +6,56 @@
 
 /* ── Top bar ── */
 
+/* 顶部行：搜索框靠左，操作按钮靠右；空间不足自动换行 */
 .topBar {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
   margin-bottom: 20px;
 }
 
-.topBarLeft {
+/* 面包屑 + 返回/上一篇/下一篇 并列；空间不足时导航整组换行 */
+.detailHeader {
   display: flex;
   align-items: center;
-  gap: 12px;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-bottom: 10px;
+}
+
+.headerNav {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
+}
+
+/* 顶部导航按钮固定宽度，组内放不下时换行 */
+.fixedBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 84px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.searchArea {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
 }
 
 .navGroup {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 4px;
 }
 
@@ -49,29 +83,7 @@
   cursor: default;
 }
 
-.backBtn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 13px;
-  color: var(--c-text-soft);
-  cursor: pointer;
-  background: none;
-  border: none;
-  font-family: var(--font-body);
-  padding: 4px 0;
-  transition: color var(--transition-fast);
-}
-
-.backBtn:hover { color: var(--c-accent); }
-
 /* ── Search ── */
-
-.topBarRight {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
 
 .searchWrap {
   position: relative;
@@ -151,9 +163,10 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
+  flex: 1 1 320px;
+  min-width: 0;
   gap: 6px;
   font-size: 13px;
-  margin-bottom: 10px;
   color: var(--c-text-muted);
 }
 
@@ -227,6 +240,28 @@
   color: var(--c-text-muted);
   flex-wrap: wrap;
   margin-bottom: 16px;
+}
+
+/* 元信息中的可点击项（如「N 个分片」→ 重新向量化） */
+.metaAction {
+  padding: 0;
+  border: none;
+  border-bottom: 1px dashed transparent;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.metaAction:hover:not(:disabled) {
+  color: var(--c-accent);
+  border-bottom-color: var(--c-accent);
+}
+
+.metaAction:disabled {
+  cursor: default;
+  opacity: 0.75;
 }
 
 /* ── Tags ── */
@@ -334,15 +369,20 @@
 
 .actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
 }
 
-.actionsBottom {
-  display: flex;
-  gap: 10px;
-  margin-top: 32px;
-  padding-top: 20px;
-  border-top: 1px solid var(--c-border);
+/* 顶栏操作按钮固定宽度，放不下时换行 */
+.topActions {
+  margin-left: auto;
+  justify-content: flex-end;
+}
+
+.topActions .btn {
+  width: 96px;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .btn {
@@ -445,45 +485,6 @@
 
 /* ── Entity chips (unused but kept for future) ── */
 
-.entities {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-  align-items: center;
-  margin-top: 10px;
-}
-
-.entitiesLabel {
-  font-size: 12px;
-  color: var(--c-text-muted);
-}
-
-.entityChip {
-  display: inline-block;
-  padding: 3px 8px;
-  background: var(--c-surface, #f5f4f0);
-  color: var(--c-text);
-  border: 1px solid var(--c-border);
-  border-radius: var(--radius-sm);
-  font-size: 11px;
-  font-weight: 500;
-  cursor: pointer;
-  font-family: var(--font-body);
-  transition: background var(--transition-fast), color var(--transition-fast);
-}
-
-.entityChip:hover {
-  background: var(--c-accent);
-  color: #fff;
-  border-color: var(--c-accent);
-}
-
-.entityChipActive {
-  background: var(--c-accent);
-  color: #fff;
-  border-color: var(--c-accent);
-}
-
 /* ── Loading ── */
 
 .loading {
@@ -505,13 +506,16 @@
     gap: 10px;
   }
 
-  .topBarLeft {
-    flex-wrap: wrap;
+  .headerNav {
+    margin-left: 0;
   }
 
-  .topBarRight {
-    flex-wrap: wrap;
+  .searchArea {
     width: 100%;
+  }
+
+  .topActions {
+    margin-left: 0;
   }
 
   .searchInput {

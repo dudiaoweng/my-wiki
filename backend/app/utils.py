@@ -11,6 +11,16 @@ from fastapi import HTTPException
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500MB
 
 
+def auth_headers(api_key: str | None, json_body: bool = False) -> dict[str, str]:
+    """构造模型请求头：API Key 为空时不发送 Authorization（兼容无鉴权本地模型）。"""
+    headers: dict[str, str] = {}
+    if (api_key or "").strip():
+        headers["Authorization"] = f"Bearer {api_key.strip()}"
+    if json_body:
+        headers["Content-Type"] = "application/json"
+    return headers
+
+
 async def read_upload_limited(file, max_bytes: int) -> bytes:
     """Read an UploadFile in chunks, raising 413 once ``max_bytes`` is exceeded.
 

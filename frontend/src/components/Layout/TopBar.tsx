@@ -59,7 +59,9 @@ const MODEL_ALERT_LABELS: Array<[ModelKind, string]> = [
 
 export function TopBar() {
   // 依赖服务（Neo4j / Qdrant）与已配置模型状态：异常时在工具栏提示
-  const { health: depHealth, checking: depChecking, refresh: refreshDeps } = useDependencyHealth();
+  const {
+    health: depHealth, checking: depChecking, refresh: refreshDeps, check: checkDeps,
+  } = useDependencyHealth();
   const depAlertLabels = depHealth
     ? [
         ...(depHealth.neo4j === false ? ['Neo4j'] : []),
@@ -83,6 +85,8 @@ export function TopBar() {
   const navigate = useNavigate();
   const location = useLocation();
   const [query, setQuery] = useState('');
+  // 点击左上角系统图标手动检测：独立状态，避免与 30 秒只读轮询互相影响
+  const [manualChecking, setManualChecking] = useState(false);
   // 标签累加筛选：可同时激活多个标签（?tag=A&tag=B）
   const [activeTags, setActiveTags] = useState<string[]>([]);
   const [results, setResults] = useState<Article[]>([]);
@@ -232,6 +236,20 @@ export function TopBar() {
     }
   };
 
+  // 点击系统图标：手动触发后端完整检测（Neo4j/Qdrant + 模型）
+  const handleBrandCheck = async () => {
+    if (manualChecking) return;
+    setManualChecking(true);
+    try {
+      await checkDeps();
+      showToast('依赖与模型状态检测完成', 'success');
+    } catch {
+      showToast('状态检测失败，请稍后重试', 'error');
+    } finally {
+      setManualChecking(false);
+    }
+  };
+
   return (
     <div className={styles.topbar}>
       <div className={styles.left}>
@@ -247,11 +265,21 @@ export function TopBar() {
         >
           ☰
         </button>
-        {/* 系统图标：纯展示，无任何功能 */}
-        <div className={styles.brand}>
-          <span className={styles.logo}>K</span>
+        {/* 系统图标：点击手动触发依赖/模型状态检测 */}
+        <button
+          type="button"
+          className={styles.brand}
+          onClick={() => { void handleBrandCheck(); }}
+          disabled={manualChecking}
+          title={manualChecking ? '正在检测依赖与模型状态…' : '点击立即检测依赖与模型状态'}
+          aria-label="立即检测依赖与模型状态"
+          aria-busy={manualChecking}
+        >
+          <span className={`${styles.logo}${manualChecking ? ` ${styles.logoBusy}` : ''}`}>
+            {manualChecking ? '⟳' : 'K'}
+          </span>
           <span className={styles.brandName}>知识库</span>
-        </div>
+        </button>
         {/* 依赖服务/模型异常提示：靠左展示 */}
         {depHealth && depAlertLabels.length > 0 && (
           <button
@@ -264,6 +292,30 @@ export function TopBar() {
             <span className={styles.depAlertDot}>●</span>
             <span className={styles.depAlertText}>{depAlertLabels.join('、')} 异常</span>
           </button>
+        )}
+        {/* ── 标签累加筛选 chips：与异常提示并排靠左；✕ 移除单个标签 ── */}
+        {activeTags.length > 0 && location.pathname === '/articles' && (
+          <div className={styles.tagChips}>
+            {activeTags.map((t) => (
+              <div key={t} className={styles.tagChip} title={`标签筛选：「${t}」`}>
+                <span className={styles.tagChipName}>{t}</span>
+                <button
+                  type="button"
+                  className={styles.tagChipClose}
+                  onClick={() => {
+                    const rest = activeTags.filter((x) => x !== t);
+                    navigate(rest.length
+                      ? `/articles?${rest.map((x) => `tag=${encodeURIComponent(x)}`).join('&')}`
+                      : '/articles');
+                  }}
+                  title={`移除标签「${t}」筛选`}
+                  aria-label={`移除标签「${t}」筛选`}
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
         )}
       </div>
 
@@ -447,32 +499,6 @@ export function TopBar() {
             </div>
           )}
       </div>
-
-      {/* ── 标签累加筛选 chips：点击文章标签逐个累加；✕ 移除单个标签 ── */}
-      {activeTags.length > 0 && location.pathname === '/articles' && (
-        <div className={styles.tagChips}>
-          {activeTags.map((t) => (
-            <div key={t} className={styles.tagChip} title={`标签筛选：「${t}」`}>
-              <span className={styles.tagChipIcon}>🏷</span>
-              <span className={styles.tagChipName}>{t}</span>
-              <button
-                type="button"
-                className={styles.tagChipClose}
-                onClick={() => {
-                  const rest = activeTags.filter((x) => x !== t);
-                  navigate(rest.length
-                    ? `/articles?${rest.map((x) => `tag=${encodeURIComponent(x)}`).join('&')}`
-                    : '/articles');
-                }}
-                title={`移除标签「${t}」筛选`}
-                aria-label={`移除标签「${t}」筛选`}
-              >
-                ✕
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
 
         {/* 知识图谱按钮：切换实体面板 列表⇄图谱 视图（原实体面板内切换按钮上移至此） */}
         <button

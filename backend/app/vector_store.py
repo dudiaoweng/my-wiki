@@ -210,6 +210,33 @@ async def search(query_vector: list[float], limit: int) -> list[models.ScoredPoi
     return list(res.points)
 
 
+async def get_chunk_vector_status(ids: list[str]) -> tuple[set[str] | None, int | None]:
+    """检查分块点是否存在，并返回集合的实际向量维度。
+
+    返回 ``(已存在 ID 集合, 向量维度)``；Qdrant 不可用时返回 ``(None, None)``，
+    由调用方区分「未向量化」与「无法确认」。
+    """
+    if not ids:
+        return set(), None
+    client = get_client()
+    try:
+        info = await client.get_collection(QDRANT_COLLECTION)
+        dim = info.config.params.vectors.size
+        found: set[str] = set()
+        for i in range(0, len(ids), SCROLL_BATCH_SIZE):
+            records = await client.retrieve(
+                collection_name=QDRANT_COLLECTION,
+                ids=ids[i:i + SCROLL_BATCH_SIZE],
+                with_payload=False,
+                with_vectors=False,
+            )
+            found.update(str(r.id) for r in records)
+        return found, dim
+    except Exception:
+        logger.warning("Qdrant chunk vector status query failed", exc_info=True)
+        return None, None
+
+
 async def list_existing_ids() -> set[str]:
     """scroll 遍历集合内所有点 ID（with_payload/vectors 关闭，只取 id）。"""
     client = get_client()

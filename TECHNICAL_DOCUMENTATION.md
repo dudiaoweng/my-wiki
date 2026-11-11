@@ -36,7 +36,7 @@
 - 🗂️ **文章列表** — 分页（每页 10 篇）、组合排序（时间/标题·目录名/创建人 × 倒序/正序，目录与文章分别排序）、目录卡片（创建人/创建时间、修改/删除、拖拽移动）
 - 🤖 **智能问答 (RAG)** — 最右侧面板与文章/实体窗口并排（窗口切换保活、数据不清理），多会话下拉框管理，多行输入框
 - 🕸️ **知识图谱** — D3.js 力导向图，展示文章-目录-实体关系网络；实体列表⇄图谱联动（选中居中、文章列表禁用无关联文章）、n 层展开（1–3 层）/收缩/移除/撤销（仅独立模式）、关系增删改、图谱多标签单独浏览（最多 5 个）/快照、JSON 打开/保存/截图；当前图谱默认节点上限 500（`GRAPH_MAX_NODES` 可调，超限截断并提示）
-- 🩺 **依赖与模型状态** — 后端每 30 秒巡检 Neo4j / Qdrant 与已配置的文本/视觉/语音/嵌入模型；前端只读快照，多前端轮询不触发重复探测；异常时顶栏左侧红色提示
+- 🩺 **依赖与模型状态** — 后端默认每 600 秒巡检 Neo4j / Qdrant 与已配置的文本/视觉/语音/嵌入模型；前端轮询只读快照，多前端不触发重复探测，也可点击左上角系统图标手动立即检测；异常时顶栏左侧红色提示
 - 🏷️ **实体管理** — LLM 自动提取实体+关系（实体以「名称+类型」为标识，同名不同类型独立），实体列表动态加载（每批 20 条）；关联渐进加载（每批 10 条），支持方向切换与类型化对端选择
 - 🧩 **Prompt 可配置** — 所有提示词以 txt 文件存于 `prompts/` 目录，可独立编辑，重启生效（Docker 挂载）
 - 📱 **响应式设计** — 桌面端多栏布局，移动端按内容高度自适应
@@ -74,7 +74,7 @@ my-wiki/
 │           ├── tags.py          # 标签管理 (添加/重命名/删除)
 │           ├── entities.py      # 实体管理 + 附加信息 CRUD + 嵌入重算
 │           ├── graph.py         # 知识图谱数据构建
-│           ├── health.py        # 依赖服务/模型后台巡检 + 只读快照接口
+│           ├── health.py        # 依赖/模型巡检快照 + 手动检测接口
 │           ├── qa.py            # RAG 问答管道
 │           ├── stats.py         # 仪表盘统计
 │           └── upload.py        # 文件上传 + LLM 实体提取
@@ -109,7 +109,7 @@ my-wiki/
 │       │   ├── useTags.ts       # 标签获取
 │       │   ├── useToast.tsx     # Toast 通知系统
 │       │   ├── useKeyboardShortcuts.ts  # 键盘快捷键
-│       │   ├── useDependencyHealth.ts   # 依赖/模型状态读取（只读快照）
+│       │   ├── useDependencyHealth.ts   # 依赖/模型状态轮询 + 手动检测
 │       │   └── useReadingProgress.ts    # 阅读进度
 │       ├── utils/               # 工具函数
 │       │   └── entityIcons.ts   # 实体类型图标映射 (共享)
@@ -471,6 +471,8 @@ my-wiki/
 | | | `/{id}` | DELETE | 删除文章 |
 | | | `/{id}/move` | POST | 拖拽移动文章（换目录/换父文章，创建人 only） |
 | | | `/{id}/download` | GET | 下载附件 |
+| | | `/{id}/chunks` | GET | 向量分片明细（`?summary=1` 仅统计，含 Qdrant 向量状态与维度） |
+| | | `/{id}/reembed` | POST | 异步重新向量化（立即返回 `processing=reembedding`，后台重算） |
 | | | `/{id}/reprocess` | POST | 重新解析全部附件 |
 | | | `/{id}/reprocess/{safe_name}` | POST | 重新解析单个附件 |
 | | | `/{id}/recognize` | POST | 重新解析文章文本内容（标签/实体、检索索引） |
@@ -513,6 +515,7 @@ my-wiki/
 | `/api` | `main.py` | `/media/{filename}` | GET | 媒体文件直链 |
 | `/api` | `main.py` | `/health` | GET | 健康检查 |
 | | `routes/health.py` | `/health/deps` | GET | Neo4j / Qdrant / 已配置模型状态（后台巡检快照，只读） |
+| | `routes/health.py` | `/health/deps/check` | POST | 手动触发一次完整检测（绕过模型缓存）并返回最新快照 |
 | `/api/auth` | `main.py` | `/status` | GET | 证书认证状态 + 用户信息 (name/id_number/display_name) |
 | `/api/auth` | `main.py` | `/login` | GET | 登录跳转 (生产模式，重定向回前端) |
 
@@ -1058,6 +1061,8 @@ const notifyArticleSaved = useCallback(() => {
 
 ### 9.1 RAG 问答管道 (`qa.py`)
 
+> **无鉴权模型**：所有模型请求统一经 `auth_headers()`（`app/utils.py`）构造请求头，API Key 为空时不发送 `Authorization`；模型是否启用由 `LLM_READY` / `VISION_READY` / `ASR_READY` / `EMBEDDING_READY` 判定（Base/Model 必填，Key 可选），完全未配置时不调用、不误报。
+
 #### 文本分块策略
 
 ```python
@@ -1192,6 +1197,8 @@ def _collect_entity_info(question, top_chunks, db) -> str:
 使用 D3.js v7 力导向图，通过共享 Hook (`useD3ForceGraph`) 实现代码复用：
 
 **数据来源（v2.3）**：`GET /api/graph` 混合组装——文章/分类节点来自 SQLite（标题/颜色），实体节点 + 提及边 + 关系边由 `neo4j_store.graph_data_sync()` 三条 Cypher 直查 Neo4j。v2.2 前的 30 秒 TTL 缓存（避免全表 JSON 扫描）已移除，`invalidate_graph_cache` 全部调用点随之删除；Neo4j 不可用时返回 503「知识图谱服务（Neo4j）不可用」。前端节点/边 id 约定保持不变；`EntityPanel` 在此基础上增加了实体列表联动（选中居中 + 文章列表禁用）、n 层展开/收缩/移除/撤销（仅独立模式）、关系编辑、多标签单独浏览（最多 5 个）/快照与图谱文件（打开/保存/新建/截图）功能。
+
+**数据刷新**：`useGraphData` 在挂载时请求一次；进入普通图谱视图（列表→图谱，或关闭最后一个独立标签）时再次刷新，避免 KeepAlive 长期挂载导致的陈旧数据；`articleVersion` 变化（文章/附件解析完成等）及实体/关系写操作后同样刷新。请求带序号，过期响应不会覆盖新数据。
 
 **节点视觉设计:**
 - `category` — 方框样式与文章一致，图标 📁 + 目录名（宽度同样自适应）
@@ -1339,6 +1346,7 @@ LLM 提取实体/关系 ──► Neo4j（实体节点/提及边/关系边）
 | 层面 | 入口 | 端点 | 行为 |
 |------|------|------|------|
 | 文章内容 | 详情页 🧠 重新解析（仅创建人，处理中灰显） | `POST /api/articles/{id}/recognize` | 重建分块/嵌入 + 重新提取标签/实体（用户标签保留合并，实体按新结果覆盖）。**不触碰附件** |
+| 文章向量 | 详情页「🧩 N 个分片」点击（处理中禁用） | `POST /api/articles/{id}/reembed` | **只重算正文分块向量**：不重新切分、不改标签/实体；无分块时按正文重建。异步执行（立即返回 `processing=reembedding`，完成后清除） |
 | 文章附件 | 附件卡片 🔄（仅创建人） | `POST /api/articles/{id}/reprocess/{safe_name}` | 重新解析该附件（媒体替换式写入）并重新提取标签/实体 |
 | 文章全部附件 | 仅 API | `POST /api/articles/{id}/reprocess` | 重新解析全部附件并重新提取标签/实体 |
 | 评论内容 | 评论操作区 🧠（评论人或文章创建人） | `POST /api/articles/{id}/comments/{cid}/reprocess` | **只针对内容**：重建评论分块/嵌入 + 重新提取标签/实体。不触碰附件 |
@@ -1461,20 +1469,31 @@ LLM 提取实体/关系 ──► Neo4j（实体节点/提及边/关系边）
 - `components/HighlightText.tsx`：按空白拆分为多个关键词、大小写不敏感匹配，命中词包裹为 `<mark class="search-term-highlight">`（`global.css`：黄色底 + 加粗）
 - **侧边栏**：搜索树/浏览树的目录名与文章标题、筛选结果的标题（全局搜索词 + 标签筛选 + 高级搜索关键词 + 侧边栏筛选词）
 - **文章列表**：`ArticleCard` 标题/摘要/子文章树、`DirCard` 目录名；关键词来源为 URL `?search=`、标签筛选、列表筛选框、高级搜索关键词（排除“非”条件）
-- **标签 chip**：当前生效的 `?tag=` 标签在顶栏 chip、文章卡片、文章详情标签列表中用主题色高亮（`tagActive`）
+- **标签 chip**：当前生效的 `?tag=` 标签在文章卡片与文章详情标签列表中用主题色高亮（`tagActive`）；顶栏筛选 chip 保持原黄色样式（与异常提示并排、无图标）
 - **文章详情**：顶部搜索框是**独立的内存文内搜索**，不写入/不关联全局、高级与标签词。无文内输入时，搜索词/标签/高级关键词仅对正文做视觉标识（`rehypeSearchHighlight`），标题、子文章树用 `HighlightText`；一旦输入文内搜索词，则以它为唯一高亮与上下条导航词（多词空格分隔），外部关键词标识让位。`useArticleSearch` 只接收文内搜索词数组，避免外部高亮触发自动滚动/导航
 
 ### 9.17 依赖服务与模型状态提示
 
-- **后端后台巡检**：`lifespan` 启动 `health.start_monitor()`（幂等，双 uvicorn 共用 app 只启动一次），每 30 秒并行探测 Neo4j（`ping_async`）与 Qdrant（`ping`，含集合存在性），单项 3 秒超时；结果写入模块级内存快照，进程退出时取消任务
+- **后端后台巡检**：`lifespan` 启动 `health.start_monitor()`（幂等，双 uvicorn 共用 app 只启动一次），按 `HEALTH_MONITOR_INTERVAL`（默认 600 秒，最小 60 秒）并行探测 Neo4j（`ping_async`）与 Qdrant（`ping`，含集合存在性）；结果写入模块级内存快照，进程退出时取消任务
+- **探测超时**：Neo4j/Qdrant 连通性探测用 `HEALTH_PING_TIMEOUT`（默认 3 秒，`.env` 可覆盖）；模型探测**与业务调用超时统一**——文本/视觉/语音/嵌入分别复用 `LLM_TIMEOUT` / `VISION_TIMEOUT` / `ASR_TIMEOUT` / `EMBEDDING_TIMEOUT`，不单独配置。探测请求走最小负载；本地模型冷启动/推理慢时调大对应模型超时，业务调用与健康检测同时生效
 - `GET /api/health/deps`（受 mTLS 保护）**只读快照，不触发任何探测**；首次巡检完成前返回 `{neo4j: null, qdrant: null, models: {}}`，前端不提示。多个前端轮询只读取内存，不会重复调用依赖或模型接口
+- `POST /api/health/deps/check`（受 mTLS 保护）**手动触发一次完整检测**：并行探测 Neo4j/Qdrant，并强制探测四类已配置模型（绕过缓存），更新内存快照后返回。`_check_lock` 串行化并发点击；模型探测与后台巡检共用 `_model_lock`，避免重复请求
 - **模型状态** `models.text/vision/asr/embedding = {configured, ok}`：
-  - 仅当 API Key、API Base、Model 均非空（`configured=true`）时探测；未配置返回 `ok=null`，前端不提示
-  - 文本/视觉：`POST /chat/completions`（`max_tokens=1`）；嵌入：`POST /embeddings`（input=`ping`）；语音：`POST /audio/transcriptions`（内存生成 0.2s 静音 WAV）
+  - **API Key 非必填**（本地 llama-server 等通常不鉴权）：Base/Model 非空且该模型被显式配置（或继承了非空 API Key）即 `configured=true`；完全未配置返回 `ok=null`，前端不提示。Key 为空时探测请求不发送 `Authorization` 头
+  - 文本/视觉：`POST /chat/completions`（`max_tokens=1`）；嵌入：`POST /embeddings`（input=`ping`，兼容 OpenAI 对象格式与 llama.cpp 原生数组格式）；语音：`POST /audio/transcriptions`（内存生成 0.2s 静音 WAV）
   - 2xx 视为健康；语音探测中 401/403/404/5xx/网络错误为异常，其他 4xx（如静音不被接受）视为服务可达
   - 模型探测结果缓存：健康 5 分钟、异常 1 分钟，后台巡检按 TTL 复用
-- 前端 `useDependencyHealth`：挂载时读取快照，之后每 30 秒轮询（只读），窗口重新聚焦时立即读取；读取失败保留上次结果（从未成功则按异常处理）
-- `TopBar` 左侧品牌区仅在任一依赖/已配置模型异常时显示红色提示（如 `Neo4j、文本模型 异常`），点击立即读取最新快照；正常时不占位。搜索框与知识图谱/智能问答/用户信息统一靠右排列
+- 前端 `useDependencyHealth`：挂载时读取快照，之后每 30 秒轮询（只读，读取间隔与后端 `HEALTH_MONITOR_INTERVAL` 无关），窗口重新聚焦时立即读取；读取失败保留上次结果（从未成功则按异常处理）。另提供 `check()`：调用 `POST /deps/check` 手动检测并更新快照
+- `TopBar` 左侧品牌区仅在任一依赖/已配置模型异常时显示红色提示（如 `Neo4j、文本模型 异常`），点击立即读取最新快照；正常时不占位。左上角系统图标（K / 知识库）可点击**手动触发检测**：检测期间图标旋转并禁用，完成后 Toast 提示。异常提示与标签筛选 chip 在左侧并排显示（标签沿用原黄色样式、无图标）；搜索框与知识图谱/智能问答/用户信息靠右排列
+
+### 9.18 文章分片统计与重新向量化
+
+- **元信息展示**：文章详情标题下方元信息行在实体/关系数后追加 `🧩 N 个分片`、`✅ M 个已向量化`；数据来自 `GET /api/articles/{id}/chunks?summary=1`，随文章切换/重新解析（`articleVersion`）刷新。Qdrant 不可用时向量数显示 `—`，不误报为 0
+- **分片明细**：同一端点不带 `summary` 时返回每个分块的 `id/index/text/chars/embedded`（`embedded=null` 表示 Qdrant 不可用），以及分块上限、重叠字符数、实际向量维度；`get_chunk_vector_status()` 用 Qdrant `retrieve` 批量检查点存在性并读取集合维度
+- **重新向量化**：点击分片数 → 确认框 → `POST /api/articles/{id}/reembed`。端点设置 `processing="reembedding"` 后立即返回，后台任务 `_bg_reembed` 按当前分块重算 embedding 并 upsert 到 Qdrant（并发 4 限制）；无分块时先按正文重建。不重新切分、不改标签/实体；任务在 `finally` 清除 processing（成功/失败均清除）
+- **前端状态**：处理中分片按钮显示「⏳ 正在向量化…」并禁用，标题旁不额外显示“向量化中”；`ArticleDetail` 复用既有 5 秒 processing 轮询，结束后 `notifyArticleSaved()` 触发分片统计刷新
+- **并发保护**：文章处理中再次触发返回 409；后台任务加入 `_bg_tasks` 强引用集合，避免被 GC
+- **详情页顶部布局**：面包屑与「(上一篇 / 下一篇 / ↩ 返回)」按钮并列（按钮固定 84px，放不下整组换行，返回位于最右）；下一行搜索框靠左、「重新解析 / 编辑 / 删除」靠右（固定 96px，可换行）
 
 ---
 

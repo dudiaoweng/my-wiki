@@ -303,6 +303,30 @@ class ArticleListItem(ArticleResponse):
     latest_comments: list[CommentSummary] = []
 
 
+class ArticleChunkInfo(BaseModel):
+    """文章正文的单个向量分段。"""
+
+    id: str
+    index: str
+    text: str
+    chars: int
+    # None = Qdrant 不可用，无法确认是否已向量化
+    embedded: Optional[bool] = None
+
+
+class ArticleChunksResponse(BaseModel):
+    """文章向量化分段情况（SQLite 分块 + Qdrant 向量存在性）。"""
+
+    article_id: str
+    total: int
+    embedded_count: int
+    qdrant_available: bool
+    vector_dim: Optional[int] = None
+    max_chunk_chars: int
+    chunk_overlap: int
+    chunks: list[ArticleChunkInfo] = Field(default_factory=list)
+
+
 class AdvancedSearchResponse(BaseModel):
     """高级搜索响应：总数 + 分页列表项。"""
 

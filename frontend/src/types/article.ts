@@ -61,6 +61,29 @@ export interface Article {
   latest_comments?: CommentSummary[];
 }
 
+/** 文章正文的单个向量分段。 */
+export interface ArticleChunkInfo {
+  id: string;
+  /** 分块序号（如 "0"、"1"、"1.2"） */
+  index: string;
+  text: string;
+  chars: number;
+  /** null = Qdrant 不可用，无法确认 */
+  embedded: boolean | null;
+}
+
+/** 文章向量化分段情况。 */
+export interface ArticleChunksResponse {
+  article_id: string;
+  total: number;
+  embedded_count: number;
+  qdrant_available: boolean;
+  vector_dim: number | null;
+  max_chunk_chars: number;
+  chunk_overlap: number;
+  chunks: ArticleChunkInfo[];
+}
+
 export interface ArticleCreate {
   title: string;
   content: string;

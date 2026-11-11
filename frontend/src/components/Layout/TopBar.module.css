@@ -17,7 +17,8 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .menuBtn {
@@ -35,6 +36,28 @@
   display: flex;
   align-items: center;
   gap: 10px;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.brand:hover:not(:disabled) .brandName {
+  color: var(--c-accent);
+}
+
+.brand:disabled {
+  cursor: default;
+}
+
+.logoBusy {
+  animation: brandSpin 0.9s linear infinite;
+}
+
+@keyframes brandSpin {
+  to { transform: rotate(360deg); }
 }
 
 .logo {
@@ -64,8 +87,8 @@
 /* ── Right: search（靠右，与智能问答/用户图标一组）── */
 
 .searchWrap {
-  width: 340px;
-  flex-shrink: 0;
+  flex: 0 1 340px;
+  min-width: 220px;
   position: relative;
 }
 
@@ -128,17 +151,11 @@
   flex-shrink: 0;
   max-width: 260px;
   padding: 6px 6px 6px 10px;
-  background: var(--c-accent-wash);
-  color: var(--c-accent);
-  border: 1px solid var(--c-accent);
+  background: var(--c-tag-bg);
+  color: var(--c-tag-text);
   border-radius: var(--radius-sm);
   font-size: 13px;
-  font-weight: 600;
   overflow: hidden;
-}
-
-.tagChipIcon {
-  flex-shrink: 0;
 }
 
 .tagChipName {
@@ -170,7 +187,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  flex-shrink: 0;
+  flex-shrink: 1;
   min-width: 0;
   margin-left: auto;
 }
@@ -180,6 +197,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
   max-width: 420px;
   padding: 6px 10px;
   border: 1px solid var(--c-danger);
@@ -195,6 +213,7 @@
 }
 
 .depAlertText {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -252,25 +271,6 @@
   padding: 4px 8px;
   white-space: nowrap;
   font-weight: 500;
-}
-
-.logoutBtn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  cursor: pointer;
-  font-size: 16px;
-  transition: all var(--transition-fast);
-}
-
-.logoutBtn:hover {
-  background: var(--c-danger-wash);
-  border-color: var(--c-danger-wash);
 }
 
 /* ── Mobile ── */

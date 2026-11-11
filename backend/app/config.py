@@ -33,6 +33,25 @@ EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", LLM_API_KEY)
 EMBEDDING_API_BASE = os.getenv("EMBEDDING_API_BASE", LLM_API_BASE)
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "embedding-3")
 
+
+def _env_any_nonempty(*names: str) -> bool:
+    return any((os.getenv(name) or "").strip() for name in names)
+
+
+# 模型是否参与健康检测：API Key 非必填（本地 llama-server 等通常不鉴权）。
+# 显式配置了该模型的任一变量，或继承了非空 API Key，则视为已配置；
+# 完全未配置时保持 unconfigured，避免默认端点在无 Key 时误报异常。
+LLM_MONITOR = _env_any_nonempty("LLM_API_KEY", "LLM_API_BASE", "LLM_MODEL")
+VISION_MONITOR = _env_any_nonempty("VISION_API_KEY", "VISION_API_BASE", "VISION_MODEL") or bool(VISION_API_KEY.strip())
+ASR_MONITOR = _env_any_nonempty("ASR_API_KEY", "ASR_API_BASE", "ASR_MODEL") or bool(ASR_API_KEY.strip())
+EMBEDDING_MONITOR = _env_any_nonempty("EMBEDDING_API_KEY", "EMBEDDING_API_BASE", "EMBEDDING_MODEL") or bool(EMBEDDING_API_KEY.strip())
+
+# 业务调用可用性：Base/Model 必填，API Key 可选；未显式配置且无继承 Key 时视为未启用
+LLM_READY = LLM_MONITOR and bool(LLM_API_BASE.strip()) and bool(LLM_MODEL.strip())
+VISION_READY = VISION_MONITOR and bool(VISION_API_BASE.strip()) and bool(VISION_MODEL.strip())
+ASR_READY = ASR_MONITOR and bool(ASR_API_BASE.strip()) and bool(ASR_MODEL.strip())
+EMBEDDING_READY = EMBEDDING_MONITOR and bool(EMBEDDING_API_BASE.strip()) and bool(EMBEDDING_MODEL.strip())
+
 # ── Q&A ──
 QA_TEMPERATURE = float(os.getenv("QA_TEMPERATURE", "0.4"))
 
@@ -73,6 +92,14 @@ VISION_TIMEOUT = _env_float("VISION_TIMEOUT", 120.0) # 视觉模型：图片描�
 ASR_TIMEOUT = _env_float("ASR_TIMEOUT", 120.0)       # 语音识别：音频转文字
 EMBEDDING_TIMEOUT = _env_float("EMBEDDING_TIMEOUT", 30.0)  # 嵌入模型：语义搜索
 FFMPEG_TIMEOUT = _env_int("FFMPEG_TIMEOUT", 60)      # ffmpeg 音视频转换（子进程）
+
+# ── 健康巡检 ──
+# 后台巡检间隔（秒）：每轮探测 Neo4j/Qdrant 并更新模型状态快照。
+# 最小 60 秒，避免配置为 0/负数或过小值导致后台任务空转/频繁探测；默认 600 秒（10 分钟）。
+HEALTH_MONITOR_INTERVAL = max(60.0, _env_float("HEALTH_MONITOR_INTERVAL", 600.0))
+# Neo4j / Qdrant 连通性探测超时；模型探测统一复用上方各类模型的调用超时
+# （LLM_TIMEOUT / VISION_TIMEOUT / ASR_TIMEOUT / EMBEDDING_TIMEOUT），不单独配置。
+HEALTH_PING_TIMEOUT = _env_float("HEALTH_PING_TIMEOUT", 3.0)
 
 # 检索结果的最低相关度阈值（Cosine 相似度，越大越相关）。
 # embedding-3（2048 维）对真实匹配块的分数普遍在 0.3-0.42，0.4 会漏掉有效结果；

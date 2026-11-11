@@ -1,7 +1,6 @@
 import json
 import asyncio
 import logging
-import os
 import re
 import html
 from pathlib import Path
@@ -15,12 +14,13 @@ from app.database import SessionLocal
 from app.models import Article, Category, Comment, EntityInfo
 from app.ancestry import attach_ancestry, attach_children_trees
 from app.schemas import (
-    ArticleCreate, ArticleUpdate, ArticleMove, ArticleResponse, ArticleListItem,
+    ArticleMove, ArticleResponse, ArticleListItem,
+    ArticleChunksResponse, ArticleChunkInfo,
     CommentSummary, AdvancedSearchRequest, AdvancedSearchCondition, AdvancedSearchResponse,
 )
 from app.auth import get_client_cert, CertInfo
 from app.llm_extract import extract_chunks_iter, merge_tags, merge_entities
-from app.config import AUTO_PARSE
+from app.config import AUTO_PARSE, MAX_CHUNK_CHARS, CHUNK_OVERLAP, EMBEDDING_READY
 from app.routes.upload import (
     generate_title,
     parse_text_from_bytes, parse_docx, parse_xlsx, parse_pptx, parse_pdf,
@@ -28,7 +28,7 @@ from app.routes.upload import (
     TEXT_EXTENSIONS, WORD_EXTENSIONS, EXCEL_EXTENSIONS, PPT_EXTENSIONS,
     PDF_EXTENSIONS, IMAGE_EXTENSIONS, AUDIO_EXTENSIONS, VIDEO_EXTENSIONS,
 )
-from app.routes.qa import _extract_video_thumbnail
+from app.routes.qa import _extract_video_thumbnail, get_article_chunks, reembed_article_chunks
 from app.utils import read_upload_limited, MAX_UPLOAD_BYTES, delete_uploaded_files
 from app import vector_store
 from app import neo4j_store
@@ -41,6 +41,9 @@ router = APIRouter(prefix="/api/articles", tags=["articles"])
 
 MAX_PAGE_SIZE = 200
 UPLOAD_DIR = Path(UPLOAD_DIR_STR)
+
+# 后台任务强引用集合（asyncio 只保留弱引用，避免任务执行中被垃圾回收）
+_bg_tasks: set[asyncio.Task] = set()
 
 
 def _validate_article_id(article_id: str) -> None:
@@ -382,6 +385,103 @@ def get_article(
     _attach_entities(article)
     attach_ancestry(db, article)
     return article
+
+
+@router.get("/{article_id}/chunks", response_model=ArticleChunksResponse)
+async def list_article_chunks(
+    article_id: str = PathParam(..., max_length=36),
+    summary: bool = Query(False, description="仅返回统计信息，不返回分块正文"),
+    db: Session = Depends(get_db),
+):
+    """文章向量化分段情况：SQLite 分块文本 + Qdrant 向量存在性。
+
+    分块是语义检索/实体提取共用的切分结果；``embedded`` 为 None 表示
+    Qdrant 不可用、无法确认（区别于「未向量化」的 False）。
+    ``summary=1`` 时只返回总数/已向量化数，正文列表为空（详情页元信息用）。
+    """
+    _validate_article_id(article_id)
+    article = db.query(Article).filter(Article.id == article_id).first()
+    if not article:
+        raise HTTPException(status_code=404, detail="Article not found")
+
+    rows = get_article_chunks(db, article_id)
+    ids = [r.id for r in rows]
+    existing, vector_dim = await vector_store.get_chunk_vector_status(ids)
+    chunks = [] if summary else [
+        ArticleChunkInfo(
+            id=r.id,
+            index=r.chunk_index,
+            text=r.chunk_text,
+            chars=len(r.chunk_text),
+            embedded=(r.id in existing) if existing is not None else None,
+        )
+        for r in rows
+    ]
+    return ArticleChunksResponse(
+        article_id=article_id,
+        total=len(ids),
+        embedded_count=sum(1 for i in ids if existing is not None and i in existing),
+        qdrant_available=existing is not None,
+        vector_dim=vector_dim,
+        max_chunk_chars=MAX_CHUNK_CHARS,
+        chunk_overlap=CHUNK_OVERLAP,
+        chunks=chunks,
+    )
+
+
+@router.post("/{article_id}/reembed", response_model=ArticleResponse)
+async def reembed_article(
+    article_id: str = PathParam(..., max_length=36),
+    db: Session = Depends(get_db),
+):
+    """异步重新向量化：立即返回（processing=reembedding），后台重算并写入 Qdrant。
+
+    已有分块按当前文本重算；没有分块时按当前正文重建分块后再向量化。
+    前端通过既有 processing 轮询感知完成（结束后自动刷新分片统计）。
+    """
+    _validate_article_id(article_id)
+    article = db.query(Article).filter(Article.id == article_id).first()
+    if not article:
+        raise HTTPException(status_code=404, detail="Article not found")
+    if article.processing:
+        raise HTTPException(status_code=409, detail="文章正在处理中，请稍候")
+    if not EMBEDDING_READY:
+        raise HTTPException(status_code=400, detail="嵌入模型未配置，无法重新向量化")
+
+    article.processing = "reembedding"
+    db.commit()
+    db.refresh(article)
+    task = asyncio.create_task(_bg_reembed(article_id))
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+
+    _attach_entities(article)
+    attach_ancestry(db, article)
+    return article
+
+
+async def _bg_reembed(article_id: str) -> None:
+    """后台重新向量化任务：结束后清除 processing（成功/失败都清除）。"""
+    db2 = SessionLocal()
+    try:
+        art = db2.query(Article).filter(Article.id == article_id).first()
+        if not art:
+            return
+        total, updated = await reembed_article_chunks(
+            db2, article_id, art.content or "",
+        )
+        logger.info("Re-embed finished for %s: %d/%d chunks", article_id, updated, total)
+    except Exception:
+        logger.warning("Re-embed task failed for %s", article_id, exc_info=True)
+    finally:
+        try:
+            art = db2.query(Article).filter(Article.id == article_id).first()
+            if art and (art.processing or "").startswith("reembedding"):
+                art.processing = None
+                db2.commit()
+        except Exception:
+            logger.warning("Failed to clear reembedding state for %s", article_id, exc_info=True)
+        db2.close()
 
 
 async def _bg_extract(article_id: str, user_tags: list[str], need_title: bool) -> None:

@@ -880,20 +880,23 @@ export function ArticleList() {
 
   // 目录与文章分别排序：目录按条件排序后始终置于文章列表上方
 
+  // 实体面板 / 图谱跟随当前视图数据：高级搜索模式使用 advArticles，普通模式使用 articles
+  const panelArticles = advMode ? advArticles : articles;
+
   // Compute entity list
   const entityPool = useMemo(() => {
     // If viewing an article, show only its entities（不在列表时用单独拉取的详情兜底）
     if (viewedArticleId) {
-      const a = articles.find((x) => x.id === viewedArticleId) ?? viewedArticleDetail ?? undefined;
+      const a = panelArticles.find((x) => x.id === viewedArticleId) ?? viewedArticleDetail ?? undefined;
       return a ? [a] : [];
     }
     // If articles selected, show their entities
     if (selectedArticleIds.size > 0) {
-      return articles.filter((a) => selectedArticleIds.has(a.id));
+      return panelArticles.filter((a) => selectedArticleIds.has(a.id));
     }
-    // Otherwise all articles
-    return articles;
-  }, [articles, selectedArticleIds, viewedArticleId, viewedArticleDetail]);
+    // Otherwise all articles in the current view
+    return panelArticles;
+  }, [panelArticles, selectedArticleIds, viewedArticleId, viewedArticleDetail]);
 
   // Entities (LLM-extracted) — computed from article.entities, keyed by (name, type)
   // 同名但类型不同视为不同实体：分开展示、分别计数
@@ -1504,7 +1507,7 @@ export function ArticleList() {
       <EntityPanel
         entities={llmEntityList}
         selectedArticleIds={selectedArticleIdsArray}
-        articles={articles}
+        articles={panelArticles}
         mode={entityPanelMode}
         onRefresh={refetch}
         onGraphNodeClick={handleGraphNodeClick}

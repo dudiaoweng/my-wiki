@@ -779,6 +779,18 @@ export function EntityPanel({
     }
   }, [articleVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // 打开图谱视图时重新载入当前数据：
+  // ArticleList 由 KeepAlive 长期挂载，useGraphData 只在挂载时取一次，
+  // 期间可能发生其他用户/其他入口的数据变更；每次进入非独立图谱视图时刷新。
+  const prevGraphViewActiveRef = useRef(mode === 'graph' && !isolatedMode);
+  useEffect(() => {
+    const active = mode === 'graph' && !isolatedMode;
+    if (active && !prevGraphViewActiveRef.current) {
+      void refetchGraph();
+    }
+    prevGraphViewActiveRef.current = active;
+  }, [mode, isolatedMode, refetchGraph]);
+
   // ── 选中实体的关联信息（Neo4j RELATES 边：实体 ⇄ 实体，含方向与关系名）──
   // 实体信息面板中显示在附加信息之后；按当前文章范围从 Neo4j 查询，可增删改
   const [entityRelations, setEntityRelations] = useState<EntityRelation[]>([]);

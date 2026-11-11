@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import os
 import re
 import html
 import uuid
@@ -14,14 +13,14 @@ from app.ancestry import attach_ancestry
 from app.schemas import ArticleResponse
 from app.auth import get_client_cert, CertInfo
 from app.config import (
-    LLM_API_KEY, LLM_API_BASE, LLM_MODEL,
-    VISION_API_KEY, VISION_API_BASE, VISION_MODEL,
-    ASR_API_KEY, ASR_API_BASE, ASR_MODEL,
+    LLM_API_KEY, LLM_API_BASE, LLM_MODEL, LLM_READY,
+    VISION_API_KEY, VISION_API_BASE, VISION_MODEL, VISION_READY,
+    ASR_API_KEY, ASR_API_BASE, ASR_MODEL, ASR_READY,
     LLM_TIMEOUT, VISION_TIMEOUT, ASR_TIMEOUT, FFMPEG_TIMEOUT,
     UPLOAD_DIR as UPLOAD_DIR_STR,
     AUTO_PARSE,
 )
-from app.utils import find_ffmpeg, read_upload_limited, MAX_UPLOAD_BYTES
+from app.utils import auth_headers, find_ffmpeg, read_upload_limited, MAX_UPLOAD_BYTES
 from app.llm_extract import extract_chunks_iter, merge_tags, merge_entities
 from app.prompts import IMAGE_DESCRIPTION, VIDEO_DESCRIPTION, GENERATE_TITLE
 from app import neo4j_store
@@ -238,7 +237,6 @@ def parse_docx(file_path: str) -> str:
     - 末尾再过公文编号规则（幂等）
     """
     from docx import Document
-    from docx.document import Document as _Doc
     from docx.table import Table
     from docx.text.paragraph import Paragraph
     from docx.oxml.ns import qn
@@ -336,7 +334,7 @@ async def parse_image(file_path: str, original_name: str) -> str:
     img_tag = f'<img src="/api/media/{storage_name}" alt="{html.escape(original_name, quote=True)}" style="max-width:100%;height:auto;display:block;border-radius:4px">'
     original_esc = html.escape(original_name)
 
-    if not VISION_API_KEY:
+    if not VISION_READY:
         return f"{img_tag}\n\n# 图片：{original_esc}\n\n> 未配置视觉模型 API，无法自动描述图片内容。请手动添加。"
 
     # Read and encode image
@@ -356,10 +354,7 @@ async def parse_image(file_path: str, original_name: str) -> str:
         async with httpx.AsyncClient(timeout=VISION_TIMEOUT) as client:
             resp = await client.post(
                 f"{VISION_API_BASE.rstrip('/')}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {VISION_API_KEY}",
-                    "Content-Type": "application/json",
-                },
+                headers=auth_headers(VISION_API_KEY, json_body=True),
                 json={
                     "model": VISION_MODEL,   # vision model for image understanding
                     "messages": [
@@ -408,8 +403,8 @@ async def parse_media(content_bytes: bytes, filename: str, content_type: str, st
         if storage_name else ""
     )
 
-    logger.info(f"[AUDIO] parse_media called: filename={filename}, size={len(content_bytes)}, ASR_API_KEY={'set' if ASR_API_KEY else 'NOT SET'}")
-    if ASR_API_KEY:
+    logger.info(f"[AUDIO] parse_media called: filename={filename}, size={len(content_bytes)}, ASR_READY={ASR_READY}")
+    if ASR_READY:
         try:
             logger.info("[AUDIO] Calling transcribe_media_from_bytes...")
             result = await transcribe_media_from_bytes(content_bytes, filename, content_type)
@@ -452,7 +447,7 @@ async def parse_video(file_path: str, original_name: str) -> str:
     name_no_ext = Path(original_name).stem.replace('_', ' ').replace('-', ' ')
     name_esc = html.escape(name_no_ext)
 
-    if not VISION_API_KEY:
+    if not VISION_READY:
         return f"{video_tag}\n\n# 视频：{name_esc}\n\n> 未配置视觉模型 API，无法自动描述视频内容。"
 
     # ── Extract key frames ──
@@ -516,10 +511,7 @@ async def parse_video(file_path: str, original_name: str) -> str:
         async with httpx.AsyncClient(timeout=VISION_TIMEOUT) as client:
             resp = await client.post(
                 f"{VISION_API_BASE.rstrip('/')}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {VISION_API_KEY}",
-                    "Content-Type": "application/json",
-                },
+                headers=auth_headers(VISION_API_KEY, json_body=True),
                 json={
                     "model": VISION_MODEL,
                     "messages": [
@@ -650,7 +642,7 @@ async def transcribe_media_from_bytes(content: bytes, filename: str, content_typ
         async with httpx.AsyncClient(timeout=ASR_TIMEOUT) as client:
             resp = await client.post(
                 f"{ASR_API_BASE.rstrip('/').replace('/chat/completions', '')}/audio/transcriptions",
-                headers={"Authorization": f"Bearer {ASR_API_KEY}"},
+                headers=auth_headers(ASR_API_KEY),
                 files={"file": ("audio.wav", mono_bytes, "audio/wav")},
                 data={"model": ASR_MODEL},
             )
@@ -698,7 +690,7 @@ async def generate_title(text: str) -> str:
     copied from the text).  Returns empty string on failure so the caller can
     decide the fallback strategy.
     """
-    if not LLM_API_KEY:
+    if not LLM_READY:
         logger.info("[TITLE] LLM not configured — skipping title generation")
         return ""
 
@@ -722,10 +714,7 @@ async def generate_title(text: str) -> str:
         async with httpx.AsyncClient(timeout=LLM_TIMEOUT) as client:
             resp = await client.post(
                 f"{LLM_API_BASE.rstrip('/')}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {LLM_API_KEY}",
-                    "Content-Type": "application/json",
-                },
+                headers=auth_headers(LLM_API_KEY, json_body=True),
                 json={
                     "model": LLM_MODEL,
                     "messages": [

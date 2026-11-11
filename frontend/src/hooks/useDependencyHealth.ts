@@ -10,21 +10,45 @@ export function useDependencyHealth(intervalMs = 30000) {
   const [health, setHealth] = useState<DependencyHealth | null>(null);
   const [checking, setChecking] = useState(false);
   const inFlightRef = useRef(false);
+  const checkInFlightRef = useRef(false);
   const mountedRef = useRef(true);
+  // 请求序号：手动检测优先于普通读取，过期响应不覆盖新快照
+  const seqRef = useRef(0);
 
   const refresh = useCallback(async () => {
-    if (inFlightRef.current) return;
+    if (inFlightRef.current || checkInFlightRef.current) return;
     inFlightRef.current = true;
+    const seq = ++seqRef.current;
     setChecking(true);
     try {
       const next = await api.getDependencyHealth();
-      if (mountedRef.current) setHealth(next);
+      if (mountedRef.current && seq === seqRef.current) setHealth(next);
     } catch {
-      if (mountedRef.current) {
+      if (mountedRef.current && seq === seqRef.current) {
         setHealth((prev) => prev ?? { neo4j: false, qdrant: false });
       }
     } finally {
       inFlightRef.current = false;
+      if (mountedRef.current && !checkInFlightRef.current) setChecking(false);
+    }
+  }, []);
+
+  /** 手动触发一次后端检测（POST），返回最新快照；失败时抛出供调用方提示。 */
+  const check = useCallback(async () => {
+    checkInFlightRef.current = true;
+    const seq = ++seqRef.current;
+    setChecking(true);
+    try {
+      const next = await api.checkDependencyHealth();
+      if (mountedRef.current && seq === seqRef.current) setHealth(next);
+      return next;
+    } catch (e) {
+      if (mountedRef.current && seq === seqRef.current) {
+        setHealth((prev) => prev ?? { neo4j: false, qdrant: false });
+      }
+      throw e;
+    } finally {
+      checkInFlightRef.current = false;
       if (mountedRef.current) setChecking(false);
     }
   }, []);
@@ -42,5 +66,5 @@ export function useDependencyHealth(intervalMs = 30000) {
     };
   }, [refresh, intervalMs]);
 
-  return { health, checking, refresh };
+  return { health, checking, refresh, check };
 }

@@ -43,6 +43,8 @@ function formatUser(cn: string | null): string {
 
 // ─── Shared article detail view ─────────────────────
 
+type ArticleDetailTab = 'comments' | 'children';
+
 interface ArticleDetailViewProps {
   articleId: string;
   onBack: () => void;
@@ -106,7 +108,10 @@ export function ArticleDetailView({
   // Poll while background processing is running:
   // "processing" / "processing:file" = 读取中（文本提取）；"recognizing:file" = 解析中（LLM 识别）
   const procState = article?.processing ?? '';
-  const isProcessing = procState.startsWith('processing') || procState.startsWith('recognizing');
+  const isReembedding = procState.startsWith('reembedding');
+  const isProcessing = procState.startsWith('processing')
+    || procState.startsWith('recognizing')
+    || isReembedding;
   useEffect(() => {
     if (!article || !isProcessing) return;
     const timer = setInterval(async () => {
@@ -237,8 +242,8 @@ export function ArticleDetailView({
 
   // ── 评论/子文章 Tab（钩子必须在早退之前，避免钩子数量变化崩溃）──
   // 选择记录绑定文章 ID：换文章（上一篇/下一篇）时选择自动失效，新文章默认打开评论页
-  const [tabSelection, setTabSelection] = useState<{ articleId: string | null; tab: 'children' | 'comments' } | null>(null);
-  const effectiveTab = tabSelection?.articleId === articleId ? tabSelection.tab : 'comments';
+  const [tabSelection, setTabSelection] = useState<{ articleId: string | null; tab: ArticleDetailTab } | null>(null);
+  const effectiveTab: ArticleDetailTab = tabSelection?.articleId === articleId ? tabSelection.tab : 'comments';
 
   // 文章所属目录的祖先链（子目录嵌套场景，含自身，根→叶子）
   // 标题/子文章树高亮词：仅全局搜索 + 高级搜索关键词（文内搜索框保持独立）
@@ -268,10 +273,37 @@ export function ArticleDetailView({
     }
     return chain;
   }, [article?.category, categories]);
-  const selectTab = useCallback((tab: 'children' | 'comments') => {
+  const selectTab = useCallback((tab: ArticleDetailTab) => {
     setTabSelection({ articleId, tab });
   }, [articleId]);
   const [commentCount, setCommentCount] = useState(0);
+
+  // ── 向量分片统计：随文章/重新解析刷新；仅取计数，不传输分块正文 ──
+  const [chunkStats, setChunkStats] = useState<{
+    total: number;
+    embedded_count: number;
+    qdrant_available: boolean;
+  } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setChunkStats(null);
+    api.getArticleChunks(articleId, true)
+      .then((data) => {
+        if (!cancelled) {
+          setChunkStats({
+            total: data.total,
+            embedded_count: data.embedded_count,
+            qdrant_available: data.qdrant_available,
+          });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setChunkStats(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [articleId, articleVersion]);
 
   // 评论文本上报：评论页激活时参与实体出现位置统计；子文章页时清空
   // （隐藏的评论文本不参与计数，避免出现位置指向不可见的 DOM）
@@ -315,78 +347,89 @@ export function ArticleDetailView({
     }
   };
 
+  const handleReembed = () => {
+    if (!chunkStats || isProcessing) return;
+    requestConfirm(
+      '重新向量化',
+      chunkStats.total > 0
+        ? `将重新计算「${article.title}」的 ${chunkStats.total} 个分片向量并写入 Qdrant，是否继续？`
+        : `「${article.title}」暂无分片，将按当前正文重建分块并向量化，是否继续？`,
+      async () => {
+        try {
+          const updated = await api.reembedArticle(articleId);
+          setArticle(updated);  // processing=reembedding，触发既有轮询
+          showToast('已开始重新向量化，完成后统计自动刷新', 'success');
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : '重新向量化启动失败';
+          showToast(msg, 'error');
+        }
+      },
+      '开始向量化',
+      false,
+    );
+  };
+
   return (
     <div className={styles.detail}>
-      {/* 面包屑路径：全部 / 目录（含上级目录链）/ 文章 / 子文章 / … / 当前文章 */}
-      <nav className={styles.breadcrumb} aria-label="面包屑导航">
-        {/* 🏠：筛选时为基于搜索/标签结果的根目录（保留 ?search= / ?tag=），浏览时为根目录 */}
-        <Link
-          to={keepFilter('/articles')}
-          onClick={(e) => {
-            // 当前不在具体目录时目标 URL 与当前相同（内联详情无 view 参数），
-            // Link 导航不触发筛选变化，必须显式关闭详情。
-            if (onRootSelect && !detailSearchParams.get('category')) {
-              e.preventDefault();
-              onRootSelect();
-            }
-          }}
-        >🏠</Link>
-        {categoryChain.map((c) => (
-          <Fragment key={c.id}>
-            <Link
-              to={keepFilter(`/articles?category=${c.id}`)}
-              className={styles.crumbCategory}
-              style={{ '--crumb-cat': c.color } as CSSProperties}
-              title={`查看「${c.name}」目录下的所有文章`}
-              onClick={(e) => {
-                // 内联详情交给父级关闭详情并切换/确认目录；独立详情页保持 Link 导航。
-                // 尤其是点击「最后一级目录」时目标 URL 可能与当前完全相同，
-                // 普通 Link 不会触发任何状态变化，必须显式关闭内联详情。
-                if (onCategorySelect) {
-                  e.preventDefault();
-                  onCategorySelect(c.id);
-                }
-              }}
-            >
-              {c.name}
-            </Link>
-            <span className={styles.breadcrumbSep}>/</span>
-          </Fragment>
-        ))}
-        {article.ancestors.map((anc) => (
-          <Fragment key={anc.id}>
-            <Link to={keepFilter(`/articles?view=${anc.id}`)} title={anc.title}>{anc.title}</Link>
-            <span className={styles.breadcrumbSep}>/</span>
-          </Fragment>
-        ))}
-        <span className={styles.crumbCurrent} title={article.title}>{article.title}</span>
-      </nav>
+      {/* 顶部：面包屑 + 返回/上一篇/下一篇 并列 */}
+      <div className={styles.detailHeader}>
+        {/* 面包屑路径：全部 / 目录（含上级目录链）/ 文章 / 子文章 / … / 当前文章 */}
+        <nav className={styles.breadcrumb} aria-label="面包屑导航">
+          {/* 🏠：筛选时为基于搜索/标签结果的根目录（保留 ?search= / ?tag=），浏览时为根目录 */}
+          <Link
+            to={keepFilter('/articles')}
+            onClick={(e) => {
+              // 当前不在具体目录时目标 URL 与当前相同（内联详情无 view 参数），
+              // Link 导航不触发筛选变化，必须显式关闭详情。
+              if (onRootSelect && !detailSearchParams.get('category')) {
+                e.preventDefault();
+                onRootSelect();
+              }
+            }}
+          >🏠</Link>
+          {categoryChain.map((c) => (
+            <Fragment key={c.id}>
+              <Link
+                to={keepFilter(`/articles?category=${c.id}`)}
+                className={styles.crumbCategory}
+                style={{ '--crumb-cat': c.color } as CSSProperties}
+                title={`查看「${c.name}」目录下的所有文章`}
+                onClick={(e) => {
+                  // 内联详情交给父级关闭详情并切换/确认目录；独立详情页保持 Link 导航。
+                  // 尤其是点击「最后一级目录」时目标 URL 可能与当前完全相同，
+                  // 普通 Link 不会触发任何状态变化，必须显式关闭内联详情。
+                  if (onCategorySelect) {
+                    e.preventDefault();
+                    onCategorySelect(c.id);
+                  }
+                }}
+              >
+                {c.name}
+              </Link>
+              <span className={styles.breadcrumbSep}>/</span>
+            </Fragment>
+          ))}
+          {article.ancestors.map((anc) => (
+            <Fragment key={anc.id}>
+              <Link to={keepFilter(`/articles?view=${anc.id}`)} title={anc.title}>{anc.title}</Link>
+              <span className={styles.breadcrumbSep}>/</span>
+            </Fragment>
+          ))}
+          <span className={styles.crumbCurrent} title={article.title}>{article.title}</span>
+        </nav>
 
-      <div className={styles.topBar}>
-        <div className={styles.topBarLeft}>
-          {actionsInTopBar && (
-            <button
-              className={styles.backBtn}
-              onClick={() => {
-                // 智能返回：有父文章 → 父文章；否则 → 所在目录；无 onReturn 时退回列表
-                if (onReturn) onReturn(article.parent_id, article.category_id);
-                else onBack();
-              }}
-            >
-              ← 返回
-            </button>
-          )}
+        <div className={styles.headerNav}>
           {onNavigate && (
             <div className={styles.navGroup}>
               <button
-                className={styles.navBtn}
+                className={`${styles.navBtn} ${styles.fixedBtn}`}
                 disabled={!prevArticleId}
                 onClick={() => prevArticleId && onNavigate(prevArticleId)}
               >
                 ← 上一篇
               </button>
               <button
-                className={styles.navBtn}
+                className={`${styles.navBtn} ${styles.fixedBtn}`}
                 disabled={!nextArticleId}
                 onClick={() => nextArticleId && onNavigate(nextArticleId)}
               >
@@ -394,8 +437,23 @@ export function ArticleDetailView({
               </button>
             </div>
           )}
+          {actionsInTopBar && (
+            <button
+              className={`${styles.navBtn} ${styles.fixedBtn}`}
+              onClick={() => {
+                // 智能返回：有父文章 → 父文章；否则 → 所在目录；无 onReturn 时退回列表
+                if (onReturn) onReturn(article.parent_id, article.category_id);
+                else onBack();
+              }}
+            >
+              ↩ 返回
+            </button>
+          )}
         </div>
-        <div className={styles.topBarRight}>
+      </div>
+
+      <div className={styles.topBar}>
+        <div className={styles.searchArea}>
           <div className={styles.searchWrap}>
             <span className={styles.searchIcon}>🔍</span>
             <input
@@ -427,26 +485,26 @@ export function ArticleDetailView({
           {isSearchActive && !isSearchPending && searchCount === 0 && (
             <span className={styles.searchNoResults}>无匹配</span>
           )}
-          {isCreator && (
-            <div className={styles.actions}>
-              <button
-                className={styles.btn}
-                onClick={handleRecognize}
-                disabled={isProcessing}
-                title="对文章文本内容重新解析：提取标签/实体、重建检索索引"
-              >
-                🧠 重新解析
-              </button>
-              <button className={styles.btn} onClick={() => openEditor(article.id)}>✏️ 编辑</button>
-              <button className={styles.btn} onClick={handleDelete}>🗑 删除</button>
-            </div>
-          )}
         </div>
+        {isCreator && (
+          <div className={`${styles.actions} ${styles.topActions}`}>
+            <button
+              className={styles.btn}
+              onClick={handleRecognize}
+              disabled={isProcessing}
+              title="对文章文本内容重新解析：提取标签/实体、重建检索索引"
+            >
+              🧠 重新解析
+            </button>
+            <button className={styles.btn} onClick={() => openEditor(article.id)}>✏️ 编辑</button>
+            <button className={styles.btn} onClick={handleDelete}>🗑 删除</button>
+          </div>
+        )}
       </div>
 
       <h1 className={styles.title}>
         <HighlightText text={article.title} terms={highlightTerms} />
-        {isProcessing && (
+        {isProcessing && !isReembedding && (
           <span className={styles.processingBadge}>
             ⏳ {procState.startsWith('recognizing') ? '解析中…' : '读取中…'}
           </span>
@@ -463,6 +521,30 @@ export function ArticleDetailView({
         )}
         <span>🔖 {article.entities?.entities?.length ?? 0} 个实体</span>
         <span>🔗 {article.entities?.relations?.length ?? 0} 个关系</span>
+        <button
+          type="button"
+          className={styles.metaAction}
+          onClick={handleReembed}
+          disabled={isProcessing || !chunkStats || !chunkStats.qdrant_available}
+          title={isReembedding
+            ? '正在后台重新计算向量…'
+            : isProcessing
+              ? '文章正在处理中，请稍候'
+              : !chunkStats
+                ? '正在加载向量化状态…'
+                : !chunkStats.qdrant_available
+                  ? 'Qdrant 不可用，无法重新向量化'
+                  : `点击重新计算 ${chunkStats.total} 个分片的向量`}
+        >
+          {isReembedding
+            ? '⏳ 正在向量化…'
+            : `🧩 ${chunkStats ? chunkStats.total : '—'} 个分片`}
+        </button>
+        <span title={chunkStats && !chunkStats.qdrant_available
+          ? 'Qdrant 不可用，无法确认向量化状态'
+          : '已写入 Qdrant 向量的分片数'}>
+          ✅ {chunkStats?.qdrant_available ? chunkStats.embedded_count : '—'} 个已向量化
+        </span>
       </div>
 
       {article.tags.length > 0 && (

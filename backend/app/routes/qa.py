@@ -1,6 +1,5 @@
 import asyncio
 import html
-import json
 import logging
 import os
 import re
@@ -8,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, joinedload
 from app.dependencies import get_db
@@ -17,15 +16,15 @@ from app import vector_store
 from app import neo4j_store
 from app.neo4j_store import Neo4jStoreError
 from app.config import (
-    LLM_API_KEY, LLM_API_BASE, LLM_MODEL,
-    VISION_API_KEY, VISION_API_BASE, VISION_MODEL,
-    ASR_API_KEY, ASR_API_BASE, ASR_MODEL,
-    EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL,
+    LLM_API_KEY, LLM_API_BASE, LLM_MODEL, LLM_READY,
+    VISION_API_KEY, VISION_API_BASE, VISION_MODEL, VISION_READY,
+    ASR_API_KEY, ASR_API_BASE, ASR_MODEL, ASR_READY,
+    EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL, EMBEDDING_READY,
     QA_TEMPERATURE, QA_MIN_RELEVANCE, MAX_CHUNK_CHARS, CHUNK_OVERLAP,
     LLM_TIMEOUT, VISION_TIMEOUT, ASR_TIMEOUT, EMBEDDING_TIMEOUT, FFMPEG_TIMEOUT,
     UPLOAD_DIR as UPLOAD_DIR_STR,
 )
-from app.utils import find_ffmpeg, read_upload_limited
+from app.utils import auth_headers, find_ffmpeg, read_upload_limited
 from app.prompts import (
     QA_VIDEO_DESCRIPTION,
     QA_WITH_KB_INTRO,
@@ -173,16 +172,16 @@ async def get_embedding(text: str) -> list[float]:
     """Get embedding vector from the configured API (OpenAI-compatible /v1/embeddings)."""
     import httpx
 
+    if not EMBEDDING_READY:
+        raise RuntimeError("嵌入模型未配置（EMBEDDING_API_BASE / EMBEDDING_MODEL）")
+
     # Truncate to avoid exceeding model token limits
     text = text[:2000]
 
     async with httpx.AsyncClient(timeout=EMBEDDING_TIMEOUT) as client:
         resp = await client.post(
             f"{EMBEDDING_API_BASE.rstrip('/')}/embeddings",
-            headers={
-                "Authorization": f"Bearer {EMBEDDING_API_KEY}",
-                "Content-Type": "application/json",
-            },
+            headers=auth_headers(EMBEDDING_API_KEY, json_body=True),
             json={
                 "model": EMBEDDING_MODEL,
                 "input": text,
@@ -216,7 +215,7 @@ async def ensure_embeddings(db: Session, force: bool = False):
                 return  # All articles already embedded
 
         if not force:
-            from sqlalchemy import exists, select
+            from sqlalchemy import exists
             has_chunks = exists().where(ArticleChunk.article_id == Article.id)
             articles = db.query(Article).filter(~has_chunks).all()
         else:
@@ -532,6 +531,45 @@ def get_article_chunks(db: Session, article_id: str) -> list[ArticleChunk]:
     return rows
 
 
+async def reembed_article_chunks(
+    db: Session, article_id: str, content: str, concurrency: int = 4,
+) -> tuple[int, int]:
+    """重新计算文章分块向量并写入 Qdrant，返回 (总分片数, 成功计算数)。
+
+    - 已有分块直接重算（不重新切分，避免改变检索边界）
+    - 无分块但正文非空时先按当前正文重建分块
+    - 并发受限（默认 4）避免触发嵌入服务限流；单块失败仅跳过，
+      Qdrant 实际写入状态由调用方另行查询
+    """
+    rows = get_article_chunks(db, article_id)
+    if not rows and content.strip():
+        rows = await rebuild_article_chunks(db, article_id, content)
+    if not rows:
+        return 0, 0
+
+    sem = asyncio.Semaphore(max(1, concurrency))
+
+    async def embed_one(ch: ArticleChunk):
+        async with sem:
+            try:
+                vec = await get_embedding(ch.chunk_text)
+                return vector_store.make_point(
+                    ch.id, vec, ch.article_id, ch.chunk_index, ch.chunk_text,
+                )
+            except Exception:
+                logger.warning(
+                    "Re-embed failed for chunk %s of article %s",
+                    ch.chunk_index, ch.article_id, exc_info=True,
+                )
+                return None
+
+    results = await asyncio.gather(*(embed_one(ch) for ch in rows))
+    points = [p for p in results if p is not None]
+    if points:
+        await vector_store.upsert_chunks(points)
+    return len(rows), len(points)
+
+
 def get_comment_chunks(db: Session, comment_id: str) -> list[ArticleChunk]:
     """按序返回评论分块行（chunk_text 带 [评论] 前缀，喂给提取时需剥离）。"""
     rows = db.query(ArticleChunk).filter(
@@ -620,13 +658,13 @@ async def parse_audio_for_qa(content_bytes: bytes, filename: str) -> str:
             return f"[音频转换失败：{e}]"
 
     # ── Call ASR ──
-    if not ASR_API_KEY:
+    if not ASR_READY:
         return "[音频识别失败：未配置语音识别模型 API。]"
     try:
         async with httpx.AsyncClient(timeout=ASR_TIMEOUT) as client:
             resp = await client.post(
                 f"{ASR_API_BASE.rstrip('/').replace('/chat/completions', '')}/audio/transcriptions",
-                headers={"Authorization": f"Bearer {ASR_API_KEY}"},
+                headers=auth_headers(ASR_API_KEY),
                 files={"file": ("audio.wav", mono_bytes, "audio/wav")},
                 data={"model": ASR_MODEL},
             )
@@ -668,7 +706,7 @@ async def parse_video_for_qa(content_bytes: bytes, filename: str) -> str:
     import cv2
     import httpx
 
-    if not VISION_API_KEY:
+    if not VISION_READY:
         return "[视频识别失败：未配置视觉模型 API。]"
 
     ext = Path(filename).suffix
@@ -729,10 +767,7 @@ async def parse_video_for_qa(content_bytes: bytes, filename: str) -> str:
         async with httpx.AsyncClient(timeout=VISION_TIMEOUT) as client:
             resp = await client.post(
                 f"{VISION_API_BASE.rstrip('/')}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {VISION_API_KEY}",
-                    "Content-Type": "application/json",
-                },
+                headers=auth_headers(VISION_API_KEY, json_body=True),
                 json={
                     "model": VISION_MODEL,
                     "messages": [{"role": "user", "content": user_content}],
@@ -1028,7 +1063,9 @@ async def ask_question(body: QARequest, db: Session = Depends(get_db)):
 
     # 3. Try LLM if configured (even without KB context — use general knowledge)
     llm_failed = False
-    if LLM_API_KEY:
+    # 含图片的请求走视觉模型，其余走文本模型；API Key 可选
+    llm_ready = VISION_READY if any(fc.get("is_image") for fc in file_ctxs) else LLM_READY
+    if llm_ready:
         try:
             answer = await call_llm(question, body.history, relevant_chunks, entity_info_text, file_ctxs)
             return QAResponse(answer=answer, sources=sources)
@@ -1126,10 +1163,7 @@ async def call_llm(
     async with httpx.AsyncClient(timeout=LLM_TIMEOUT) as client:
         resp = await client.post(
             f"{api_base.rstrip('/')}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
+            headers=auth_headers(api_key, json_body=True),
             json=request_body,
         )
         resp.raise_for_status()
@@ -1293,7 +1327,7 @@ def build_fallback_answer(question: str, sources: list[QASource], entity_info: s
     if llm_failed:
         lines.append("\n---")
         lines.append("*提示：LLM 调用失败，以上是基于关键词匹配的备选结果。*")
-    elif not LLM_API_KEY:
+    elif not LLM_READY:
         lines.append("\n---")
-        lines.append("💡 *提示：配置 LLM API Key 后可获得智能回答。*")
+        lines.append("💡 *提示：配置 LLM 模型（Base/Model，API Key 可选）后可获得智能回答。*")
     return "\n".join(lines)
